@@ -38,6 +38,8 @@ const EXPORTS = [
   "needsWaivers", "sendDown", "recall", "processWaivers", "nhlGames",
   "askingPrice", "negotiate", "isProspect", "prospectReady", "simFarmDay",
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
+  "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
+  "pruneSave", "ZONE_KEYS",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -721,6 +723,83 @@ const CHECKS = {
     const grown = A.playersOf(G4).filter((p) => p.farm && p.age <= 23 && p.farmCareer);
     ok(grown.length > 0, "farm seasons are archived at the rollover");
     ok(A.playersOf(G4).some((p) => A.prospectReady(G4, p)), "some prospects are ready for a call-up");
+  },
+
+  // The record book, the break, the play-by-play, and franchise history.
+  atmosphere(A) {
+    section("Records, All-Star break and play-by-play");
+    const G = A.newGame(0, { seed: 191, rules: { seasonLen: 41 } });
+
+    const breakDay = G.allStarDay;
+    ok(breakDay > 0 && breakDay < G.schedule.length, `the calendar reserves a break (day ${breakDay})`);
+    ok([breakDay - 1, breakDay, breakDay + 1].every((d) => !G.schedule[d] || G.schedule[d].length === 0),
+      "no games are scheduled across the break");
+
+    simSeason(A, G);
+    ok(G.allStar && G.allStar.year === G.year, "the All-Star game was played");
+    ok(G.allStar.east.length === 10 && G.allStar.west.length === 10,
+      `each side names ten (${G.allStar.east.length}/${G.allStar.west.length})`);
+    ok(G.allStar.east.every((id) => G.teams[G.players[id].teamId].conf === 0)
+      && G.allStar.west.every((id) => G.teams[G.players[id].teamId].conf === 1),
+      "players are on the right side");
+    ok(G.allStar.east.filter((id) => G.players[id].pos === "G").length === 1, "each side takes a goalie");
+    ok(G.allStar.mvp != null, "an All-Star MVP was named");
+
+    ok(G.records && G.records.goals && G.records.points, "the record book was written");
+    const topG = A.playersOf(G).filter((p) => p.pos !== "G")
+      .sort((a, b) => b.season.g - a.season.g)[0];
+    ok(G.records.goals.v === topG.season.g, "the goals record matches the league leader");
+
+    ok(G.lastGame && G.lastGame.events, "the user's last game kept a play-by-play");
+    const kinds = new Set(G.lastGame.events.map((e) => e.kind));
+    ok(G.lastGame.events.length > 0, `it has events (${G.lastGame.events.length})`);
+    ok([...kinds].every((k) => ["goal", "save", "penalty", "fight", "shootout"].includes(k)),
+      `and only known event kinds (${[...kinds].join(", ")})`);
+    const evGoals = G.lastGame.events.filter((e) => e.kind === "goal").length;
+    const boxGoals = G.lastGame.hg + G.lastGame.ag - (G.lastGame.so ? 1 : 0);
+    ok(evGoals === boxGoals, `every goal in the game is in the log (${evGoals} vs ${boxGoals})`);
+    const sorted = G.lastGame.events.every((e, i, a) => i === 0 || a[i - 1].t <= e.t);
+    ok(sorted, "the log runs in clock order");
+    ok(A.playersOf(G).some((p) => p.marks && Object.keys(p.marks).length),
+      "season milestones fired for the user's players");
+
+    simPlayoffs(A, G);
+    ok(G.teams.every((t) => t.seasons && t.seasons.length === 1), "every club archived its season");
+    const champ = G.teams[G.history[0].champion];
+    ok(champ.seasons[0].cup === true, "the champion's season is marked as a Cup year");
+    ok(G.teams.filter((t) => t.seasons[0].playoffs).length === 16, "sixteen clubs are recorded as making it");
+  },
+
+  // Many seasons in a row: the save must stay bounded and the league legal.
+  longevity(A) {
+    section("Eight-season soak");
+    const G = A.newGame(0, { seed: 201, rules: { seasonLen: 41 } });
+    const sizes = [];
+    for (let s = 0; s < 8; s++) {
+      simSeason(A, G); simPlayoffs(A, G);
+      A.autoDraft(G, false);
+      A.startNextSeason(G);
+      sizes.push(JSON.stringify(G).length / 1048576);
+    }
+    ok(G.year === 2034, `eight seasons elapsed (through ${G.year})`);
+    ok(G.teams.every((t) => t.seasons.length === 8), "every club has eight seasons of history");
+    ok(G.teams.every((t) => A.rosterOf(G, t.id).length >= 20), "every club can still dress a roster");
+    ok(G.teams.every((t) => A.rosterOf(G, t.id).filter((p) => p.pos === "G").length >= 2),
+      "and still has two goaltenders");
+    ok(G.teams.every((t) => A.capHit(G, t.id) <= A.rules(G).capAmount + 0.5),
+      "nobody drifted over the cap",
+      G.teams.filter((t) => A.capHit(G, t.id) > A.rules(G).capAmount + 0.5).map((t) => `${t.abbr} ${A.capHit(G, t.id)}`).join(" "));
+
+    const growth = sizes[7] - sizes[3];
+    ok(sizes[7] < 3, `the save stays under the storage ceiling (${sizes[7].toFixed(2)} MB after eight)`);
+    ok(growth < sizes[3], `pruning holds growth down (${sizes[3].toFixed(2)} → ${sizes[7].toFixed(2)} MB)`);
+    const honoured = G.teams.reduce((s, t) => s + (t.honours || []).length, 0);
+    ok(honoured > 0, `clubs honoured their long servers (${honoured})`);
+    const records = A.RECORD_DEFS.every((d) => G.records[d.key]);
+    ok(records, "every record has a holder");
+    // And it still plays.
+    simSeason(A, G);
+    ok(G.teams.every((t) => t.gp === 41), "the ninth season plays to completion");
   },
 
   // A save has to round-trip, because that's the whole persistence story.

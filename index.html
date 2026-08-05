@@ -373,17 +373,21 @@ function buildSchedule(G) {
   let days = Math.max(len + 1, Math.round(len * CAL_DAYS_PER_ROUND));
   const cal = Array.from({ length: days }, () => []);
   const busy = Array.from({ length: days }, () => new Set());
+  // Three nights off in midwinter for the All-Star break — a real gap in the
+  // calendar rather than a cosmetic label.
+  const breakStart = Math.floor(days * 0.55);
+  const onBreak = new Set([breakStart, breakStart + 1, breakStart + 2]);
   const place = (fx, idx) => {
     // Spread by position in the whole fixture list, not by round. Anchoring on
     // the round would drop all sixteen of a round's games on one night, which is
     // exactly the every-club-plays-every-day calendar this replaced.
     const target = Math.min(days - 1, Math.floor((idx * days) / fixtures.length));
     for (let d = target; d < days; d++) {
-      if (busy[d].has(fx.home) || busy[d].has(fx.away)) continue;
+      if (onBreak.has(d) || busy[d].has(fx.home) || busy[d].has(fx.away)) continue;
       cal[d].push(fx); busy[d].add(fx.home); busy[d].add(fx.away); return true;
     }
     for (let d = 0; d < target; d++) {
-      if (busy[d].has(fx.home) || busy[d].has(fx.away)) continue;
+      if (onBreak.has(d) || busy[d].has(fx.home) || busy[d].has(fx.away)) continue;
       cal[d].push(fx); busy[d].add(fx.home); busy[d].add(fx.away); return true;
     }
     return false;
@@ -396,6 +400,7 @@ function buildSchedule(G) {
 
   G.schedule = cal;
   G.day = 0;
+  G.allStarDay = breakStart + 1;
   G.lastPlayed = new Array(n).fill(-9);
   return cal;
 }
@@ -630,6 +635,7 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     gBox.players[gid].z[zone.key].sa++;
     if (rnd(G) > saveP) {
       sBox.players[shooter.id].z[zone.key].g++;
+      if (ctx.events) ctx.events.push({ t: rnd(G) * 60, kind: "goal", team: sBox.teamId, pid: shooter.id, zone: zone.key, strength });
       sBox.g++; sBox.players[shooter.id].g++;
       gBox.players[gid].ga++; gBox.ga = (gBox.ga || 0) + 1;
       if (strength === "pp") { sBox.ppg++; sBox.players[shooter.id].ppg++; }
@@ -644,6 +650,9 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     } else {
       gBox.players[gid].sv++;
       gBox.players[gid].z[zone.key].sv++;
+      // Only the dangerous ones are worth narrating.
+      if (ctx.events && zone.key === "rush" && rnd(G) < 0.28)
+        ctx.events.push({ t: rnd(G) * 60, kind: "save", team: gBox.teamId, pid: gid, shooter: shooter.id, zone: zone.key });
     }
   }
 }
@@ -703,6 +712,10 @@ function simGame(G, homeId, awayId, opts) {
   const home = emptyBox(G, homeId), away = emptyBox(G, awayId);
   const hG = pickStarter(G, hl, opts.homeRest), aG = pickStarter(G, al, opts.awayRest);
   home.goalie = hG; away.goalie = aG;
+  // Events are only recorded when somebody is going to watch. The engine works
+  // in aggregate per matchup, so each event gets a clock time and the whole log
+  // is sorted at the end — the ordering is invented, the events are not.
+  const ev = opts.events ? [] : null;
 
   const sides = [
     { box: home, opp: away, lines: hl, gid: hG, oppGid: aG, oppLines: al, isHome: true },
@@ -727,6 +740,7 @@ function simGame(G, homeId, awayId, opts) {
       const hWon = rnd(G) < clamp(0.5 + (hf.r.phy - af.r.phy) * 0.01, 0.15, 0.85);
       momentum[hWon ? homeId : awayId] = 1.07;
       home.fight = { home: hf.id, away: af.id, winner: hWon ? hf.id : af.id };
+      if (ev) ev.push({ t: rnd(G) * 60, kind: "fight", team: hWon ? homeId : awayId, pid: hWon ? hf.id : af.id, other: hWon ? af.id : hf.id });
     }
   }
 
@@ -758,7 +772,7 @@ function simGame(G, homeId, awayId, opts) {
         const rate = (28 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId];
         const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)) * 0.9)));
         resolveShots(G,
-          { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp },
+          { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev },
           shots, unit, pair.concat(oppF), side.oppGid, "es");
         fLine.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m / 3; });
         pair.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m / 6; });
@@ -775,19 +789,20 @@ function simGame(G, homeId, awayId, opts) {
     for (let i = 0; i < drawn && skaters.length; i++) {
       const off = skaters[Math.floor(rnd(G) * skaters.length)];
       if (side.opp.players[off.id]) side.opp.players[off.id].pim += 2;
+      if (ev) ev.push({ t: rnd(G) * 60, kind: "penalty", team: side.opp.teamId, pid: off.id });
     }
     const unit = side.lines.PP[0].length ? side.lines.PP[0] : side.lines.F[0];
     const pkUnit = side.oppLines.PK[0].length ? side.oppLines.PK[0] : side.oppLines.D[0];
     const m = drawn * PP_MIN_PER;
     const rate = (52 / 60) * (lineOff(G, unit) / unitDef(G, pkUnit, side.oppLines.D[0]));
     const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)))));
-    resolveShots(G, { off: 1, ppOff: 1, sBox: side.box, gBox: side.opp, oppBox: side.opp },
+    resolveShots(G, { off: 1, ppOff: 1, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev },
       shots, unit, pkUnit, side.oppGid, "pp");
     unit.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m; });
     pkUnit.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m; });
     // Shorthanded chances are rare but real.
     if (rnd(G) < 0.16 * drawn) {
-      resolveShots(G, { off: 1, ppOff: 1, sBox: side.opp, gBox: side.box, oppBox: side.box },
+      resolveShots(G, { off: 1, ppOff: 1, sBox: side.opp, gBox: side.box, oppBox: side.box, events: ev },
         1, pkUnit, unit, side.gid, "sh");
     }
   });
@@ -828,7 +843,7 @@ function simGame(G, homeId, awayId, opts) {
     const roll = rnd(G);
     if (roll < 0.17) {
       const unit = tLines.PP[0].length ? tLines.PP[0] : tLines.F[0];
-      resolveShots(G, { sBox: trailing, gBox: leading, oppBox: leading },
+      resolveShots(G, { sBox: trailing, gBox: leading, oppBox: leading, events: ev },
         1, unit, [], leading.goalie, "en6");
     } else if (roll < 0.45) {
       const sc = shooterFrom(G, lLines.F[0], 0.3);
@@ -839,6 +854,7 @@ function simGame(G, homeId, awayId, opts) {
         helpers.forEach((id) => { if (leading.players[id]) leading.players[id].a++; });
         leading.scorers.push({ id: sc.id, a: helpers, strength: "en" });
         leading.eng = (leading.eng || 0) + 1;
+        if (ev) ev.push({ t: 58 + rnd(G) * 2, kind: "goal", team: leading.teamId, pid: sc.id, zone: "empty", strength: "en" });
       }
     }
   }
@@ -860,10 +876,14 @@ function simGame(G, homeId, awayId, opts) {
       if (decided) {
         const lines = homeWins ? hl : al;
         let guard = 0;
+        const otEv = ev ? [] : null;
         while (winner.g <= loser.g && guard++ < 60) {
-          resolveShots(G, { off: 1, ppOff: 1, sBox: winner, gBox: loser, oppBox: loser },
+          resolveShots(G, { off: 1, ppOff: 1, sBox: winner, gBox: loser, oppBox: loser, events: otEv },
             1, lines.F[0], [], homeWins ? aG : hG, "es");
         }
+        // Whatever it took to end it, only the winner is on the clock in OT.
+        if (ev && otEv) otEv.filter((e) => e.kind === "goal").slice(-1)
+          .forEach((e) => ev.push({ ...e, t: 60 + rnd(G) * 5, ot: true }));
       }
       if (winner.g <= loser.g) {
         // The shootout is the one goal nobody is credited with, exactly as in
@@ -878,9 +898,11 @@ function simGame(G, homeId, awayId, opts) {
   // Goalie minutes and the decision.
   if (home.players[hG]) home.players[hG].toi += 60;
   if (away.players[aG]) away.players[aG].toi += 60;
+  if (ev && so) ev.push({ t: 65, kind: "shootout", team: home.g > away.g ? homeId : awayId });
   const res = {
     home: homeId, away: awayId, hg: home.g, ag: away.g, ot, so,
     boxes: { [homeId]: home, [awayId]: away },
+    events: ev ? ev.sort((a, b) => a.t - b.t) : null,
   };
   return res;
 }
@@ -989,17 +1011,24 @@ function simDay(G) {
   const playedToday = new Set();
   day.forEach((fx) => {
     if (fx.played) return;
+    const mine = fx.home === G.userTeam || fx.away === G.userTeam;
     const res = simGame(G, fx.home, fx.away, {
-      homeRest: restFor(G, fx.home), awayRest: restFor(G, fx.away),
+      homeRest: restFor(G, fx.home), awayRest: restFor(G, fx.away), events: mine,
     });
     applyGame(G, res);
     fx.played = true; fx.hg = res.hg; fx.ag = res.ag; fx.ot = res.ot; fx.so = res.so;
     playedToday.add(fx.home); playedToday.add(fx.away);
+    // Only the latest of the user's games is kept — a full season of play-by-play
+    // would dwarf everything else in the save.
+    if (mine) G.lastGame = { day: G.day, home: fx.home, away: fx.away, hg: res.hg, ag: res.ag,
+      ot: res.ot, so: res.so, events: res.events || [], boxes: res.boxes };
   });
   playedToday.forEach((tid) => { G.lastPlayed[tid] = G.day; });
   processWaivers(G);
   playedToday.forEach((tid) => simFarmDay(G, tid));
+  checkMilestones(G);
   if (G.day === deadlineDay(G)) { aiDeadlineMoves(G); news(G, "The trade deadline has passed.", "info"); }
+  if (G.day === G.allStarDay && !G.allStar) runAllStar(G);
 
   // Recovery. Injuries are quoted in GAMES, so they only tick down for clubs
   // that actually played — an injury doesn't heal on an off day. Fatigue does.
@@ -1144,6 +1173,7 @@ function simPlayoffRound(G) {
 
 function endRegularSeason(G) {
   G.phase = "playoffs";
+  updateRecords(G);
   computeAwards(G);
   buildBracket(G);
   const field = new Set();
@@ -1152,6 +1182,89 @@ function endRegularSeason(G) {
   if (!field.has(G.userTeam)) news(G, "You missed the playoffs.", "bad");
   else news(G, "You're in the playoffs.", "good");
   return G;
+}
+
+/* ------------------------------ record book -------------------------------
+ * League records survive across seasons, and a player closing on one is worth
+ * a line on the wire while it's still in doubt.
+ * ------------------------------------------------------------------------- */
+
+const RECORD_DEFS = [
+  { key: "goals",   label: "Goals in a season",   pos: "S", get: (s) => s.g },
+  { key: "points",  label: "Points in a season",  pos: "S", get: (s) => pts(s) },
+  { key: "assists", label: "Assists in a season", pos: "S", get: (s) => s.a },
+  { key: "pim",     label: "Penalty minutes",     pos: "S", get: (s) => s.pim },
+  { key: "wins",    label: "Wins by a goalie",    pos: "G", get: (s) => s.w },
+  { key: "shutouts", label: "Shutouts",           pos: "G", get: (s) => s.so },
+];
+const MILESTONES = { goals: [40, 50, 60], points: [80, 100, 120] };
+
+function updateRecords(G) {
+  G.records = G.records || {};
+  RECORD_DEFS.forEach((def) => {
+    playersOf(G).forEach((p) => {
+      const isG = p.pos === "G";
+      if ((def.pos === "G") !== isG) return;
+      if (!p.season.gp) return;
+      const v = def.get(p.season);
+      const cur = G.records[def.key];
+      if (!cur || v > cur.v) G.records[def.key] = { v, pid: p.id, name: fullName(p), year: G.year, team: p.teamId };
+    });
+  });
+  return G.records;
+}
+// Fires while the season is still running, for the user's players only. The
+// marks are quoted for an 82-game year and scaled to whatever's being played,
+// so a 41-game season still has a fifty-goal equivalent worth chasing.
+function checkMilestones(G) {
+  const scale = ruleValue(G, "seasonLen") / 82;
+  rosterOf(G, G.userTeam).forEach((p) => {
+    if (p.pos === "G") return;
+    p.marks = p.marks || {};
+    Object.entries(MILESTONES).forEach(([k, marks]) => {
+      const v = k === "goals" ? p.season.g : pts(p.season);
+      marks.forEach((m) => {
+        const tag = `${k}${m}`;
+        const target = Math.max(5, Math.round(m * scale));
+        if (v >= target && !p.marks[tag]) {
+          p.marks[tag] = true;
+          news(G, `${fullName(p)} reached ${target} ${k} on the season.`, "good");
+        }
+      });
+    });
+  });
+}
+
+/* ------------------------------ the All-Star break ------------------------ */
+
+function allStarRosters(G) {
+  const pickSide = (conf) => {
+    const pool = playersOf(G).filter((p) => p.teamId != null && G.teams[p.teamId].conf === conf && p.season.gp > 5);
+    const fwd = pool.filter((p) => p.pos !== "D" && p.pos !== "G").sort((a, b) => pts(b.season) - pts(a.season)).slice(0, 6);
+    const d = pool.filter((p) => p.pos === "D").sort((a, b) => pts(b.season) - pts(a.season)).slice(0, 3);
+    const g = pool.filter((p) => p.pos === "G").sort((a, b) => svPct(b.season) - svPct(a.season)).slice(0, 1);
+    return fwd.concat(d, g).map((p) => p.id);
+  };
+  return { east: pickSide(0), west: pickSide(1) };
+}
+function runAllStar(G) {
+  const rosters = allStarRosters(G);
+  const rate = (ids) => ids.map((id) => G.players[id]).filter(Boolean)
+    .reduce((s, p) => s + (p.pos === "G" ? 0 : p.r.sht + p.r.hnd), 0);
+  const e = rate(rosters.east), w = rate(rosters.west);
+  const eastScore = Math.round(6 + gauss(G, (e - w) / 400, 2.2));
+  const westScore = Math.round(6 + gauss(G, (w - e) / 400, 2.2));
+  const mvpPool = (eastScore >= westScore ? rosters.east : rosters.west).map((id) => G.players[id]).filter(Boolean);
+  const mvp = mvpPool.sort((a, b) => pts(b.season) - pts(a.season))[0];
+  G.allStar = {
+    year: G.year, day: G.day, ...rosters,
+    east: rosters.east, west: rosters.west,
+    eastScore: Math.max(0, eastScore), westScore: Math.max(0, westScore),
+    mvp: mvp ? mvp.id : null,
+  };
+  const mine = rosters.east.concat(rosters.west).filter((id) => G.players[id] && G.players[id].teamId === G.userTeam);
+  if (mine.length) news(G, `All-Star selections: ${mine.map((id) => fullName(G.players[id])).join(", ")}.`, "good");
+  return G.allStar;
 }
 
 /* --------------------------------- awards --------------------------------- */
@@ -1221,6 +1334,22 @@ function finishSeason(G) {
     if (p.retired || p.teamId == null) return;
     if (rnd(G) < retirementChance(G, p)) {
       if (p.teamId === G.userTeam) news(G, `${fullName(p)} retires at ${p.age}.`, "info");
+      // A long server who was genuinely good gets his number hung up by the club
+      // he gave the most seasons to.
+      const byClub = {};
+      (p.career || []).forEach((c) => { if (c.teamId != null) byClub[c.teamId] = (byClub[c.teamId] || 0) + 1; });
+      const home = Object.keys(byClub).sort((a, b) => byClub[b] - byClub[a])[0];
+      const careerPts = (p.career || []).reduce((s, c) => s + (c.g || 0) + (c.a || 0), 0);
+      const careerGp = (p.career || []).reduce((s, c) => s + (c.gp || 0), 0);
+      // A rate, not a total — otherwise a short-season league never honours
+      // anybody and an 82-game one honours half the roster.
+      const ppg = careerGp ? careerPts / careerGp : 0;
+      if (home != null && byClub[home] >= 4 && (ppg >= 0.65 || p.trophies.length >= 1)) {
+        const t = G.teams[+home];
+        t.honours = t.honours || [];
+        t.honours.push({ pid: p.id, name: fullName(p), pos: p.pos, seasons: byClub[home], pts: careerPts, year: G.year });
+        news(G, `${G.teams[+home].name} will honour ${fullName(p)} after ${byClub[home]} seasons.`, "good");
+      }
       p.teamId = null; p.retired = true;
       const i = G.freeAgents.indexOf(p.id); if (i >= 0) G.freeAgents.splice(i, 1);
       return;
@@ -1231,6 +1360,20 @@ function finishSeason(G) {
     }
   });
   G.teams.forEach((t) => { t.lines = null; });
+
+  // Every club keeps its own season-by-season record, which is what a franchise
+  // history page is made of.
+  const champ2 = G.playoffs && G.playoffs.champion;
+  const madeIt = (id) => G.playoffs && G.playoffs.rounds[0].some((s) => s.hi === id || s.lo === id);
+  const roundsWon = (id) => (G.playoffs ? G.playoffs.rounds.filter((rd) => rd.some((s) => s.winner === id)).length : 0);
+  G.teams.forEach((t) => {
+    t.seasons = t.seasons || [];
+    t.seasons.push({
+      year: G.year, w: t.w, l: t.l, otl: t.otl, pts: t.pts, gf: t.gf, ga: t.ga,
+      playoffs: madeIt(t.id), rounds: roundsWon(t.id), cup: champ2 === t.id,
+    });
+    t.honours = t.honours || [];
+  });
 
   // Retained salary burns down with the contract it came from; waivers and
   // waived no-trade clauses don't carry over.
@@ -1710,8 +1853,12 @@ function startNextSeason(G) {
   G.results = [];
   G.playoffs = null;
   G.awards = null;
+  G.allStar = null;
+  G.lastGame = null;
   G.phase = "regular";
   G.offseasonStep = null;
+  playersOf(G).forEach((p) => { p.marks = null; });
+  pruneSave(G);
   seedPicks(G, G.year + 2, 1);
   G.picks = G.picks.filter((pk) => pk.year >= G.year);
   buildSchedule(G);
@@ -1719,35 +1866,118 @@ function startNextSeason(G) {
   return G;
 }
 
-/* -------------------------------- persistence ----------------------------- */
+/* -------------------------------- persistence -----------------------------
+ * A save grows by roughly a tenth of a megabyte a season, so a long career would
+ * eventually walk into the storage ceiling. Retired players keep a career total
+ * rather than a row per season, and nobody who has left the league entirely is
+ * carried forever.
+ * ------------------------------------------------------------------------- */
 
+function pruneSave(G) {
+  const keep = [];
+  playersOf(G).forEach((p) => {
+    if (!p.retired) return;
+    // Collapse a retired player's season-by-season line into one total.
+    if (p.career && p.career.length > 1) {
+      const tot = p.career.reduce((acc, c) => {
+        Object.keys(c).forEach((k) => {
+          if (k === "year" || k === "teamId" || k === "z") return;
+          acc[k] = (acc[k] || 0) + (c[k] || 0);
+        });
+        return acc;
+      }, { year: p.career[0].year, to: p.career[p.career.length - 1].year, teamId: p.career[0].teamId, total: true });
+      p.career = [tot];
+    }
+    // Blank rather than null: plenty of code walks every player and reads these.
+    p.season = blankStats(p.pos); p.stats = blankStats(p.pos);
+    p.po = null; p.farmSeason = null; p.farmCareer = null; p.marks = null;
+    // Anyone with no trophies and no honours is not history, just clutter.
+    const honoured = G.teams.some((t) => (t.honours || []).some((h) => h.pid === p.id));
+    if (!honoured && !(p.trophies || []).length) keep.push(p.id);
+  });
+  // Keep the most recent departures around so history pages can still name them.
+  keep.slice(0, Math.max(0, keep.length - 250)).forEach((id) => { delete G.players[id]; });
+  if (G.results.length > 900) G.results.splice(0, G.results.length - 900);
+  if (G.news.length > 80) G.news.length = 80;
+  return G;
+}
+
+/* -------------------------------- storage --------------------------------- */
+
+/* Saves live in IndexedDB, which has room to spare; localStorage is the fallback
+   when IndexedDB isn't there or refuses. Slot metadata always goes to
+   localStorage so the splash screen can list careers synchronously. */
 const SAVE_PREFIX = "pgmh:";
-function saveKey(slot) { return `${SAVE_PREFIX}slot${slot}`; }
+const DB_NAME = "pgmh", DB_STORE = "saves";
+const saveKey = (slot) => `${SAVE_PREFIX}slot${slot}`;
+const metaKey = (slot) => `${SAVE_PREFIX}meta${slot}`;
+
+let _db = null, _dbDead = false;
+function openDb() {
+  return new Promise((res, rej) => {
+    if (_db) return res(_db);
+    if (_dbDead || typeof indexedDB === "undefined") return rej(new Error("no indexeddb"));
+    let req;
+    try { req = indexedDB.open(DB_NAME, 1); } catch (e) { _dbDead = true; return rej(e); }
+    req.onupgradeneeded = () => { try { req.result.createObjectStore(DB_STORE); } catch (e) {} };
+    req.onsuccess = () => { _db = req.result; res(_db); };
+    req.onerror = () => { _dbDead = true; rej(req.error); };
+  });
+}
+function idbPut(key, val) {
+  return openDb().then((db) => new Promise((res, rej) => {
+    const tx = db.transaction(DB_STORE, "readwrite");
+    tx.objectStore(DB_STORE).put(val, key);
+    tx.oncomplete = () => res(true);
+    tx.onerror = () => rej(tx.error);
+  }));
+}
+function idbGet(key) {
+  return openDb().then((db) => new Promise((res, rej) => {
+    const tx = db.transaction(DB_STORE, "readonly");
+    const r = tx.objectStore(DB_STORE).get(key);
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  }));
+}
+function idbDel(key) {
+  return openDb().then((db) => new Promise((res) => {
+    const tx = db.transaction(DB_STORE, "readwrite");
+    tx.objectStore(DB_STORE).delete(key);
+    tx.oncomplete = () => res(true);
+    tx.onerror = () => res(false);
+  }));
+}
+
 function saveGame(G, slot) {
+  const t = G.teams[G.userTeam];
   try {
-    const json = JSON.stringify(G);
-    localStorage.setItem(saveKey(slot), json);
-    localStorage.setItem(`${SAVE_PREFIX}meta${slot}`, JSON.stringify({
-      team: G.teams[G.userTeam].name, city: G.teams[G.userTeam].city,
-      year: G.year, phase: G.phase, cups: G.teams[G.userTeam].cupWins,
-      record: `${G.teams[G.userTeam].w}-${G.teams[G.userTeam].l}-${G.teams[G.userTeam].otl}`,
-      at: Date.now(),
+    localStorage.setItem(metaKey(slot), JSON.stringify({
+      team: t.name, city: t.city, year: G.year, phase: G.phase, cups: t.cupWins,
+      record: `${t.w}-${t.l}-${t.otl}`, at: Date.now(),
     }));
-    return true;
-  } catch (e) { return false; }
+  } catch (e) {}
+  let json;
+  try { json = JSON.stringify(G); } catch (e) { return false; }
+  idbPut(saveKey(slot), json).catch(() => {
+    try { localStorage.setItem(saveKey(slot), json); } catch (e) {}
+  });
+  return true;
 }
 function loadGame(slot) {
-  try {
-    const raw = localStorage.getItem(saveKey(slot));
-    return raw ? migrate(JSON.parse(raw)) : null;
-  } catch (e) { return null; }
+  return idbGet(saveKey(slot))
+    .catch(() => null)
+    .then((v) => v || localStorage.getItem(saveKey(slot)))
+    .then((raw) => (raw ? migrate(JSON.parse(raw)) : null))
+    .catch(() => null);
 }
 function slotMeta(slot) {
-  try { const m = localStorage.getItem(`${SAVE_PREFIX}meta${slot}`); return m ? JSON.parse(m) : null; }
+  try { const m = localStorage.getItem(metaKey(slot)); return m ? JSON.parse(m) : null; }
   catch (e) { return null; }
 }
 function deleteSlot(slot) {
-  try { localStorage.removeItem(saveKey(slot)); localStorage.removeItem(`${SAVE_PREFIX}meta${slot}`); } catch (e) {}
+  try { localStorage.removeItem(saveKey(slot)); localStorage.removeItem(metaKey(slot)); } catch (e) {}
+  idbDel(saveKey(slot)).catch(() => {});
 }
 
 /* ============================== THE INTERFACE ============================== */
@@ -2491,7 +2721,10 @@ function App() {
   useEffect(() => { if (G) saveGame(G, slot); }, [G, slot]);
 
   const start = (opts) => {
-    if (opts.load != null) { const g = loadGame(opts.load); if (g) { setSlot(opts.load); setG(g); } return; }
+    if (opts.load != null) {
+      Promise.resolve(loadGame(opts.load)).then((g) => { if (g) { setSlot(opts.load); setG(g); } });
+      return;
+    }
     const g = newGame(opts.team, { difficulty: opts.difficulty, rules: opts.rules });
     const free = [0, 1, 2].find((s) => !slotMeta(s));
     setSlot(free != null ? free : 0);
