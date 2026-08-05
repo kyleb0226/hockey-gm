@@ -197,6 +197,21 @@ jobs:
               `git checkout -- .` and leave the tree untouched. A skipped day is
               fine. A broken main is not.
 
+      # The action swallows the underlying error and only reports is_error, which
+      # is useless at 8am when nobody is watching. This puts the real message in
+      # the run log.
+      - name: Show Claude's execution log on failure
+        if: failure()
+        run: |
+          f="${RUNNER_TEMP}/claude-execution-output.json"
+          if [[ -f "$f" ]]; then
+            echo "── claude-execution-output.json ──"
+            cat "$f"
+          else
+            echo "no execution log at $f"
+            ls -la "${RUNNER_TEMP}" || true
+          fi
+
       # ── The gate ──────────────────────────────────────────────────────────
       - name: Verify and commit
         env:
