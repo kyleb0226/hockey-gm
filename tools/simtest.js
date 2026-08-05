@@ -33,6 +33,11 @@ const EXPORTS = [
   "pts", "svPct", "gaa", "ovrOf", "TEAMS", "DIVS", "CONFS", "ROSTER_MAX", "POS",
   "DIFFICULTIES", "LINE_TOI",
   "pickStarter", "runShootout", "restFor", "SHOT_ZONES", "fillRosters",
+  "deadlineDay", "tradesOpen", "daysToDeadline", "aiDeadlineMoves",
+  "hasNtc", "eligibleForNtc", "requestNtcWaiver",
+  "needsWaivers", "sendDown", "recall", "processWaivers", "nhlGames",
+  "askingPrice", "negotiate", "isProspect", "prospectReady", "simFarmDay",
+  "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -204,11 +209,18 @@ const CHECKS = {
     // accounted for.
     const soWins = new Array(32).fill(0);
     G.results.forEach((r) => { if (r.so) soWins[r.hg > r.ag ? r.home : r.away]++; });
+    // Per team, count the goals as they were actually scored — a player traded
+    // at the deadline takes his season totals with him, so his current club is
+    // not who he scored them for.
     const byTeam = new Array(32).fill(0);
-    A.playersOf(G).forEach((p) => { if (p.teamId != null && p.pos !== "G") byTeam[p.teamId] += p.season.g; });
+    G.results.forEach((r) => r.scorers.forEach((s) => { byTeam[s.t]++; }));
     const mismatch = G.teams.filter((t) => byTeam[t.id] + soWins[t.id] !== t.gf);
-    ok(mismatch.length === 0, "player goals + shootout winners reconcile with team goals",
-      mismatch.length ? `${mismatch[0].abbr}: skaters ${byTeam[mismatch[0].id]} + ${soWins[mismatch[0].id]} SO vs team ${mismatch[0].gf}` : "");
+    ok(mismatch.length === 0, "goals as scored + shootout winners reconcile with team goals",
+      mismatch.length ? `${mismatch[0].abbr}: scored ${byTeam[mismatch[0].id]} + ${soWins[mismatch[0].id]} SO vs team ${mismatch[0].gf}` : "");
+    // And league-wide, every skater goal is accounted for.
+    const skaterGoals = A.playersOf(G).filter((p) => p.pos !== "G").reduce((s, p) => s + p.season.g, 0);
+    const scoredGoals = G.results.reduce((s, r) => s + r.scorers.length, 0);
+    ok(skaterGoals === scoredGoals, `every skater goal has a scoring record (${skaterGoals} vs ${scoredGoals})`);
 
     // Goalie shots faced should track the shots the other side actually took,
     // less the ones fired into an empty net.
@@ -228,8 +240,10 @@ const CHECKS = {
     const ghosts = A.playersOf(G).filter((p) => p.season.gp > 0 && p.season.toi <= 0);
     ok(ghosts.length === 0, "no player is credited with a game they never played",
       ghosts.length ? `${ghosts.length} players` : "");
-    const overplayed = A.playersOf(G).filter((p) => p.season.gp > 41);
-    ok(overplayed.length === 0, "nobody played more games than the schedule allows",
+    // A player traded mid-season can exceed his club's game count — that's real
+    // — but not by much, and never by a whole extra season.
+    const overplayed = A.playersOf(G).filter((p) => p.season.gp > 41 + 10);
+    ok(overplayed.length === 0, "nobody plays a wildly impossible number of games",
       overplayed.length ? `${overplayed[0].ln} ${overplayed[0].season.gp}` : "");
 
     const leader = A.playersOf(G).filter((p) => p.pos !== "G")
@@ -532,6 +546,46 @@ const CHECKS = {
     ok(soScorers.length > 0, `shootout scorers are tracked separately (${soScorers.length})`);
   },
 
+  // The per-zone shot breakdown has to add back up to the totals, from both
+  // sides of the puck.
+  zones(A) {
+    section("Shot breakdown by zone");
+    const G = A.newGame(0, { seed: 161, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const Z = ["rush", "cycle", "point"];
+    const skaters = A.playersOf(G).filter((p) => p.pos !== "G" && p.season.sog > 0);
+    const badS = skaters.filter((p) => {
+      const zs = Z.reduce((s, k) => s + p.season.z[k].s, 0);
+      return zs + (p.season.eng || 0) !== p.season.sog;
+    });
+    ok(badS.length === 0, "a skater's zone shots plus empty-netters equal his shots on goal",
+      badS.length ? `${badS[0].ln}: ${Z.map((k) => badS[0].season.z[k].s).join("+")} vs ${badS[0].season.sog}` : "");
+    const badSg = skaters.filter((p) => Z.reduce((s, k) => s + p.season.z[k].g, 0) + (p.season.eng || 0) !== p.season.g);
+    ok(badSg.length === 0, "and his zone goals equal his goals");
+
+    const goalies = A.playersOf(G).filter((p) => p.pos === "G" && p.season.sa > 0);
+    const badG = goalies.filter((p) => Z.reduce((s, k) => s + p.season.z[k].sa, 0) !== p.season.sa);
+    ok(badG.length === 0, "a goalie's zone shots faced equal his shots against");
+    const badGv = goalies.filter((p) => Z.reduce((s, k) => s + p.season.z[k].sv, 0) !== p.season.sv);
+    ok(badGv.length === 0, "and his zone saves equal his saves");
+
+    // Both sides must agree on what the league's zone mix looks like.
+    const sSum = Z.map((k) => skaters.reduce((s, p) => s + p.season.z[k].s, 0));
+    const gSum = Z.map((k) => goalies.reduce((s, p) => s + p.season.z[k].sa, 0));
+    ok(Z.every((_, i) => sSum[i] === gSum[i]),
+      `shooters and goalies agree zone by zone (${sSum.join("/")})`);
+    const total = sSum.reduce((a, b) => a + b, 0);
+    ok(sSum.every((n) => n / total > 0.1), `every zone gets real volume (${sSum.map((n) => (n / total * 100).toFixed(0) + "%").join(" ")})`);
+    // And the danger ordering has to hold: rush beats cycle beats point.
+    const pct = Z.map((k) => {
+      const s = skaters.reduce((a, p) => a + p.season.z[k].s, 0);
+      const g = skaters.reduce((a, p) => a + p.season.z[k].g, 0);
+      return g / s;
+    });
+    ok(pct[0] > pct[1] && pct[1] > pct[2],
+      `rush > cycle > point on conversion (${pct.map((x) => (x * 100).toFixed(1)).join(" / ")}%)`);
+  },
+
   // Shot zones and fighting: flavour that has to show up in the numbers.
   flavour(A) {
     section("Shot quality and fighting");
@@ -559,6 +613,114 @@ const CHECKS = {
     simSeason(A, G2);
     ok(A.playersOf(G2).reduce((s, p) => s + (p.season.fights || 0), 0) === 0,
       "the fighting knob turns them off");
+  },
+
+  // Retained salary: the seller keeps paying, and it has to show on both books.
+  retention(A) {
+    section("Retained salary");
+    const G = A.newGame(0, { seed: 171 });
+    const star = A.rosterOf(G, 5).sort((a, b) => b.contract.amt - a.contract.amt)[0];
+    star.ntc = false;
+    const beforeSeller = A.capHit(G, 5), beforeBuyer = A.capHit(G, 6);
+    const half = Math.round(star.contract.amt * 0.5 * 10) / 10;
+    A.doTrade(G, 5, [star.id], [], 6, [], [], { retain: { [star.id]: 0.5 } });
+    ok(G.players[star.id].teamId === 6, "the player moved");
+    ok(A.retainedBy(G, 5).length === 1, "the seller carries a retained contract");
+    ok(A.effectiveCap(G, G.players[star.id]) === Math.round((star.contract.amt - half) * 10) / 10,
+      `the buyer only pays the balance ($${A.effectiveCap(G, G.players[star.id])}M of $${star.contract.amt}M)`);
+    const sellerNow = A.capHit(G, 5), buyerNow = A.capHit(G, 6);
+    ok(Math.abs(sellerNow - (beforeSeller - star.contract.amt + half)) < 0.15,
+      `the seller still pays its half (${beforeSeller} → ${sellerNow})`);
+    ok(Math.abs(buyerNow - (beforeBuyer + star.contract.amt - half)) < 0.15,
+      `the buyer takes on the rest (${beforeBuyer} → ${buyerNow})`);
+
+    // Only so many at once.
+    let banked = 1, blocked = false;
+    for (const p of A.rosterOf(G, 5).sort((a, b) => b.contract.amt - a.contract.amt).slice(0, 5)) {
+      p.ntc = false;
+      const ev = A.evalTrade(G, 5, [p.id], [], 7, [], [], { retain: { [p.id]: 0.5 } });
+      if (/can only retain/.test(ev.why || "")) { blocked = true; break; }
+      if (A.doTrade(G, 5, [p.id], [], 7, [], [], { retain: { [p.id]: 0.5 } }).ok) banked++;
+    }
+    ok(blocked || banked <= A.MAX_RETAINED, `a club can't retain more than ${A.MAX_RETAINED} contracts (${banked})`);
+
+    // The knob turns it off entirely.
+    const G2 = A.newGame(0, { seed: 172, rules: { retainedSalary: false } });
+    const s2 = A.rosterOf(G2, 5).sort((a, b) => b.contract.amt - a.contract.amt)[0];
+    s2.ntc = false;
+    A.doTrade(G2, 5, [s2.id], [], 6, [], [], { retain: { [s2.id]: 0.5 } });
+    ok(A.retainedBy(G2, 5).length === 0, "with the knob off, nothing is retained");
+  },
+
+  // No-trade clauses, waivers, negotiation, the deadline.
+  gmDepth(A) {
+    section("No-trade clauses, waivers and negotiation");
+    const G = A.newGame(0, { seed: 181, rules: { seasonLen: 41 } });
+
+    const locked = A.playersOf(G).filter((p) => A.hasNtc(p));
+    ok(locked.length > 0, `stars negotiate no-trade clauses (${locked.length} in the league)`);
+    ok(locked.every((p) => p.ovr >= 76 && p.age >= 26), "only established players get one");
+    const mine = locked.find((p) => p.teamId != null);
+    const ev = A.evalTrade(G, mine.teamId, [mine.id], [], (mine.teamId + 1) % 32, [], []);
+    ok(!ev.ok && /no-trade/.test(ev.why), `a clause blocks the trade (${ev.why})`);
+    let waived = false;
+    for (let i = 0; i < 40 && !waived; i++) waived = A.requestNtcWaiver(G, mine.id).ok;
+    ok(waived, "a clause can eventually be waived");
+    const ev2 = A.evalTrade(G, mine.teamId, [mine.id], [], (mine.teamId + 1) % 32, [], []);
+    ok(!/no-trade/.test(ev2.why || ""), "and then the trade is allowed to be judged on its merits");
+
+    section("Waivers");
+    const kid = A.rosterOf(G, 0).find((p) => p.age < 22);
+    if (kid) {
+      const r = A.sendDown(G, kid.id);
+      ok(r.ok && !r.waivers, "a young player goes down without waivers");
+    } else ok(true, "no waiver-exempt youngster on this roster to test");
+    const vet = A.rosterOf(G, 0).find((p) => p.age >= 24 && !p.farm);
+    vet.career = [{ gp: 200 }];
+    ok(A.needsWaivers(G, vet), "an established player needs waivers");
+    const r2 = A.sendDown(G, vet.id);
+    ok(r2.ok && r2.waivers, "sending him down puts him on waivers instead");
+    ok(vet.farm === false, "and he stays on the roster until they clear");
+    G.day++;
+    A.processWaivers(G);
+    ok(vet.farm === true || vet.teamId !== 0, "after a day he either clears or is claimed");
+    ok(G.waivers.length === 0, "the wire is emptied once processed");
+
+    section("Contract negotiation");
+    const fa = G.freeAgents.map((id) => G.players[id]).sort((a, b) => b.ovr - a.ovr)[0];
+    const want = A.askingPrice(G, fa.id, 0, 3);
+    ok(want > 0, `a free agent has a number ($${want}M × 3)`);
+    ok(A.negotiate(G, fa.id, 0, want, 3).ok, "meeting it gets a signature");
+    const low = A.negotiate(G, fa.id, 0, want * 0.9, 3);
+    ok(!low.ok && low.counter, `a near miss gets a counter ($${low.counter}M)`);
+    ok(!A.negotiate(G, fa.id, 0, want * 0.4, 3).ok, "a lowball gets nothing");
+    const short = A.askingPrice(G, fa.id, 0, 1), long = A.askingPrice(G, fa.id, 0, 5);
+    ok(short > long, `a one-year deal costs more per year than a five ($${short}M vs $${long}M)`);
+
+    section("Trade deadline");
+    const G3 = A.newGame(0, { seed: 182, rules: { seasonLen: 41 } });
+    ok(A.tradesOpen(G3), "trades are open early in the season");
+    const dl = A.deadlineDay(G3);
+    ok(dl > 0 && dl < G3.schedule.length, `the deadline lands inside the season (day ${dl} of ${G3.schedule.length})`);
+    const picksBefore = JSON.stringify(G3.picks);
+    let guard = 0;
+    while (G3.phase === "regular" && G3.day <= dl && guard++ < 400) A.simDay(G3);
+    ok(!A.tradesOpen(G3), "and they shut once it passes");
+    const after = A.evalTrade(G3, 0, [A.rosterOf(G3, 0)[0].id], [], 1, [], []);
+    ok(!after.ok && /deadline/.test(after.why), `a post-deadline trade is refused (${after.why})`);
+    ok(JSON.stringify(G3.picks) !== picksBefore, "the AI actually made deadline moves");
+
+    section("Prospects");
+    const G4 = A.newGame(0, { seed: 183, rules: { seasonLen: 41 } });
+    let g2 = 0; while (G4.phase === "regular" && g2++ < 400) A.simDay(G4);
+    const farmed = A.playersOf(G4).filter((p) => p.farm && p.farmSeason && p.farmSeason.gp > 0);
+    ok(farmed.length > 0, `farm players played a season (${farmed.length})`);
+    ok(farmed.some((p) => p.farmSeason.g > 0), "and produced");
+    const youngFarm = A.playersOf(G4).filter((p) => p.farm && p.age <= 22).map((p) => p.ovr);
+    let g3 = 0; while (G4.phase === "playoffs" && g3++ < 12) A.simPlayoffRound(G4);
+    const grown = A.playersOf(G4).filter((p) => p.farm && p.age <= 23 && p.farmCareer);
+    ok(grown.length > 0, "farm seasons are archived at the rollover");
+    ok(A.playersOf(G4).some((p) => A.prospectReady(G4, p)), "some prospects are ready for a call-up");
   },
 
   // A save has to round-trip, because that's the whole persistence story.

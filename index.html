@@ -195,11 +195,29 @@ function genPlayer(G, pos, tier, age) {
   return p;
 }
 
+/* Where a player's shots come from, and how many of them go in. Skaters record
+   shots/goals per zone, goalies record shots faced/saved — the same three
+   buckets from both sides of the puck. */
+const ZONE_KEYS = ["rush", "cycle", "point"];
+function blankZones(pos) {
+  const z = {};
+  ZONE_KEYS.forEach((k) => { z[k] = pos === "G" ? { sa: 0, sv: 0 } : { s: 0, g: 0 }; });
+  return z;
+}
 function blankStats(pos) {
   return pos === "G"
-    ? { gp:0, w:0, l:0, otl:0, sa:0, sv:0, ga:0, so:0, toi:0, sow:0, sol:0, sosa:0, sosv:0, starts:0 }
+    ? { gp:0, w:0, l:0, otl:0, sa:0, sv:0, ga:0, so:0, toi:0, sow:0, sol:0, sosa:0, sosv:0, starts:0,
+        z: blankZones("G") }
     : { gp:0, g:0, a:0, pim:0, sog:0, hit:0, blk:0, toi:0, pm:0, fow:0, fol:0, ppg:0, shg:0, gwg:0,
-        eng:0, fights:0, sog_att:0, sos:0, soa:0 };
+        eng:0, fights:0, sos:0, soa:0, z: blankZones("S") };
+}
+function addZones(dest, src) {
+  if (!src) return;
+  if (!dest.z) dest.z = blankZones(dest.sa != null ? "G" : "S");
+  ZONE_KEYS.forEach((k) => {
+    if (!src[k]) return;
+    Object.keys(src[k]).forEach((f) => { dest.z[k][f] = (dest.z[k][f] || 0) + src[k][f]; });
+  });
 }
 const pts = (s) => (s.g || 0) + (s.a || 0);
 const svPct = (s) => (s.sa ? s.sv / s.sa : 0);
@@ -218,8 +236,21 @@ function marketValue(G, p) {
   if (p.age > 32) v *= Math.max(0.45, 1 - (p.age - 32) * 0.11);
   return round1(clamp(v, MIN_SALARY, rules(G).capAmount * MAX_SALARY_PCT));
 }
+/* Retained salary. A club can keep part of a contract it trades away, which is
+   what lets a cap-strapped buyer take on a star — and it stays on the seller's
+   books for the full remaining term, which is the cost. */
+const MAX_RETAINED = 3;
+const RETAIN_MAX_PCT = 0.5;
+const retainedBy = (G, teamId) => (G.retained || []).filter((r) => r.from === teamId);
+const retainedOn = (G, pid) => (G.retained || []).filter((r) => r.pid === pid);
+// What a player actually costs the club that rosters him.
+function effectiveCap(G, p) {
+  return Math.max(0, round1(p.contract.amt - retainedOn(G, p.id).reduce((s, r) => s + r.amt, 0)));
+}
 function capHit(G, teamId) {
-  return round1(rosterOf(G, teamId, true).reduce((s, p) => s + p.contract.amt, 0));
+  const roster = rosterOf(G, teamId, true).reduce((s, p) => s + effectiveCap(G, p), 0);
+  const dead = retainedBy(G, teamId).reduce((s, r) => s + r.amt, 0);
+  return round1(roster + dead);
 }
 function capSpace(G, teamId) { return round1(rules(G).capAmount - capHit(G, teamId)); }
 function capFloor(G) { return round1(rules(G).capAmount * CAP_FLOOR_PCT); }
@@ -403,6 +434,9 @@ function newGame(userTeam, opts) {
     awards: null,
     boardConfidence: 62,
     news: [],
+    retained: [],
+    waivers: [],
+    records: null,
   };
 
   G.teams = TEAMS.map((t, i) => ({
@@ -442,6 +476,7 @@ function newGame(userTeam, opts) {
         yrs: p.age < 23 ? ri(G, 1, 3) : ri(G, 1, 5),
       };
       if (p.farm) p.contract.amt = MIN_SALARY;
+      p.ntc = eligibleForNtc(p) && p.contract.yrs >= 3 && rnd(G) < 0.55;
     });
     let guard = 0;
     while (capHit(G, t.id) > rules(G).capAmount && guard++ < 60) {
@@ -485,12 +520,16 @@ function migrate(G) {
   if (!G.draftClass) G.draftClass = [];
   if (G.boardConfidence == null) G.boardConfidence = 62;
   if (!G.lastPlayed) G.lastPlayed = new Array((G.teams || []).length || TEAMS.length).fill(-9);
+  if (!G.retained) G.retained = [];
+  if (!G.waivers) G.waivers = [];
   playersOf(G).forEach((p) => {
     if (!p.stats) p.stats = blankStats(p.pos);
     if (!p.season) p.season = blankStats(p.pos);
     if (!p.career) p.career = [];
     if (!p.trophies) p.trophies = [];
     if (p.fatigue == null) p.fatigue = 0;
+    const kind = p.pos === "G" ? "G" : "S";
+    [p.stats, p.season].concat(p.career || []).forEach((s) => { if (s && !s.z) s.z = blankZones(kind); });
     p.ovr = ovrOf(p);
   });
   G.teams.forEach((t) => { if (!t.l10) t.l10 = []; });
@@ -514,9 +553,9 @@ function emptyBox(G, teamId) {
   // players who actually take ice time are credited in applyGame.
   rosterOf(G, teamId, true).forEach((p) => {
     box.players[p.id] = p.pos === "G"
-      ? { sa: 0, sv: 0, ga: 0, toi: 0, sosa: 0, sosv: 0, starts: 0 }
+      ? { sa: 0, sv: 0, ga: 0, toi: 0, sosa: 0, sosv: 0, starts: 0, z: blankZones("G") }
       : { g: 0, a: 0, sog: 0, pim: 0, hit: 0, blk: 0, toi: 0, pm: 0, fow: 0, fol: 0, ppg: 0, shg: 0,
-          eng: 0, fights: 0, sos: 0, soa: 0 };
+          eng: 0, fights: 0, sos: 0, soa: 0, z: blankZones("S") };
   });
   return box;
 }
@@ -587,7 +626,10 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     const saveP = clamp(base + zone.save - quality, 0.845, 0.975);
     sBox.sog++; sBox.players[shooter.id].sog++;
     gBox.players[gid].sa++;
+    sBox.players[shooter.id].z[zone.key].s++;
+    gBox.players[gid].z[zone.key].sa++;
     if (rnd(G) > saveP) {
+      sBox.players[shooter.id].z[zone.key].g++;
       sBox.g++; sBox.players[shooter.id].g++;
       gBox.players[gid].ga++; gBox.ga = (gBox.ga || 0) + 1;
       if (strength === "pp") { sBox.ppg++; sBox.players[shooter.id].ppg++; }
@@ -601,6 +643,7 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
       }
     } else {
       gBox.players[gid].sv++;
+      gBox.players[gid].z[zone.key].sv++;
     }
   }
 }
@@ -891,6 +934,7 @@ function applyGame(G, res, opts) {
         dest.eng += s.eng || 0; dest.fights += s.fights || 0;
         dest.sos += s.sos || 0; dest.soa += s.soa || 0;
       }
+      addZones(dest, s.z);
       // A goalie's night costs far more than a skater's shift — that's what
       // eventually forces the backup into the net.
       p.fatigue = clamp(p.fatigue + (p.pos === "G" ? 14 : s.toi / 60 * 3 - 1.5), 0, 100);
@@ -953,6 +997,9 @@ function simDay(G) {
     playedToday.add(fx.home); playedToday.add(fx.away);
   });
   playedToday.forEach((tid) => { G.lastPlayed[tid] = G.day; });
+  processWaivers(G);
+  playedToday.forEach((tid) => simFarmDay(G, tid));
+  if (G.day === deadlineDay(G)) { aiDeadlineMoves(G); news(G, "The trade deadline has passed.", "info"); }
 
   // Recovery. Injuries are quoted in GAMES, so they only tick down for clubs
   // that actually played — an injury doesn't heal on an off day. Fatigue does.
@@ -1185,6 +1232,18 @@ function finishSeason(G) {
   });
   G.teams.forEach((t) => { t.lines = null; });
 
+  // Retained salary burns down with the contract it came from; waivers and
+  // waived no-trade clauses don't carry over.
+  G.retained = (G.retained || []).map((r) => ({ ...r, yrs: r.yrs - 1 })).filter((r) => r.yrs > 0);
+  G.waivers = [];
+  playersOf(G).forEach((p) => {
+    p.ntcWaived = false;
+    if (p.farmSeason) {
+      p.farmCareer = (p.farmCareer || []).concat([{ year: G.year, ...p.farmSeason }]);
+      p.farmSeason = null;
+    }
+  });
+
   buildDraftClass(G);
   return G;
 }
@@ -1305,6 +1364,8 @@ function signPlayer(G, pid, teamId, amt, yrs) {
   if (rosterOf(G, teamId, true).length >= ROSTER_MAX + FARM_MAX) return { ok: false, why: "roster full" };
   p.teamId = teamId; p.farm = rosterOf(G, teamId).length >= ROSTER_MAX;
   p.contract = { amt: round1(amt), yrs };
+  p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
+  p.ntcWaived = false;
   const i = G.freeAgents.indexOf(pid);
   if (i >= 0) G.freeAgents.splice(i, 1);
   G.teams[teamId].lines = null;
@@ -1328,9 +1389,10 @@ function aiFreeAgency(G) {
       });
       const best = cands.sort((a, b) => b.ovr - a.ovr)[0];
       if (!best) continue;
-      const ask = round1(marketValue(G, best) * (0.95 + rnd(G) * 0.2));
+      const yrs = ri(G, 1, 5);
+      const ask = askingPrice(G, best.id, tid, yrs);
       if (rules(G).hardCap && capHit(G, tid) + ask > rules(G).capAmount) continue;
-      signPlayer(G, best.id, tid, ask, ri(G, 1, 5));
+      signPlayer(G, best.id, tid, ask, yrs);
       signedAny = true;
     }
     if (!signedAny) break;
@@ -1356,15 +1418,67 @@ function pickValue(G, pk) {
   const yearsOut = pk.year - G.year;
   return base * Math.pow(0.88, Math.max(0, yearsOut));
 }
-function evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks) {
+/* The deadline. Trades run from the offseason through roughly three quarters of
+   the schedule, then the rosters are locked for the run-in and the playoffs. */
+function deadlineDay(G) { return Math.floor(G.schedule.length * 0.74); }
+function tradesOpen(G) {
+  if (G.phase === "playoffs") return false;
+  if (G.phase !== "regular") return true;
+  return G.day <= deadlineDay(G);
+}
+function daysToDeadline(G) {
+  return G.phase === "regular" ? deadlineDay(G) - G.day : null;
+}
+
+/* A no-trade clause is the price of signing a star in his prime. It can be
+   waived, but only if the player has a reason to want out. */
+function eligibleForNtc(p) { return p.ovr >= 76 && p.age >= 26; }
+function hasNtc(p) { return !!p.ntc && !p.ntcWaived; }
+function requestNtcWaiver(G, pid) {
+  const p = G.players[pid];
+  if (!p || !p.ntc) return { ok: false, why: "no clause to waive" };
+  if (p.ntcWaived) return { ok: true, why: "already waived" };
+  const t = G.teams[p.teamId];
+  // A player on a sinking club, or one who's been here a while, is likelier to
+  // accept a move. A contender in first place is not somewhere you leave.
+  const pos = standings(G).findIndex((x) => x.id === t.id);
+  let chance = 0.18 + (pos / G.teams.length) * 0.5 + Math.max(0, p.age - 31) * 0.04;
+  if (p.contract.yrs <= 1) chance += 0.18;
+  chance = clamp(chance, 0.05, 0.9);
+  if (rnd(G) < chance) {
+    p.ntcWaived = true;
+    news(G, `${fullName(p)} has agreed to waive his no-trade clause.`, "info");
+    return { ok: true, why: "he'll go" };
+  }
+  return { ok: false, why: "he won't waive it" };
+}
+
+function evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts) {
+  opts = opts || {};
   const R = rules(G);
   const aOut = aPlayers.map((id) => G.players[id]);
   const bOut = bPlayers.map((id) => G.players[id]);
   if (aOut.some((p) => !p || p.teamId !== aId) || bOut.some((p) => !p || p.teamId !== bId))
     return { ok: false, why: "a player isn't on that roster" };
+  if (!tradesOpen(G)) return { ok: false, why: G.phase === "playoffs" ? "the roster is frozen for the playoffs" : "the trade deadline has passed" };
+  const locked = aOut.concat(bOut).find((p) => hasNtc(p));
+  if (locked) return { ok: false, why: `${fullName(locked)} has a no-trade clause` };
 
-  const aSalOut = aOut.reduce((s, p) => s + p.contract.amt, 0);
-  const bSalOut = bOut.reduce((s, p) => s + p.contract.amt, 0);
+  // Retained salary: the sending club keeps a share of an outgoing contract.
+  const retain = opts.retain || {};
+  const retainAmt = (p, from) => {
+    const pct = clamp(retain[p.id] || 0, 0, R.retainedSalary ? RETAIN_MAX_PCT : 0);
+    return round1(p.contract.amt * pct);
+  };
+  const aRetain = aOut.reduce((s, p) => s + retainAmt(p, aId), 0);
+  const bRetain = bOut.reduce((s, p) => s + retainAmt(p, bId), 0);
+  if (aRetain > 0 && retainedBy(G, aId).length + aOut.filter((p) => retain[p.id]).length > MAX_RETAINED)
+    return { ok: false, why: `${G.teams[aId].abbr} can only retain ${MAX_RETAINED} contracts` };
+  if (bRetain > 0 && retainedBy(G, bId).length + bOut.filter((p) => retain[p.id]).length > MAX_RETAINED)
+    return { ok: false, why: `${G.teams[bId].abbr} can only retain ${MAX_RETAINED} contracts` };
+
+  const aSalOut = aOut.reduce((s, p) => s + effectiveCap(G, p), 0) - aRetain;
+  const bSalOut = bOut.reduce((s, p) => s + effectiveCap(G, p), 0) - bRetain;
   if (R.hardCap) {
     if (capHit(G, aId) - aSalOut + bSalOut > R.capAmount) return { ok: false, why: `${G.teams[aId].abbr} would be over the cap` };
     if (capHit(G, bId) - bSalOut + aSalOut > R.capAmount) return { ok: false, why: `${G.teams[bId].abbr} would be over the cap` };
@@ -1373,23 +1487,187 @@ function evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks) {
   const bSize = rosterOf(G, bId, true).length - bOut.length + aOut.length;
   if (aSize > ROSTER_MAX + FARM_MAX || bSize > ROSTER_MAX + FARM_MAX) return { ok: false, why: "roster limit" };
 
-  const aVal = aOut.reduce((s, p) => s + tradeValue(G, p), 0) + aPicks.reduce((s, pk) => s + pickValue(G, pk), 0);
-  const bVal = bOut.reduce((s, p) => s + tradeValue(G, p), 0) + bPicks.reduce((s, pk) => s + pickValue(G, pk), 0);
+  // Salary a club keeps is salary it paid for nothing, so retaining sweetens
+  // the deal for the side receiving the player.
+  const aVal = aOut.reduce((s, p) => s + tradeValue(G, p), 0) + aPicks.reduce((s, pk) => s + pickValue(G, pk), 0) + aRetain * 0.5;
+  const bVal = bOut.reduce((s, p) => s + tradeValue(G, p), 0) + bPicks.reduce((s, pk) => s + pickValue(G, pk), 0) + bRetain * 0.5;
   // The AI wants a margin, and wants more of one on Cutthroat.
   const margin = aId === G.userTeam ? diff(G).askPrice : 1;
   const accepted = aVal >= bVal * margin * 0.97;
-  return { ok: accepted, aVal: round1(aVal), bVal: round1(bVal), why: accepted ? "accepted" : "they want more back" };
+  return { ok: accepted, aVal: round1(aVal), bVal: round1(bVal), aRetain, bRetain,
+    why: accepted ? "accepted" : "they want more back" };
 }
-function doTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks) {
-  const ev = evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks);
+function doTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts) {
+  opts = opts || {};
+  const ev = evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts);
   if (!ev.ok) return ev;
-  aPlayers.forEach((id) => { G.players[id].teamId = bId; G.players[id].farm = false; });
-  bPlayers.forEach((id) => { G.players[id].teamId = aId; G.players[id].farm = false; });
+  const retain = opts.retain || {};
+  G.retained = G.retained || [];
+  const bank = (p, from) => {
+    const pct = clamp(retain[p.id] || 0, 0, rules(G).retainedSalary ? RETAIN_MAX_PCT : 0);
+    if (pct <= 0) return;
+    G.retained.push({ pid: p.id, from, amt: round1(p.contract.amt * pct), yrs: p.contract.yrs });
+  };
+  aPlayers.forEach((id) => { bank(G.players[id], aId); G.players[id].teamId = bId; G.players[id].farm = false; });
+  bPlayers.forEach((id) => { bank(G.players[id], bId); G.players[id].teamId = aId; G.players[id].farm = false; });
   aPicks.forEach((pk) => { const r = G.picks.find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig); if (r) r.owner = bId; });
   bPicks.forEach((pk) => { const r = G.picks.find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig); if (r) r.owner = aId; });
   G.teams[aId].lines = null; G.teams[bId].lines = null;
   news(G, `Trade with ${G.teams[bId].name}: out ${aPlayers.length} / in ${bPlayers.length}.`, "info");
   return ev;
+}
+
+/* ---------------------------------- waivers -------------------------------
+ * A young player can be shuttled to the farm freely. Once he's established, he
+ * has to clear waivers first — and a rival with room can simply take him.
+ * ------------------------------------------------------------------------- */
+
+const WAIVER_EXEMPT_GAMES = 40;
+function nhlGames(p) {
+  return (p.season.gp || 0) + (p.career || []).reduce((s, c) => s + (c.gp || 0), 0);
+}
+function needsWaivers(G, p) {
+  return !p.farm && p.age >= 22 && nhlGames(p) >= WAIVER_EXEMPT_GAMES;
+}
+function sendDown(G, pid) {
+  const p = G.players[pid];
+  if (!p || p.teamId == null) return { ok: false, why: "not on your roster" };
+  if (p.farm) return { ok: false, why: "already on the farm" };
+  if (!needsWaivers(G, p)) {
+    p.farm = true;
+    G.teams[p.teamId].lines = null;
+    return { ok: true, waivers: false };
+  }
+  G.waivers = G.waivers || [];
+  if (G.waivers.some((w) => w.pid === pid)) return { ok: false, why: "already on waivers" };
+  G.waivers.push({ pid, from: p.teamId, day: G.day, year: G.year });
+  return { ok: true, waivers: true };
+}
+function recall(G, pid) {
+  const p = G.players[pid];
+  if (!p || !p.farm) return { ok: false, why: "not on the farm" };
+  if (rosterOf(G, p.teamId).length >= ROSTER_MAX) return { ok: false, why: "NHL roster is full" };
+  p.farm = false;
+  G.teams[p.teamId].lines = null;
+  return { ok: true };
+}
+// Anyone placed before today gets picked over, worst club first.
+function processWaivers(G) {
+  if (!G.waivers || !G.waivers.length) return G;
+  const ready = G.waivers.filter((w) => w.day < G.day);
+  G.waivers = G.waivers.filter((w) => w.day >= G.day);
+  ready.forEach((w) => {
+    const p = G.players[w.pid];
+    if (!p || p.teamId !== w.from) return;
+    const order = G.teams.filter((t) => t.id !== w.from)
+      .sort((a, b) => a.pts - b.pts || a.gf - b.gf);
+    for (const t of order) {
+      if (rosterOf(G, t.id).length >= ROSTER_MAX) continue;
+      if (rules(G).hardCap && capHit(G, t.id) + effectiveCap(G, p) > rules(G).capAmount) continue;
+      // A club claims when the player would genuinely improve it.
+      const worst = rosterOf(G, t.id).filter((x) => x.pos === p.pos).sort((a, b) => a.ovr - b.ovr)[0];
+      if (!worst || p.ovr <= worst.ovr + 2) continue;
+      if (rnd(G) > 0.55) continue;
+      p.teamId = t.id; p.farm = false;
+      G.teams[w.from].lines = null; G.teams[t.id].lines = null;
+      if (w.from === G.userTeam) news(G, `${fullName(p)} was claimed on waivers by ${G.teams[t.id].name}.`, "bad");
+      if (t.id === G.userTeam) news(G, `Claimed ${fullName(p)} on waivers.`, "good");
+      return;
+    }
+    // Cleared.
+    p.farm = true;
+    G.teams[w.from].lines = null;
+    if (w.from === G.userTeam) news(G, `${fullName(p)} cleared waivers and reported to the farm.`, "info");
+  });
+  return G;
+}
+
+/* ------------------------------- negotiation ------------------------------
+ * A free agent has a number in mind. Term moves it, the club's situation moves
+ * it, and lowballing gets you a counter rather than a signature.
+ * ------------------------------------------------------------------------- */
+
+function askingPrice(G, pid, teamId, yrs) {
+  const p = G.players[pid];
+  if (!p) return 0;
+  let want = marketValue(G, p) * diff(G).askPrice;
+  // Long term is security, so it comes a little cheaper per year; a one-year
+  // "prove it" deal costs a premium.
+  want *= yrs >= 5 ? 0.9 : yrs === 4 ? 0.95 : yrs === 1 ? 1.12 : 1;
+  if (teamId != null) {
+    const t = G.teams[teamId];
+    const pos = standings(G).findIndex((x) => x.id === teamId);
+    // Winners get a discount; a club at the bottom has to overpay.
+    want *= 1 + (pos / G.teams.length - 0.5) * 0.16;
+    want *= 1 - (t.cupWins > 0 ? 0.03 : 0);
+  }
+  return round1(Math.max(MIN_SALARY, want));
+}
+function negotiate(G, pid, teamId, amt, yrs) {
+  const p = G.players[pid];
+  if (!p) return { ok: false, why: "no such player" };
+  const want = askingPrice(G, pid, teamId, yrs);
+  if (amt >= want) return { ok: true, want };
+  // Close offers get one counter; insulting ones get a flat no.
+  if (amt >= want * 0.82) return { ok: false, counter: want, counterYrs: yrs, why: `he wants $${want}M × ${yrs}` };
+  return { ok: false, want, why: "not interested at that number" };
+}
+
+/* --------------------------- prospect development -------------------------
+ * Draftees don't just sit in a warehouse. They play a farm season, produce a
+ * stat line, and develop faster than they would riding an NHL bench.
+ * ------------------------------------------------------------------------- */
+
+const FARM_READY = 4;   // within this of his ceiling, he's knocking on the door
+function isProspect(p) { return !!p.farm && p.age <= 23 && !p.retired; }
+function prospectReady(G, p) {
+  return p.farm && (p.ovr >= 58 || p.pot - p.ovr <= FARM_READY);
+}
+// Farm production, worked out once per game day rather than simulated shift by
+// shift — the farm is a development track, not a league you manage.
+function simFarmDay(G, teamId) {
+  rosterOf(G, teamId, true).filter((p) => p.farm && p.pos !== "G" && p.inj <= 0).forEach((p) => {
+    if (!p.farmSeason) p.farmSeason = { gp: 0, g: 0, a: 0 };
+    p.farmSeason.gp++;
+    const rate = clamp((p.ovr - 30) / 100, 0.05, 0.95);
+    if (rnd(G) < rate * 0.32) p.farmSeason.g++;
+    if (rnd(G) < rate * 0.46) p.farmSeason.a++;
+  });
+  rosterOf(G, teamId, true).filter((p) => p.farm && p.pos === "G" && p.inj <= 0).forEach((p) => {
+    if (!p.farmSeason) p.farmSeason = { gp: 0, g: 0, a: 0 };
+    if (rnd(G) < 0.5) p.farmSeason.gp++;
+  });
+}
+
+/* ----------------------------- deadline trading ---------------------------
+ * On deadline day the league sorts itself into buyers and sellers: clubs out of
+ * the race move expiring veterans to contenders for picks.
+ * ------------------------------------------------------------------------- */
+
+function aiDeadlineMoves(G) {
+  const table = standings(G);
+  const cut = Math.floor(G.teams.length / 2);
+  const buyers = table.slice(0, cut).map((t) => t.id).filter((id) => id !== G.userTeam);
+  const sellers = table.slice(cut).map((t) => t.id).filter((id) => id !== G.userTeam);
+  let done = 0;
+  sellers.forEach((sid) => {
+    if (done >= 6) return;
+    const rental = rosterOf(G, sid)
+      .filter((p) => p.contract.yrs <= 1 && p.age >= 27 && p.ovr >= 62 && !hasNtc(p))
+      .sort((a, b) => b.ovr - a.ovr)[0];
+    if (!rental) return;
+    for (const bid of buyers) {
+      const pick = (G.picks || []).find((pk) => pk.owner === bid && pk.year > G.year && pk.round === (rental.ovr >= 72 ? 1 : 2));
+      if (!pick) continue;
+      const ev = doTrade(G, sid, [rental.id], [], bid, [], [pick]);
+      if (ev.ok) {
+        done++;
+        news(G, `${G.teams[sid].abbr} sent ${fullName(rental)} to ${G.teams[bid].abbr} for a pick.`, "info");
+        break;
+      }
+    }
+  });
+  return G;
 }
 
 /* ------------------------------ the rollover ------------------------------ */
@@ -1401,6 +1679,9 @@ function progress(G, p) {
   if (p.age < peak) delta = gauss(G, 2.6 + (p.pot - p.ovr) * 0.09, 1.7);
   else if (p.age < peak + 4) delta = gauss(G, 0.2, 1.4);
   else delta = gauss(G, -(p.age - peak - 3) * 0.95, 1.5);
+  // A young player developing on the farm improves faster than one riding an
+  // NHL bench for eight minutes a night.
+  if (p.farm && p.age <= 23) delta += 1.5;
   keys.forEach((k) => {
     if (p.r[k] == null) return;
     p.r[k] = Math.round(clamp(p.r[k] + delta + gauss(G, 0, 1.1), 15, 99));
