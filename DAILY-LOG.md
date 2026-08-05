@@ -31,3 +31,10 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   gave every club identical rest; the draft silently ended at pick 32; scratches were credited
   with games they never dressed for; a club with two injured goalies crashed the engine; and
   saves were being lost to fire-and-forget IndexedDB writes.
+- 2026-08-05 · S · Line chemistry: a forward line now tracks how many consecutive games it has
+  played intact (`t.lineChem`/`t.lineSig`, capped at `LINE_CHEM_MAX_GAMES`) and earns a small
+  `lineOff` bonus for it in `simGame`'s even-strength loop, so shuffling a line every week costs
+  offence. Surfaced in the Lines tab with a per-line tooltip and a marker once a line is fully
+  jelled. Along the way, retuned the "season milestones fired" harness check off seed 191, which
+  put the user's top scorer exactly on the 20-goal threshold with no margin — any small change to
+  shot rates could tip it either way, and this one did. Harness grew from 214 to 218 assertions.

@@ -22,8 +22,9 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   against shots allowed, applied as a multiplier in the same place `momentum` and `legs` are.
 - **M** — Goalie pull strategy. The last-two-minutes block uses fixed 17%/28% odds; make when to
   pull a user setting (down one from 2:00, from 1:00, never) with the payoff moving accordingly.
-- **S** — Line chemistry. Track how many games a forward line has played intact and give a small
-  `lineOff` bonus once it's settled, so shuffling every week has a cost.
+- **S** — Defence-pair chemistry. Forward lines now build a continuity bonus via `lineChemistry`
+  (`index.html`); extend the same tracking to `lines.D` pairs, since `unitDef` weights a settled
+  pair the same way `lineOff` weights a settled line.
 
 ## GM depth
 
@@ -64,6 +65,9 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   bracket and box score at once.
 - **M** — A dedicated goalie page in the player modal: workload chart by month, and rest-versus-
   save-percentage, now that both are tracked.
+- **S** — Chemistry in the box score. `GameTab` replays `G.lastGame` but never shows which lines
+  were fully jelled (`t.lineChem[i] >= LINE_CHEM_MAX_GAMES`) going into that game; a small note
+  next to the line score would make the new chemistry bonus visible, not just felt.
 
 ## Housekeeping
 

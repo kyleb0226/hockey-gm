@@ -40,6 +40,7 @@ const EXPORTS = [
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
   "pruneSave", "ZONE_KEYS", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
+  "lineChemistry", "LINE_CHEM_MAX_GAMES",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -461,6 +462,19 @@ const CHECKS = {
     const gTOI = toiOf(L.G[0]) / Math.max(1, G.players[L.G[0]].season.gp);
     ok(Math.abs(gTOI - 60) < 0.5, `a goalie who starts plays the full sixty (${gTOI.toFixed(1)})`);
 
+    // Line chemistry: keeping a line intact builds a streak that caps out,
+    // and touching the line resets it back to zero on the next game.
+    const t0 = G.teams[0];
+    ok(t0.lineChem[0] > 0, `an intact top line has built chemistry (${t0.lineChem[0]} games)`);
+    ok(t0.lineChem.every((g) => g <= A.LINE_CHEM_MAX_GAMES), "chemistry caps out rather than growing forever");
+    A.simDays(G, 60);
+    ok(t0.lineChem[0] === A.LINE_CHEM_MAX_GAMES, `a line left alone for a season hits the cap (${t0.lineChem[0]})`);
+    const tmp = t0.lines.F[0][0];
+    t0.lines.F[0][0] = t0.lines.F[1][0];
+    t0.lines.F[1][0] = tmp;
+    A.simDays(G, 10);
+    ok(t0.lineChem[0] < A.LINE_CHEM_MAX_GAMES, `swapping the top line resets its chemistry streak (now ${t0.lineChem[0]})`);
+
     // An injury must not leave a hole in the lineup.
     const victim = G.players[L.F[0][1]];
     victim.inj = 10;
@@ -737,7 +751,10 @@ const CHECKS = {
   // The record book, the break, the play-by-play, and franchise history.
   atmosphere(A) {
     section("Records, All-Star break and play-by-play");
-    const G = A.newGame(0, { seed: 191, rules: { seasonLen: 41 } });
+    // seed 191 put the user's top scorer exactly on the 20-goal milestone
+    // threshold, so a small change anywhere in shot rates could tip it either
+    // way; 59 clears the scaled goals and points marks with real margin.
+    const G = A.newGame(0, { seed: 59, rules: { seasonLen: 41 } });
 
     const breakDay = G.allStarDay;
     ok(breakDay > 0 && breakDay < G.schedule.length, `the calendar reserves a break (day ${breakDay})`);

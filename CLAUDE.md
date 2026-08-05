@@ -58,6 +58,12 @@ which is what makes line construction and last change matter.
 - **Last change:** at home, line 1 is skewed toward the opponent's third pair (`share *= 1.28`)
   and away from their first (`0.78`). That is the whole home-ice advantage — there is no flat
   bonus anywhere.
+- **Line chemistry:** `lineChemistry(t, lines)` tracks, per forward line, how many consecutive
+  games it has played with the same three players (`t.lineChem`/`t.lineSig`, capped at
+  `LINE_CHEM_MAX_GAMES`) and is called once per side per game in the even-strength loop, which
+  both reads the current streak and advances it. It feeds a small `lineOff` multiplier
+  (`LINE_CHEM_PER_GAME`), so shuffling a line every week costs real offence. Only forwards are
+  tracked today — defence pairs get no equivalent bonus.
 - **Shot zones (`SHOT_ZONES`):** every shot picks a zone first — rush, cycle or point — and the
   zone decides both *who* shoots (`dBias` makes the point a defenceman's shot) and *how
   stoppable* it is (`save` offsets the goalie's percentage). Conversion must stay ordered
@@ -158,6 +164,11 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
   board on screen.
 - Milestones and honours use **rates scaled to the season length**, not raw totals — a 41-game
   season would never reach a 50-goal mark or a 300-point career.
+- `tools/simtest.js`'s "season milestones fired" check (`atmosphere`) picks a fixed seed and
+  checks a real player's season line against a scaled integer threshold. A seed that lands the
+  user's top scorer *exactly* on the threshold has no margin — any small, unrelated change to
+  shot rates can flip it. If a change you didn't expect to touch scoring trips this check, prefer
+  swapping to a seed with real margin over touching the threshold itself.
 
 ## `tools/simtest.js`
 Headless harness: extracts the `app-src` block, transpiles it with the vendored Babel, runs it in
