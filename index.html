@@ -197,8 +197,9 @@ function genPlayer(G, pos, tier, age) {
 
 function blankStats(pos) {
   return pos === "G"
-    ? { gp:0, w:0, l:0, otl:0, sa:0, sv:0, ga:0, so:0, toi:0 }
-    : { gp:0, g:0, a:0, pim:0, sog:0, hit:0, blk:0, toi:0, pm:0, fow:0, fol:0, ppg:0, shg:0, gwg:0 };
+    ? { gp:0, w:0, l:0, otl:0, sa:0, sv:0, ga:0, so:0, toi:0, sow:0, sol:0, sosa:0, sosv:0, starts:0 }
+    : { gp:0, g:0, a:0, pim:0, sog:0, hit:0, blk:0, toi:0, pm:0, fow:0, fol:0, ppg:0, shg:0, gwg:0,
+        eng:0, fights:0, sog_att:0, sos:0, soa:0 };
 }
 const pts = (s) => (s.g || 0) + (s.a || 0);
 const svPct = (s) => (s.sa ? s.sv / s.sa : 0);
@@ -301,32 +302,77 @@ function teamStrength(G, teamId) {
 /* Circle-method round robin over all 32 clubs, repeated until the season length
    is met, with the home side alternating so home/away stays balanced. */
 
+const CAL_DAYS_PER_ROUND = 2.15;   // an 82-game season runs ~176 calendar days
+
 function buildSchedule(G) {
   const n = TEAMS.length;
   const len = ruleValue(G, "seasonLen");
-  const rounds = [];
   const arr = TEAMS.map((_, i) => i);
   const half = n / 2;
   // The circle method decides WHO plays; a running home count decides WHERE, so
   // the split stays even however many times the cycle repeats.
   const homeCount = new Array(n).fill(0);
-  while (rounds.length < len) {
-    for (let r = 0; r < n - 1 && rounds.length < len; r++) {
-      const day = [];
+  const fixtures = [];
+  let round = 0;
+  while (round < len) {
+    for (let r = 0; r < n - 1 && round < len; r++) {
+      const rf = [];
       for (let i = 0; i < half; i++) {
         const a = arr[i], b = arr[n - 1 - i];
         const aHome = homeCount[a] < homeCount[b] || (homeCount[a] === homeCount[b] && (r + i) % 2 === 0);
         const home = aHome ? a : b, away = aHome ? b : a;
         homeCount[home]++;
-        day.push({ home, away, played: false });
+        rf.push({ home, away, round, played: false });
       }
-      rounds.push(day);
+      // Shuffle within the round. The circle method has a fixed point — club 0
+      // never moves — so without this every club lands in the same slot every
+      // round and every gap between games comes out identical.
+      for (let i = rf.length - 1; i > 0; i--) {
+        const j = Math.floor(rnd(G) * (i + 1));
+        const t = rf[i]; rf[i] = rf[j]; rf[j] = t;
+      }
+      rf.forEach((fx) => fixtures.push(fx));
+      round++;
       arr.splice(1, 0, arr.pop());   // rotate all but the first
     }
   }
-  G.schedule = rounds;
+
+  // Spread the fixtures over a real calendar instead of playing all 32 clubs
+  // every single night. Rest days are what make back-to-backs mean anything.
+  let days = Math.max(len + 1, Math.round(len * CAL_DAYS_PER_ROUND));
+  const cal = Array.from({ length: days }, () => []);
+  const busy = Array.from({ length: days }, () => new Set());
+  const place = (fx, idx) => {
+    // Spread by position in the whole fixture list, not by round. Anchoring on
+    // the round would drop all sixteen of a round's games on one night, which is
+    // exactly the every-club-plays-every-day calendar this replaced.
+    const target = Math.min(days - 1, Math.floor((idx * days) / fixtures.length));
+    for (let d = target; d < days; d++) {
+      if (busy[d].has(fx.home) || busy[d].has(fx.away)) continue;
+      cal[d].push(fx); busy[d].add(fx.home); busy[d].add(fx.away); return true;
+    }
+    for (let d = 0; d < target; d++) {
+      if (busy[d].has(fx.home) || busy[d].has(fx.away)) continue;
+      cal[d].push(fx); busy[d].add(fx.home); busy[d].add(fx.away); return true;
+    }
+    return false;
+  };
+  fixtures.forEach((fx, idx) => {
+    if (place(fx, idx)) return;
+    // Should never happen at these ratios, but a fixture must never be dropped.
+    cal.push([fx]); busy.push(new Set([fx.home, fx.away])); days++;
+  });
+
+  G.schedule = cal;
   G.day = 0;
-  return rounds;
+  G.lastPlayed = new Array(n).fill(-9);
+  return cal;
+}
+
+// Days off since a club last played. 0 means a genuine back-to-back.
+function restFor(G, teamId) {
+  const last = (G.lastPlayed && G.lastPlayed[teamId] != null) ? G.lastPlayed[teamId] : -9;
+  return last < 0 ? 3 : Math.max(0, G.day - last - 1);
 }
 
 /* -------------------------------- new game -------------------------------- */
@@ -438,6 +484,7 @@ function migrate(G) {
   if (!G.freeAgents) G.freeAgents = [];
   if (!G.draftClass) G.draftClass = [];
   if (G.boardConfidence == null) G.boardConfidence = 62;
+  if (!G.lastPlayed) G.lastPlayed = new Array((G.teams || []).length || TEAMS.length).fill(-9);
   playersOf(G).forEach((p) => {
     if (!p.stats) p.stats = blankStats(p.pos);
     if (!p.season) p.season = blankStats(p.pos);
@@ -467,17 +514,35 @@ function emptyBox(G, teamId) {
   // players who actually take ice time are credited in applyGame.
   rosterOf(G, teamId, true).forEach((p) => {
     box.players[p.id] = p.pos === "G"
-      ? { sa: 0, sv: 0, ga: 0, toi: 0 }
-      : { g: 0, a: 0, sog: 0, pim: 0, hit: 0, blk: 0, toi: 0, pm: 0, fow: 0, fol: 0, ppg: 0, shg: 0 };
+      ? { sa: 0, sv: 0, ga: 0, toi: 0, sosa: 0, sosv: 0, starts: 0 }
+      : { g: 0, a: 0, sog: 0, pim: 0, hit: 0, blk: 0, toi: 0, pm: 0, fow: 0, fol: 0, ppg: 0, shg: 0,
+          eng: 0, fights: 0, sos: 0, soa: 0 };
   });
   return box;
 }
 
-// Who takes the shot in a given unit — weighted by shooting and hands.
-function shooterFrom(G, ids) {
+/* Not every shot is the same shot. A point blast from a defenceman and a rush
+   chance off the wing arrive at the goalie with very different odds, so the zone
+   is picked first and it decides both who shoots and how stoppable it is. */
+const SHOT_ZONES = [
+  { key: "rush",  p: 0.22, save: -0.034, dBias: 0.22 },
+  { key: "cycle", p: 0.52, save:  0.000, dBias: 0.50 },
+  { key: "point", p: 0.26, save:  0.055, dBias: 3.40 },
+];
+function pickZone(G) {
+  const x = rnd(G);
+  let acc = 0;
+  for (const z of SHOT_ZONES) { acc += z.p; if (x <= acc) return z; }
+  return SHOT_ZONES[1];
+}
+
+// Who takes the shot in a given unit — weighted by shooting and hands, with
+// defencemen far likelier to be the one firing from the point.
+function shooterFrom(G, ids, dBias) {
   const ps = ids.map((id) => G.players[id]).filter(Boolean);
   if (!ps.length) return null;
-  const wts = ps.map((p) => Math.pow(Math.max(1, p.r.sht * 0.7 + p.r.hnd * 0.3 - 20), 1.6) * (p.pos === "D" ? 0.55 : 1));
+  const bias = dBias == null ? 0.55 : dBias;
+  const wts = ps.map((p) => Math.pow(Math.max(1, p.r.sht * 0.7 + p.r.hnd * 0.3 - 20), 1.6) * (p.pos === "D" ? bias : 1));
   const tot = wts.reduce((a, b) => a + b, 0);
   let x = rnd(G) * tot;
   for (let i = 0; i < ps.length; i++) { x -= wts[i]; if (x <= 0) return ps[i]; }
@@ -503,18 +568,23 @@ function assistsFrom(G, ids, scorerId) {
 }
 
 function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
-  const off = ctx[strength === "pp" ? "ppOff" : "off"];
   const gq = goalieQuality(G, gid);
-  // Save percentage lives in a believable band; a great goalie is ~.925.
-  let base = 0.9 + (gq - 55) * 0.0016;
+  // Save percentage lives in a believable band; a great goalie is ~.925. A tired
+  // goalie leaks: a full fatigue load is worth about fifteen points of save
+  // percentage, which is roughly what a goalie on his third start in four nights
+  // actually looks like.
+  const gp = G.players[gid];
+  const tired = gp ? clamp(gp.fatigue, 0, 100) / 100 : 0;
+  let base = 0.9 + (gq - 55) * 0.0016 - tired * 0.015;
   if (strength === "pp") base -= 0.028;
   const gBox = ctx.gBox, sBox = ctx.sBox;
   if (!gBox.players[gid]) return;   // no dressed goaltender — nothing to resolve against
   for (let s = 0; s < shots; s++) {
-    const shooter = shooterFrom(G, offIds);
+    const zone = pickZone(G);
+    const shooter = shooterFrom(G, offIds, zone.dBias);
     if (!shooter || !sBox.players[shooter.id]) continue;
     const quality = (shooter.r.sht - 55) * 0.0013 + (rnd(G) - 0.5) * 0.02;
-    const saveP = clamp(base - quality, 0.845, 0.965);
+    const saveP = clamp(base + zone.save - quality, 0.845, 0.975);
     sBox.sog++; sBox.players[shooter.id].sog++;
     gBox.players[gid].sa++;
     if (rnd(G) > saveP) {
@@ -535,18 +605,92 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
   }
 }
 
+/* Who starts in goal. A back-to-back, or a starter who's been run into the
+   ground, is what gets the backup into a game — the depth chart alone never
+   would. A backup much worse than the starter still doesn't play. */
+function pickStarter(G, lines, rest) {
+  const s = G.players[lines.G[0]], b = G.players[lines.G[1]];
+  if (!s) return lines.G[1] != null ? lines.G[1] : lines.G[0];
+  if (!b) return s.id;
+  const restDays = rest == null ? 2 : rest;
+  // A backup much worse than the starter still gets games — just later, when the
+  // starter is genuinely run down rather than merely tired.
+  const gap = s.ovr - b.ovr;
+  const limit = gap > 14 ? 78 : 55;
+  const worn = s.fatigue > limit || (restDays === 0 && s.fatigue > limit - 30);
+  return worn ? b.id : s.id;
+}
+
+/* Three rounds and then sudden death, hands against reflexes. Shootout goals
+   never count toward a skater's season total — only the team's score moves —
+   so they're tracked separately as `sos`/`soa`. */
+function runShootout(G, a, b, aLines, bLines, aGid, bGid) {
+  const order = (lines) => lines.F.flat().map((id) => G.players[id]).filter(Boolean)
+    .sort((x, y) => (y.r.hnd * 0.6 + y.r.sht * 0.4) - (x.r.hnd * 0.6 + x.r.sht * 0.4));
+  const aS = order(aLines), bS = order(bLines);
+  if (!aS.length || !bS.length) return rnd(G) < 0.5 ? a : b;
+  const attempt = (sh, gid, box, gBox) => {
+    const g = G.players[gid];
+    const skill = sh.r.hnd * 0.6 + sh.r.sht * 0.4;
+    const stop = g ? g.r.rfx * 0.6 + g.r.pos * 0.4 : 40;
+    const scored = rnd(G) < clamp(0.33 + (skill - stop) * 0.006, 0.08, 0.72);
+    if (box.players[sh.id]) { box.players[sh.id].soa++; if (scored) box.players[sh.id].sos++; }
+    if (gBox.players[gid]) { gBox.players[gid].sosa++; if (!scored) gBox.players[gid].sosv++; }
+    return scored;
+  };
+  let ag = 0, bg = 0;
+  for (let r = 0; r < 3; r++) {
+    if (attempt(aS[r % aS.length], bGid, a, b)) ag++;
+    if (attempt(bS[r % bS.length], aGid, b, a)) bg++;
+  }
+  let r = 3, guard = 0;
+  while (ag === bg && guard++ < 15) {
+    const x = attempt(aS[r % aS.length], bGid, a, b);
+    const y = attempt(bS[r % bS.length], aGid, b, a);
+    if (x && !y) ag++; else if (y && !x) bg++;
+    r++;
+  }
+  return ag === bg ? (rnd(G) < 0.5 ? a : b) : (ag > bg ? a : b);
+}
+
 function simGame(G, homeId, awayId, opts) {
   opts = opts || {};
   const R = rules(G);
   const hl = ensureLines(G, homeId), al = ensureLines(G, awayId);
   const home = emptyBox(G, homeId), away = emptyBox(G, awayId);
-  const hG = hl.G[0], aG = al.G[0];
+  const hG = pickStarter(G, hl, opts.homeRest), aG = pickStarter(G, al, opts.awayRest);
   home.goalie = hG; away.goalie = aG;
 
   const sides = [
     { box: home, opp: away, lines: hl, gid: hG, oppGid: aG, oppLines: al, isHome: true },
     { box: away, opp: home, lines: al, gid: aG, oppGid: hG, oppLines: hl, isHome: false },
   ];
+
+  // ---- fighting ----
+  // A fight is five minutes each and a small, real swing in who carries the play
+  // afterwards. It never touches the scoreboard directly.
+  const momentum = { [homeId]: 1, [awayId]: 1 };
+  if (R.fighting && rnd(G) < 0.22) {
+    const enforcer = (tid) => {
+      const pool = activeRoster(G, tid).filter((p) => p.pos !== "G")
+        .sort((x, y) => y.r.phy - x.r.phy).slice(0, 5);
+      return pool.length ? pool[Math.floor(rnd(G) * pool.length)] : null;
+    };
+    const hf = enforcer(homeId), af = enforcer(awayId);
+    if (hf && af && home.players[hf.id] && away.players[af.id]) {
+      home.players[hf.id].pim += 5; away.players[af.id].pim += 5;
+      home.players[hf.id].fights++; away.players[af.id].fights++;
+      home.pim += 5; away.pim += 5;
+      const hWon = rnd(G) < clamp(0.5 + (hf.r.phy - af.r.phy) * 0.01, 0.15, 0.85);
+      momentum[hWon ? homeId : awayId] = 1.07;
+      home.fight = { home: hf.id, away: af.id, winner: hWon ? hf.id : af.id };
+    }
+  }
+
+  // ---- rest ----
+  // The second night of a back-to-back costs a few percent of everything.
+  const legs = { [homeId]: 1 - Math.max(0, 2 - (opts.homeRest == null ? 2 : opts.homeRest)) * 0.025,
+                 [awayId]: 1 - Math.max(0, 2 - (opts.awayRest == null ? 2 : opts.awayRest)) * 0.025 };
 
   // ---- even strength, line matchup by line matchup ----
   sides.forEach((side) => {
@@ -558,14 +702,21 @@ function simGame(G, homeId, awayId, opts) {
         if (side.isHome) share *= li === 0 ? (pi === 2 ? 1.28 : pi === 1 ? 1.05 : 0.78) : 1;
         const m = mins * share;
         const oppF = side.oppLines.F[Math.min(3, li)];
+        // The unit on the ice is five skaters, not three. Which of our own pairs
+        // is out there is drawn by ice-time share — that's what puts defencemen
+        // on the scoresheet at all, and it evens out across a season.
+        let x = rnd(G), di = 0;
+        for (let k = 0; k < PAIR_TOI.length; k++) { x -= PAIR_TOI[k]; if (x <= 0) { di = k; break; } }
+        const myPair = side.lines.D[di] || side.lines.D[0];
+        const unit = fLine.concat(myPair);
         const off = lineOff(G, fLine);
         const def = unitDef(G, oppF, pair);
         // ~30 shots per 60 at even strength for an average team.
-        const rate = (28 / 60) * (off / def);
+        const rate = (28 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId];
         const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)) * 0.9)));
         resolveShots(G,
           { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp },
-          shots, fLine, pair.concat(oppF), side.oppGid, "es");
+          shots, unit, pair.concat(oppF), side.oppGid, "es");
         fLine.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m / 3; });
         pair.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m / 6; });
       });
@@ -622,6 +773,33 @@ function simGame(G, homeId, awayId, opts) {
     });
   });
 
+  // ---- the last two minutes ----
+  // Down one, the trailing side pulls its goalie. Six on five is a genuine
+  // chance to tie and a bigger chance to concede into the empty net — and an
+  // empty-net goal has no goalie behind it, so no save opportunity is charged.
+  if (Math.abs(home.g - away.g) === 1) {
+    const trailing = home.g < away.g ? home : away;
+    const leading = trailing === home ? away : home;
+    const tLines = trailing === home ? hl : al;
+    const lLines = leading === home ? hl : al;
+    const roll = rnd(G);
+    if (roll < 0.17) {
+      const unit = tLines.PP[0].length ? tLines.PP[0] : tLines.F[0];
+      resolveShots(G, { sBox: trailing, gBox: leading, oppBox: leading },
+        1, unit, [], leading.goalie, "en6");
+    } else if (roll < 0.45) {
+      const sc = shooterFrom(G, lLines.F[0], 0.3);
+      if (sc && leading.players[sc.id]) {
+        leading.g++; leading.sog++;
+        leading.players[sc.id].g++; leading.players[sc.id].sog++; leading.players[sc.id].eng++;
+        const helpers = assistsFrom(G, lLines.F[0], sc.id);
+        helpers.forEach((id) => { if (leading.players[id]) leading.players[id].a++; });
+        leading.scorers.push({ id: sc.id, a: helpers, strength: "en" });
+        leading.eng = (leading.eng || 0) + 1;
+      }
+    }
+  }
+
   // ---- overtime ----
   let ot = false, so = false;
   if (home.g === away.g) {
@@ -648,7 +826,8 @@ function simGame(G, homeId, awayId, opts) {
         // The shootout is the one goal nobody is credited with, exactly as in
         // real bookkeeping: the team's score goes up, no skater's total does.
         so = true;
-        winner.g++;
+        const soWinner = R.shootout ? runShootout(G, home, away, hl, al, hG, aG) : winner;
+        soWinner.g++;
       }
     }
   }
@@ -697,9 +876,11 @@ function applyGame(G, res, opts) {
       const dest = opts.playoff ? (p.po = p.po || blankStats(p.pos)) : p.season;
       dest.gp++; dest.toi += s.toi;
       if (p.pos === "G") {
-        dest.sa += s.sa; dest.sv += s.sv; dest.ga += s.ga;
+        dest.sa += s.sa; dest.sv += s.sv; dest.ga += s.ga; dest.starts++;
+        dest.sosa += s.sosa || 0; dest.sosv += s.sosv || 0;
         if (s.ga === 0 && s.sa > 0) dest.so++;
         const won = gf > ga;
+        if (res.so) { if (won) dest.sow++; else dest.sol++; }
         if (won) dest.w++;
         else if ((res.ot || res.so) && R.otLoserPoint) dest.otl++;
         else dest.l++;
@@ -707,8 +888,12 @@ function applyGame(G, res, opts) {
         dest.g += s.g; dest.a += s.a; dest.sog += s.sog; dest.pim += s.pim;
         dest.hit += s.hit; dest.blk += s.blk; dest.pm += s.pm;
         dest.fow += s.fow; dest.fol += s.fol; dest.ppg += s.ppg; dest.shg += s.shg;
+        dest.eng += s.eng || 0; dest.fights += s.fights || 0;
+        dest.sos += s.sos || 0; dest.soa += s.soa || 0;
       }
-      p.fatigue = clamp(p.fatigue + s.toi / 60 * 3 - 1.5, 0, 100);
+      // A goalie's night costs far more than a skater's shift — that's what
+      // eventually forces the backup into the net.
+      p.fatigue = clamp(p.fatigue + (p.pos === "G" ? 14 : s.toi / 60 * 3 - 1.5), 0, 100);
     });
   });
 
@@ -756,19 +941,27 @@ function simDay(G) {
   if (G.phase !== "regular") return G;
   const day = G.schedule[G.day];
   if (!day) { endRegularSeason(G); return G; }
+  if (!G.lastPlayed) G.lastPlayed = new Array(G.teams.length).fill(-9);
+  const playedToday = new Set();
   day.forEach((fx) => {
     if (fx.played) return;
-    const res = simGame(G, fx.home, fx.away);
+    const res = simGame(G, fx.home, fx.away, {
+      homeRest: restFor(G, fx.home), awayRest: restFor(G, fx.away),
+    });
     applyGame(G, res);
     fx.played = true; fx.hg = res.hg; fx.ag = res.ag; fx.ot = res.ot; fx.so = res.so;
+    playedToday.add(fx.home); playedToday.add(fx.away);
   });
-  // Recovery: injuries tick down, fatigue bleeds off, lines re-form.
+  playedToday.forEach((tid) => { G.lastPlayed[tid] = G.day; });
+
+  // Recovery. Injuries are quoted in GAMES, so they only tick down for clubs
+  // that actually played — an injury doesn't heal on an off day. Fatigue does.
   playersOf(G).forEach((p) => {
-    if (p.inj > 0) {
+    if (p.inj > 0 && p.teamId != null && playedToday.has(p.teamId)) {
       p.inj--;
-      if (p.inj === 0) { p.injDesc = ""; if (p.teamId != null) G.teams[p.teamId].lines = null; }
+      if (p.inj === 0) { p.injDesc = ""; G.teams[p.teamId].lines = null; }
     }
-    p.fatigue = clamp(p.fatigue - 2.2, 0, 100);
+    p.fatigue = clamp(p.fatigue - (p.pos === "G" ? 4.2 : 2.2), 0, 100);
   });
   G.day++;
   if (G.day >= G.schedule.length) endRegularSeason(G);

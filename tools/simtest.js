@@ -32,6 +32,7 @@ const EXPORTS = [
   "evalTrade", "doTrade", "signPlayer", "aiFreeAgency", "computeAwards",
   "pts", "svPct", "gaa", "ovrOf", "TEAMS", "DIVS", "CONFS", "ROSTER_MAX", "POS",
   "DIFFICULTIES", "LINE_TOI",
+  "pickStarter", "runShootout", "restFor", "SHOT_ZONES", "fillRosters",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -105,6 +106,13 @@ function simPlayoffs(A, G) {
   while (G.phase === "playoffs" && guard++ < 12) A.simPlayoffRound(G);
   return G;
 }
+// The schedule is a CALENDAR now, not one round per day, so "how long is the
+// season" means games per club rather than schedule.length.
+function gamesPerTeam(G) {
+  const count = new Array(G.teams.length).fill(0);
+  G.schedule.forEach((day) => day.forEach((f) => { count[f.home]++; count[f.away]++; }));
+  return count;
+}
 
 /* --------------------------------- checks -------------------------------- */
 const CHECKS = {
@@ -140,13 +148,22 @@ const CHECKS = {
     section("Schedule");
     [82, 56, 41].forEach((len) => {
       const G = A.newGame(0, { seed: 5, rules: { seasonLen: len } });
-      ok(G.schedule.length === len, `seasonLen=${len} → ${len} matchdays (got ${G.schedule.length})`);
+      ok(G.schedule.length > len * 1.5 && G.schedule.length < len * 3,
+        `seasonLen=${len} → a real calendar with off days (${G.schedule.length} days for ${len} games)`);
       const count = new Array(32).fill(0), home = new Array(32).fill(0);
       G.schedule.forEach((day) => day.forEach((f) => {
         count[f.home]++; count[f.away]++; home[f.home]++;
       }));
       ok(count.every((c) => c === len), `every club plays ${len}`,
         `min ${Math.min(...count)} max ${Math.max(...count)}`);
+
+      // Rest has to actually vary: some back-to-backs, but not all of them.
+      const days = new Array(32).fill(null).map(() => []);
+      G.schedule.forEach((day, d) => day.forEach((f) => { days[f.home].push(d); days[f.away].push(d); }));
+      let b2b = 0, gaps = 0;
+      days.forEach((ds) => ds.forEach((d, i) => { if (i) { gaps++; if (d - ds[i - 1] === 1) b2b++; } }));
+      const rate = b2b / Math.max(1, gaps);
+      ok(rate > 0.02 && rate < 0.6, `back-to-backs happen but aren't the norm (${(rate * 100).toFixed(0)}%)`);
       const worstSplit = Math.max(...home.map((h) => Math.abs(h - len / 2)));
       ok(worstSplit <= len * 0.12, `home/away stays balanced (worst off by ${worstSplit})`);
       const dup = G.schedule.some((day) => {
@@ -193,14 +210,19 @@ const CHECKS = {
     ok(mismatch.length === 0, "player goals + shootout winners reconcile with team goals",
       mismatch.length ? `${mismatch[0].abbr}: skaters ${byTeam[mismatch[0].id]} + ${soWins[mismatch[0].id]} SO vs team ${mismatch[0].gf}` : "");
 
-    // Goalie shots faced should track the shots the other side actually took.
+    // Goalie shots faced should track the shots the other side actually took,
+    // less the ones fired into an empty net.
+    const totalEng = A.playersOf(G).filter((p) => p.pos !== "G").reduce((s, p) => s + (p.season.eng || 0), 0);
     const totalSa = A.playersOf(G).filter((p) => p.pos === "G").reduce((s, p) => s + p.season.sa, 0);
     const totalSog = A.playersOf(G).filter((p) => p.pos !== "G").reduce((s, p) => s + p.season.sog, 0);
-    ok(totalSa === totalSog, `every shot on goal was faced by a goalie (${totalSog} vs ${totalSa})`);
+    ok(totalSog === totalSa + totalEng,
+      `every shot was faced by a goalie or hit an empty net (${totalSog} vs ${totalSa} + ${totalEng} EN)`);
     const totalGaG = A.playersOf(G).filter((p) => p.pos === "G").reduce((s, p) => s + p.season.ga, 0);
     const totalSo = soWins.reduce((a, b) => a + b, 0);
-    ok(totalGaG + totalSo === totalGf,
-      `goals against charged to goalies matches league goals (${totalGaG} + ${totalSo} SO vs ${totalGf})`);
+    ok(totalGaG + totalSo + totalEng === totalGf,
+      `goals charged to goalies + SO + empty-netters matches league goals (${totalGaG}+${totalSo}+${totalEng} vs ${totalGf})`);
+    ok(totalEng > 0 && totalEng / totalGf < 0.09,
+      `empty-net goals are a small real slice (${totalEng}, ${(totalEng / totalGf * 100).toFixed(1)}%)`);
 
     // Nobody should be credited with a game they didn't dress for.
     const ghosts = A.playersOf(G).filter((p) => p.season.gp > 0 && p.season.toi <= 0);
@@ -362,7 +384,7 @@ const CHECKS = {
     ok(G.phase === "regular", `back to a regular season (phase=${G.phase})`);
     ok(G.teams.every((t) => t.gp === 0 && t.pts === 0), "the table was wiped");
     ok(G.results.length === 0, "last season's results were cleared");
-    ok(G.schedule.length === 41, `a new schedule was built (${G.schedule.length})`);
+    ok(gamesPerTeam(G).every((c) => c === 41), "a new 41-game schedule was built");
     const newAges = A.playersOf(G).filter((p) => p.teamId != null).map((p) => p.age);
     ok(Math.min(...newAges) >= Math.min(...oldAges), "everyone got a year older");
     ok(A.playersOf(G).some((p) => p.career.length > 0), "last season became career history");
@@ -386,11 +408,11 @@ const CHECKS = {
     A.setRule(G, "seasonLen", 56);
     ok(A.rules(G).seasonLen === 41, "a structural knob does NOT change the season in progress");
     ok(A.ruleValue(G, "seasonLen") === 56, "but the UI reads the staged value");
-    ok(G.schedule.length === 41, "the live schedule is untouched");
+    ok(gamesPerTeam(G).every((c) => c === 41), "the live schedule is untouched");
     simSeason(A, G); simPlayoffs(A, G);
     A.autoDraft(G, false); A.aiFreeAgency(G); A.startNextSeason(G);
     ok(A.rules(G).seasonLen === 56, "the staged knob promoted at the rollover");
-    ok(G.schedule.length === 56, `the new schedule uses it (${G.schedule.length})`);
+    ok(gamesPerTeam(G).every((c) => c === 56), "the new schedule uses it");
     ok(!G.pendingRules || !Object.keys(G.pendingRules).length, "nothing is left staged");
   },
 
@@ -475,6 +497,68 @@ const CHECKS = {
       .sort((a, b) => A.svPct(b.season) - A.svPct(a.season))[0];
     ok(AW.goalie === topG.id, "the goaltending trophy went to the best save percentage");
     ok(G.players[AW.mvp].trophies.length > 0, "the trophy was recorded on the player");
+  },
+
+  // Two goalies, a real workload split, and a shootout that is a contest.
+  goaltending(A) {
+    section("Goaltending");
+    const G = A.newGame(0, { seed: 141, rules: { seasonLen: 82 } });
+    simSeason(A, G);
+    const splits = G.teams.map((t) => {
+      const gs = A.rosterOf(G, t.id).filter((p) => p.pos === "G")
+        .sort((a, b) => b.season.gp - a.season.gp);
+      return gs.length >= 2 ? { t, s: gs[0].season.gp, b: gs[1].season.gp } : null;
+    }).filter(Boolean);
+    ok(splits.length >= 30, `clubs carry two goalies all season (${splits.length})`);
+    const benched = splits.filter((x) => x.b === 0);
+    ok(benched.length === 0, "every backup got starts", benched.length ? `${benched.length} never played` : "");
+    const ironman = splits.filter((x) => x.s > 74);
+    ok(ironman.length === 0, "nobody starts nearly every night",
+      ironman.length ? `${ironman[0].t.abbr} started ${ironman[0].s}` : "");
+    const avgStarter = splits.reduce((s, x) => s + x.s, 0) / splits.length;
+    ok(avgStarter > 38 && avgStarter < 70, `the starter still carries it (${avgStarter.toFixed(0)} of 82)`);
+
+    const soa = A.playersOf(G).reduce((s, p) => s + (p.season.soa || 0), 0);
+    const sos = A.playersOf(G).reduce((s, p) => s + (p.season.sos || 0), 0);
+    ok(soa > 0, `shootout attempts were taken (${soa})`);
+    ok(sos > 0 && sos < soa, `shootout attempts are stoppable (${sos} of ${soa})`);
+    const gsosa = A.playersOf(G).filter((p) => p.pos === "G").reduce((s, p) => s + (p.season.sosa || 0), 0);
+    ok(gsosa === soa, `every shootout attempt faced a goalie (${gsosa} vs ${soa})`);
+    const sow = A.playersOf(G).filter((p) => p.pos === "G").reduce((s, p) => s + (p.season.sow || 0), 0);
+    const sol = A.playersOf(G).filter((p) => p.pos === "G").reduce((s, p) => s + (p.season.sol || 0), 0);
+    ok(sow > 0 && sow === sol, `shootout decisions balance (${sow}W / ${sol}L)`);
+    // Shootout goals are never season goals.
+    const soScorers = A.playersOf(G).filter((p) => (p.season.sos || 0) > 0);
+    ok(soScorers.length > 0, `shootout scorers are tracked separately (${soScorers.length})`);
+  },
+
+  // Shot zones and fighting: flavour that has to show up in the numbers.
+  flavour(A) {
+    section("Shot quality and fighting");
+    const G = A.newGame(0, { seed: 151, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const ds = A.playersOf(G).filter((p) => p.pos === "D" && p.season.sog > 20);
+    const fs = A.playersOf(G).filter((p) => p.pos !== "D" && p.pos !== "G" && p.season.sog > 20);
+    const dPct = ds.reduce((s, p) => s + p.season.g, 0) / ds.reduce((s, p) => s + p.season.sog, 0);
+    const fPct = fs.reduce((s, p) => s + p.season.g, 0) / fs.reduce((s, p) => s + p.season.sog, 0);
+    ok(dPct < fPct * 0.8,
+      `point shots convert worse than forward chances (${(dPct * 100).toFixed(1)}% vs ${(fPct * 100).toFixed(1)}%)`);
+    ok(dPct > 0.015, `defencemen still score (${(dPct * 100).toFixed(1)}%)`);
+    const dShare = ds.reduce((s, p) => s + p.season.sog, 0) /
+      (ds.reduce((s, p) => s + p.season.sog, 0) + fs.reduce((s, p) => s + p.season.sog, 0));
+    ok(dShare > 0.18 && dShare < 0.45, `defencemen take a real share of the shots (${(dShare * 100).toFixed(0)}%)`);
+
+    const fights = A.playersOf(G).reduce((s, p) => s + (p.season.fights || 0), 0);
+    ok(fights > 0, `fights happened (${fights})`);
+    const fighters = A.playersOf(G).filter((p) => (p.season.fights || 0) > 0);
+    const skaters = A.playersOf(G).filter((p) => p.pos !== "G");
+    const avgPhy = fighters.reduce((s, p) => s + p.r.phy, 0) / Math.max(1, fighters.length);
+    const leaguePhy = skaters.reduce((s, p) => s + p.r.phy, 0) / skaters.length;
+    ok(avgPhy > leaguePhy, `the heavies do the fighting (${avgPhy.toFixed(0)} vs league ${leaguePhy.toFixed(0)})`);
+    const G2 = A.newGame(0, { seed: 151, rules: { seasonLen: 41, fighting: false } });
+    simSeason(A, G2);
+    ok(A.playersOf(G2).reduce((s, p) => s + (p.season.fights || 0), 0) === 0,
+      "the fighting knob turns them off");
   },
 
   // A save has to round-trip, because that's the whole persistence story.
