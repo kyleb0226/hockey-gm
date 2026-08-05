@@ -39,7 +39,7 @@ const EXPORTS = [
   "askingPrice", "negotiate", "isProspect", "prospectReady", "simFarmDay",
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
-  "pruneSave", "ZONE_KEYS",
+  "pruneSave", "ZONE_KEYS", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -448,9 +448,18 @@ const CHECKS = {
     // Ice time should follow the depth chart.
     A.simDays(G, 20);
     const toiOf = (id) => (G.players[id] ? G.players[id].season.toi : 0);
-    const l1 = L.F[0].reduce((s, id) => s + toiOf(id), 0) / 3;
-    const l4 = L.F[3].reduce((s, id) => s + toiOf(id), 0) / 3;
-    ok(l1 > l4, `the first line outplays the fourth (${(l1 / 20).toFixed(1)} vs ${(l4 / 20).toFixed(1)} min/g)`);
+    const gp = G.players[L.F[0][0]].season.gp || 1;
+    const l1 = L.F[0].reduce((s, id) => s + toiOf(id), 0) / 3 / gp;
+    const l4 = L.F[3].reduce((s, id) => s + toiOf(id), 0) / 3 / Math.max(1, G.players[L.F[3][0]].season.gp);
+    ok(l1 > l4, `the first line outplays the fourth (${l1.toFixed(1)} vs ${l4.toFixed(1)} min/g)`);
+    // Ice time is per player, not split between linemates — a first-liner plays
+    // most of a period and a half, not five minutes.
+    ok(l1 > 13 && l1 < 26, `a first-liner's night is a real one (${l1.toFixed(1)} min)`);
+    ok(l4 > 4 && l4 < 14, `and the fourth line gets a fourth-line shift (${l4.toFixed(1)} min)`);
+    const d1 = L.D[0].reduce((s, id) => s + toiOf(id), 0) / 2 / Math.max(1, G.players[L.D[0][0]].season.gp);
+    ok(d1 > 15 && d1 < 30, `the top pair carries the biggest load (${d1.toFixed(1)} min)`);
+    const gTOI = toiOf(L.G[0]) / Math.max(1, G.players[L.G[0]].season.gp);
+    ok(Math.abs(gTOI - 60) < 0.5, `a goalie who starts plays the full sixty (${gTOI.toFixed(1)})`);
 
     // An injury must not leave a hole in the lineup.
     const victim = G.players[L.F[0][1]];
@@ -825,6 +834,24 @@ const CHECKS = {
     ok(Array.isArray(G3.news) && Array.isArray(G3.picks), "migrate backfills missing fields");
     A.simDay(G3);
     ok(true, "and the migrated save still simulates");
+
+    // Saving must actually land, and a load must come back with what was saved
+    // rather than a stale copy from the other store.
+    A.saveGame(G, 0);
+    const meta = A.slotMeta(0);
+    ok(meta && meta.year === G.year, "the slot's metadata reflects what was saved");
+    const wrapped = A.unwrap(A.localStorage.getItem("pgmh:slot0"));
+    ok(wrapped && wrapped.at > 0, "the payload is written with a timestamp");
+    ok(wrapped && wrapped.g.day === G.day, `and holds the current state (day ${wrapped ? wrapped.g.day : "?"} vs ${G.day})`);
+    A.simDays(G, 5);
+    A.saveGame(G, 0);
+    const again = A.unwrap(A.localStorage.getItem("pgmh:slot0"));
+    ok(again && again.g.day === G.day, "a later save overwrites the earlier one");
+    ok(again.at >= wrapped.at, "and carries a newer timestamp");
+    // A bare, pre-wrapper save still loads.
+    A.localStorage.setItem("pgmh:slot1", JSON.stringify(G));
+    const bare = A.unwrap(A.localStorage.getItem("pgmh:slot1"));
+    ok(bare && bare.at === 0 && bare.g.day === G.day, "an old unwrapped save is still readable");
   },
 
   // The same seed must produce the same season, or nothing above is reproducible.

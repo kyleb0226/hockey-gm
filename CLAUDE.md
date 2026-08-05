@@ -30,9 +30,17 @@ picks one item off `ROADMAP.md`, builds it, and commits to `main` — but only i
   (sht/pss/hnd/spd/dfn/phy/fo/sta/dur), goalies carry `GOALIE_KEYS` (rfx/pos/reb/sta/dur), and
   `ovrOf(p)` weights them differently per position. `p.season` is the live stat line, `p.stats`
   is last season, `p.career` is the archive.
-- **Calendar:** `buildSchedule(G)` runs the circle method over all 32 clubs and repeats it until
-  `seasonLen` is met. Who plays whom comes from the rotation; **who is at home** comes from a
-  running `homeCount`, so the split stays even however many times the cycle repeats.
+- **Calendar:** `buildSchedule(G)` runs the circle method over all 32 clubs to decide **who plays
+  whom**, a running `homeCount` to decide **who is at home**, and then spreads the fixtures across
+  a real calendar of roughly `len * CAL_DAYS_PER_ROUND` days — an 82-game season runs ~176 days,
+  so clubs have off nights and back-to-backs mean something. Two details are load-bearing:
+  fixtures are placed by their index in the whole list, **not** by round (anchoring on the round
+  drops all sixteen of a round's games on one night), and each round's fixtures are **shuffled**
+  first, because the circle method has a fixed point — club 0 never moves — and without the
+  shuffle every club lands in the same slot every round and every rest gap comes out identical.
+  Three nights in midwinter are reserved for the All-Star break (`G.allStarDay`).
+- **Rest:** `restFor(G, teamId)` reads `G.lastPlayed`. 0 means a genuine back-to-back, which costs
+  a few percent of everything and pushes the backup goalie into the net.
 
 ## The match engine
 This is deliberately NOT soccer-gm's xG model. Shots are generated per **line-vs-line matchup**,
@@ -40,20 +48,38 @@ which is what makes line construction and last change matter.
 
 - `simGame(G, home, away, opts)` splits ~47 even-strength minutes across the four forward lines
   (`LINE_TOI`) and, for each, across the three opposing defence pairs (`PAIR_TOI`). Shot rate for
-  a matchup is `(28/60) * lineOff(forwards) / unitDef(oppForwards, oppPair)`.
+  a matchup is `(28/60) * lineOff(forwards) / unitDef(oppForwards, oppPair)`, times `momentum`
+  (from a fight) and `legs` (from rest).
+- **The unit on the ice is five skaters.** The forward line is joined by one of the side's own
+  defence pairs, drawn by ice-time share. Without this, defencemen never shoot — they used to
+  appear only in the *defensive* unit, and took 5% of shots instead of ~29%.
+- **Ice time is per player, not per line.** Each player on the ice gets the full shift length. It
+  is not divided among linemates — that bug made a first-liner look like a 4.7-minute player.
 - **Last change:** at home, line 1 is skewed toward the opponent's third pair (`share *= 1.28`)
   and away from their first (`0.78`). That is the whole home-ice advantage — there is no flat
   bonus anywhere.
+- **Shot zones (`SHOT_ZONES`):** every shot picks a zone first — rush, cycle or point — and the
+  zone decides both *who* shoots (`dBias` makes the point a defenceman's shot) and *how
+  stoppable* it is (`save` offsets the goalie's percentage). Conversion must stay ordered
+  rush > cycle > point; the harness checks it.
 - `resolveShots` turns shots into goals against a goalie's save percentage
-  (`0.9 + (quality - 55) * 0.0016`, clamped to .845–.965), picks the shooter weighted by
-  `sht`/`hnd`, and assigns 0–2 assists weighted by `pss`. Even-strength goals move `+/-` on both
-  sides.
+  (`0.9 + (quality - 55) * 0.0016 - tired * 0.015`, plus the zone offset, clamped to .845–.975),
+  and assigns 0–2 assists weighted by `pss`. Even-strength goals move `+/-` on both sides. Per-zone
+  shots and goals are recorded on both the shooter and the goalie (`s.z` / `blankZones`).
 - **Special teams** run separately: penalties drawn → PP minutes at a much higher shot rate,
   with a small chance of a shorthanded look the other way.
+- **Goaltending:** `pickStarter` hands the net to the backup when the starter is worn down or it's
+  a back-to-back — with a higher fatigue threshold when the backup is much worse. Goalies gain 14
+  fatigue a start and shed 4.2 a day, which produces roughly a 55/27 split over 82 games.
+- **The last two minutes:** trailing by one, the goalie comes out. Six-on-five can tie it, or the
+  puck goes the other way — and an **empty-net goal has no goalie behind it**, so it adds to the
+  shooter's `sog` and `eng` but charges no save opportunity. The invariant is
+  `sum(zone shots) + eng === sog`.
 - **Overtime:** in the playoffs, and whenever the shootout is off, OT loops `resolveShots` until
-  somebody scores, so every goal has a scorer. The **shootout is the one goal nobody is credited
-  with** — the team's score goes up and no skater's total does, exactly as in real bookkeeping.
-  The harness accounts for this; don't "fix" it by crediting a player.
+  somebody scores, so every goal has a scorer. `runShootout` is three rounds then sudden death,
+  `hnd` against `rfx`, tracked in `sos`/`soa` and `sosa`/`sosv`. The **shootout is the one goal
+  nobody is credited with** — the team's score goes up and no skater's total does, exactly as in
+  real bookkeeping. The harness accounts for this; don't "fix" it by crediting a player.
 
 ## Rules, difficulty, money
 - **`G.rules` / `RULES_DEFAULT` / `rules(G)`** — always read through `rules(G)` so a save that
@@ -71,6 +97,25 @@ which is what makes line construction and last change matter.
   how sharply the board reacts. Pressure on the manager only — the AI never gets better
   information.
 
+## The GM layer
+- **Retained salary** (`G.retained`, `effectiveCap`, `retainedBy`): a club keeps up to
+  `RETAIN_MAX_PCT` of a contract it trades away, for the contract's full remaining term, capped at
+  `MAX_RETAINED` per club. `capHit` = roster contracts *less* what others retain on them, *plus*
+  what this club retains for others.
+- **No-trade clauses** (`eligibleForNtc`, `hasNtc`, `requestNtcWaiver`): attach to established
+  players at signing. `evalTrade` refuses outright; the odds of a waiver rise with how badly the
+  club is doing.
+- **Waivers** (`needsWaivers`, `sendDown`, `processWaivers`): past `WAIVER_EXEMPT_GAMES` NHL
+  games a player must clear waivers before going down. Claims are processed worst-club-first the
+  following day.
+- **Negotiation** (`askingPrice`, `negotiate`): term and the club's position in the table both
+  move the number. A near miss returns a `counter`; a lowball returns nothing.
+- **The deadline** (`deadlineDay`, `tradesOpen`): trades close at 74% of the calendar and stay
+  shut through the playoffs. `aiDeadlineMoves` runs on the day and sorts the league into buyers
+  and sellers.
+- **Prospects** (`isProspect`, `prospectReady`, `simFarmDay`): farm players accumulate a
+  `farmSeason` line and develop faster than they would on an NHL bench.
+
 ## Season lifecycle
 `simDay` → … → `endRegularSeason` (awards + bracket) → `simPlayoffRound` × N → `finishSeason` →
 offseason UI → `startNextSeason`.
@@ -79,6 +124,17 @@ offseason UI → `startNextSeason`.
 rollover.** That is deliberate: it means the offseason screens show next year's ratings and a
 real free-agent class instead of last year's leftovers. `startNextSeason` only advances the year,
 runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
+
+## Interface
+- Tabs are grouped (`TABS`, `GROUPS`) into Club / League / Market / History rather than one long
+  strip. `SortTable` is the single sortable table used by every screen — add columns to it rather
+  than writing another `<table>`.
+- `PlayerModal` and `ClubModal` open from anywhere; almost every name and row is clickable.
+  `ShotRink` renders the zone breakdown for a skater (`mode="S"`) or a goalie (`mode="G"`).
+- `GameTab` replays `G.lastGame`, which holds the **user's most recent game only** — a full
+  season of play-by-play would dwarf everything else in the save. Events carry an invented clock
+  time and are sorted; the events themselves are real.
+- ⌘K / `?` opens the command palette; `d` and `w` sim a day and a week.
 
 ## Gotchas
 - `emptyBox` covers the **whole organisation** (farm and injured included) so a stray player id
@@ -90,16 +146,28 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
   no dressed goalie used to crash `resolveShots`.
 - Lines are invalidated by setting `t.lines = null` (on injury, trade, recall). `ensureLines`
   rebuilds lazily — don't call `autoLines` directly from engine code.
+- **Injuries are quoted in games, not days.** They only tick down for clubs that actually played
+  that calendar day.
+- **A traded player takes his season totals with him.** Reconciling goals per club must use the
+  scoring records in `G.results`, not `p.season.g` against `p.teamId`.
+- **`saveGame` writes localStorage synchronously and IndexedDB in the background**, both wrapped
+  as `{at, data}`, and `loadGame` takes whichever is newer. An earlier version wrote only to
+  IndexedDB fire-and-forget and silently lost saves. `unwrap` still reads the old bare format.
+- UI state that mirrors engine state goes stale. `OffseasonTab` derives its step from `G.phase`
+  rather than trusting `G.offseasonStep`, because a completed rollover otherwise leaves a draft
+  board on screen.
+- Milestones and honours use **rates scaled to the season length**, not raw totals — a 41-game
+  season would never reach a 50-goal mark or a 300-point career.
 
 ## `tools/simtest.js`
 Headless harness: extracts the `app-src` block, transpiles it with the vendored Babel, runs it in
 a Node `vm` with minimal shims, and publishes the functions listed in `EXPORTS` (top-level
 `const` doesn't become a vm global, hence the explicit epilogue). It plays full seasons over the
-32-club world and checks world generation, schedule integrity for all three season lengths,
+32-club world and checks world generation, calendar integrity and rest distribution for all three season lengths,
 box-score reconciliation (player goals + shootout winners must equal team goals; goalie shots
 faced must equal skater shots on goal), the points system, both playoff formats, the cap, trades,
 the rollover, rule staging, lines, special teams, injuries, awards, save round-tripping, and
-determinism.
+determinism, plus goaltending workload, shot zones, retained salary, waivers, negotiation, the deadline, prospects, records, the All-Star break, play-by-play, an eight-season soak and save durability.
 
 ```bash
 node tools/simtest.js          # all checks

@@ -774,8 +774,10 @@ function simGame(G, homeId, awayId, opts) {
         resolveShots(G,
           { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev },
           shots, unit, pair.concat(oppF), side.oppGid, "es");
-        fLine.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m / 3; });
-        pair.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m / 6; });
+        // Everyone on the ice is on the ice for the whole shift — the minutes
+        // are not split between linemates.
+        fLine.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m; });
+        pair.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m; });
       });
     });
   });
@@ -958,8 +960,9 @@ function applyGame(G, res, opts) {
       }
       addZones(dest, s.z);
       // A goalie's night costs far more than a skater's shift — that's what
-      // eventually forces the backup into the net.
-      p.fatigue = clamp(p.fatigue + (p.pos === "G" ? 14 : s.toi / 60 * 3 - 1.5), 0, 100);
+      // eventually forces the backup into the net. For skaters it's minutes
+      // above a normal night that wear them down; a fourth-liner recovers.
+      p.fatigue = clamp(p.fatigue + (p.pos === "G" ? 14 : (s.toi - 12) / 60 * 10), 0, 100);
     });
   });
 
@@ -1037,7 +1040,7 @@ function simDay(G) {
       p.inj--;
       if (p.inj === 0) { p.injDesc = ""; G.teams[p.teamId].lines = null; }
     }
-    p.fatigue = clamp(p.fatigue - (p.pos === "G" ? 4.2 : 2.2), 0, 100);
+    p.fatigue = clamp(p.fatigue - (p.pos === "G" ? 4.2 : 0.8), 0, 100);
   });
   G.day++;
   if (G.day >= G.schedule.length) endRegularSeason(G);
@@ -1949,27 +1952,48 @@ function idbDel(key) {
   }));
 }
 
+/* Both stores get every save, wrapped with a timestamp, and a load takes
+   whichever is newer. localStorage is written synchronously so a save can never
+   be lost to an in-flight IndexedDB transaction; IndexedDB is the one with room
+   to spare if the save outgrows the 5MB quota. */
 function saveGame(G, slot) {
   const t = G.teams[G.userTeam];
+  const at = Date.now();
+  let payload;
+  try { payload = JSON.stringify({ at, data: G }); } catch (e) { return false; }
+  let wroteLocal = false;
+  try {
+    localStorage.setItem(saveKey(slot), payload);
+    wroteLocal = true;
+  } catch (e) { /* quota — IndexedDB has to carry it */ }
   try {
     localStorage.setItem(metaKey(slot), JSON.stringify({
       team: t.name, city: t.city, year: G.year, phase: G.phase, cups: t.cupWins,
-      record: `${t.w}-${t.l}-${t.otl}`, at: Date.now(),
+      record: `${t.w}-${t.l}-${t.otl}`, at,
     }));
   } catch (e) {}
-  let json;
-  try { json = JSON.stringify(G); } catch (e) { return false; }
-  idbPut(saveKey(slot), json).catch(() => {
-    try { localStorage.setItem(saveKey(slot), json); } catch (e) {}
-  });
-  return true;
+  idbPut(saveKey(slot), payload).catch(() => {});
+  return wroteLocal;
+}
+// Accepts both the wrapped format and the bare game object older saves used.
+function unwrap(raw) {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw);
+    if (v && v.data && v.at) return { at: v.at, g: v.data };
+    return { at: 0, g: v };
+  } catch (e) { return null; }
 }
 function loadGame(slot) {
+  const local = unwrap(localStorage.getItem(saveKey(slot)));
   return idbGet(saveKey(slot))
     .catch(() => null)
-    .then((v) => v || localStorage.getItem(saveKey(slot)))
-    .then((raw) => (raw ? migrate(JSON.parse(raw)) : null))
-    .catch(() => null);
+    .then((v) => {
+      const remote = unwrap(v);
+      const best = !remote ? local : !local ? remote : (remote.at > local.at ? remote : local);
+      return best ? migrate(best.g) : null;
+    })
+    .catch(() => (local ? migrate(local.g) : null));
 }
 function slotMeta(slot) {
   try { const m = localStorage.getItem(metaKey(slot)); return m ? JSON.parse(m) : null; }
@@ -1986,193 +2010,620 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 const card = "bg-[#111c30] border border-[#1e2b45] rounded-xl";
 const btn = "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors";
-const btnPri = `${btn} bg-sky-600 hover:bg-sky-500 text-white`;
-const btnGhost = `${btn} bg-[#18243c] hover:bg-[#22314f] text-slate-200 border border-[#243250]`;
+const btnPri = `${btn} bg-sky-600 hover:bg-sky-500 text-white disabled:opacity-40 disabled:hover:bg-sky-600`;
+const btnGhost = `${btn} bg-[#18243c] hover:bg-[#22314f] text-slate-200 border border-[#243250] disabled:opacity-40`;
+const inputCls = "bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2 text-sm";
 
-function Stat({ label, value, sub }) {
+function Stat({ label, value, sub, tone }) {
   return (
     <div className={`${card} px-3 py-2`}>
       <div className="text-[11px] uppercase tracking-wide text-slate-400">{label}</div>
-      <div className="text-xl font-semibold tnum">{value}</div>
+      <div className={`text-lg sm:text-xl font-semibold tnum ${tone || ""}`}>{value}</div>
       {sub ? <div className="text-xs text-slate-400">{sub}</div> : null}
     </div>
   );
 }
-function Th({ children, className }) {
-  return <th className={`text-left font-medium text-[11px] uppercase tracking-wide text-slate-400 px-2 py-1.5 ${className || ""}`}>{children}</th>;
-}
 function Td({ children, className }) {
   return <td className={`px-2 py-1.5 text-sm tnum ${className || ""}`}>{children}</td>;
 }
-
 function PosBadge({ pos }) {
   const c = { C: "bg-emerald-900 text-emerald-200", LW: "bg-sky-900 text-sky-200", RW: "bg-indigo-900 text-indigo-200",
     D: "bg-amber-900 text-amber-200", G: "bg-rose-900 text-rose-200" }[pos];
   return <span className={`text-[10px] px-1.5 py-0.5 rounded ${c}`}>{pos}</span>;
 }
+function Section({ title, right, children, className }) {
+  return (
+    <div className={`${card} ${className || ""}`}>
+      {title ? (
+        <div className="px-3 py-2 border-b border-[#1e2b45] flex items-center justify-between gap-2">
+          <div className="text-sm font-medium text-slate-300">{title}</div>
+          {right}
+        </div>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
+/* One sortable table used everywhere, so every column header in the game sorts
+   without each screen reinventing it. */
+function SortTable({ cols, rows, initial, asc, rowKey, rowCls, onRow, min, empty }) {
+  const [sk, setSk] = useState(initial || cols[0].key);
+  const [dir, setDir] = useState(asc ? -1 : 1);   // 1 = descending
+  const col = cols.find((c) => c.key === sk) || cols[0];
+  const sorted = useMemo(() => rows.slice().sort((a, b) => {
+    const va = col.get(a), vb = col.get(b);
+    if (typeof va === "string" || typeof vb === "string")
+      return dir * String(vb || "").localeCompare(String(va || ""));
+    return dir * ((vb || 0) - (va || 0));
+  }), [rows, sk, dir]);
+  const click = (c) => {
+    if (c.key === sk) setDir(-dir);
+    else { setSk(c.key); setDir(c.asc ? -1 : 1); }
+  };
+  if (!rows.length) return <div className="px-3 py-4 text-sm text-slate-500">{empty || "Nothing here yet."}</div>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full" style={{ minWidth: min || 640 }}>
+        <thead>
+          <tr className="border-b border-[#1e2b45]">
+            {cols.map((c) => (
+              <th key={c.key} onClick={() => click(c)}
+                className={`text-left font-medium text-[11px] uppercase tracking-wide px-2 py-1.5 cursor-pointer select-none whitespace-nowrap
+                  ${sk === c.key ? "text-sky-300" : "text-slate-400 hover:text-slate-200"} ${c.thCls || ""}`}>
+                {c.label}{sk === c.key ? (dir === 1 ? " ↓" : " ↑") : ""}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r, i) => (
+            <tr key={rowKey ? rowKey(r) : i}
+              onClick={onRow ? () => onRow(r) : undefined}
+              className={`border-b border-[#16223a] ${onRow ? "cursor-pointer" : ""} hover:bg-[#16223a] ${rowCls ? rowCls(r) : ""}`}>
+              {cols.map((c) => <Td key={c.key} className={c.cls}>{c.cell ? c.cell(r, i) : c.get(r)}</Td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function Modal({ title, onClose, children, wide }) {
+  useEffect(() => {
+    const k = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", k);
+    return () => document.removeEventListener("keydown", k);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-start sm:items-center justify-center p-2 sm:p-4 z-50 overflow-y-auto"
+      onClick={onClose}>
+      <div className={`${card} p-4 w-full ${wide ? "max-w-3xl" : "max-w-lg"} my-4 max-h-[90vh] overflow-y-auto`}
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="font-semibold">{title}</div>
+          <button className={btnGhost} onClick={onClose}>Close</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------- the shot breakdown ---------------------------
+ * Where a player's shots come from. The rink is the offensive zone seen from
+ * above: the point along the blue line, the cycle out on the walls, the rush
+ * into the slot. Each region is shaded by how often he shoots from there and
+ * labelled with what happens when he does.
+ * ------------------------------------------------------------------------- */
+
+function ShotRink({ z, mode }) {
+  const keys = ZONE_KEYS;
+  const vol = keys.map((k) => (mode === "G" ? z[k].sa : z[k].s));
+  const total = vol.reduce((a, b) => a + b, 0);
+  const pct = keys.map((k, i) => {
+    if (mode === "G") return z[k].sa ? z[k].sv / z[k].sa : 0;
+    return z[k].s ? z[k].g / z[k].s : 0;
+  });
+  const share = vol.map((v) => (total ? v / total : 0));
+  // Heat runs on volume; the number in the middle is the rate.
+  const fill = (i, hue) => `hsla(${hue}, 78%, 55%, ${0.12 + share[i] * 0.72})`;
+  const hue = mode === "G" ? 150 : 205;
+  const label = (i) => (mode === "G"
+    ? `${(pct[i] * 100).toFixed(1)}%`
+    : `${(pct[i] * 100).toFixed(1)}%`);
+
+  if (!total) return <div className="text-sm text-slate-500 px-1 py-3">No shots recorded yet.</div>;
+  return (
+    <div className="space-y-2">
+      <svg viewBox="0 0 200 170" className="w-full max-w-xs mx-auto block">
+        {/* rink outline: offensive zone, net at the bottom */}
+        <rect x="6" y="6" width="188" height="158" rx="26" fill="#0d1728" stroke="#243250" strokeWidth="2" />
+        {/* point — the strip inside the blue line */}
+        <path d="M8 34 H192 V64 H8 Z" fill={fill(2, hue)} stroke="#243250" />
+        {/* cycle — the walls and corners */}
+        <path d="M8 64 H62 V150 H8 Z M138 64 H192 V150 H138 Z" fill={fill(1, hue)} stroke="#243250" />
+        {/* rush — the slot, straight at the net */}
+        <path d="M62 64 H138 V150 H62 Z" fill={fill(0, hue)} stroke="#243250" />
+        <line x1="8" y1="34" x2="192" y2="34" stroke="#3b82f6" strokeWidth="3" opacity="0.7" />
+        <line x1="8" y1="150" x2="192" y2="150" stroke="#ef4444" strokeWidth="2" opacity="0.6" />
+        <rect x="84" y="150" width="32" height="9" fill="#1e2b45" stroke="#64748b" />
+        <circle cx="100" cy="105" r="21" fill="none" stroke="#243250" />
+        <text x="100" y="52" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label(2)}</text>
+        <text x="100" y="62" textAnchor="middle" className="fill-slate-400" fontSize="7">POINT · {vol[2]}</text>
+        <text x="35" y="105" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label(1)}</text>
+        <text x="35" y="115" textAnchor="middle" className="fill-slate-400" fontSize="7">CYCLE · {vol[1]}</text>
+        <text x="165" y="105" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label(1)}</text>
+        <text x="165" y="115" textAnchor="middle" className="fill-slate-400" fontSize="7">CYCLE</text>
+        <text x="100" y="104" textAnchor="middle" className="fill-slate-100" fontSize="12" fontWeight="700">{label(0)}</text>
+        <text x="100" y="114" textAnchor="middle" className="fill-slate-300" fontSize="7">RUSH · {vol[0]}</text>
+      </svg>
+      <div className="space-y-1">
+        {keys.map((k, i) => (
+          <div key={k} className="flex items-center gap-2 text-xs">
+            <div className="w-12 text-slate-400 capitalize">{k}</div>
+            <div className="flex-1 h-2.5 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
+              <div className="h-full" style={{ width: `${share[i] * 100}%`, background: `hsl(${hue}, 70%, 52%)` }} />
+            </div>
+            <div className="w-28 text-right tnum text-slate-300">
+              {mode === "G"
+                ? `${z[k].sv}/${z[k].sa} saved`
+                : `${z[k].g}G on ${z[k].s}`}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------- player page ------------------------------ */
+
+function RatingBar({ label, v }) {
+  return (
+    <div className="flex items-center gap-2">
+      <div className="w-10 text-[11px] uppercase text-slate-400">{label}</div>
+      <div className="flex-1 h-2 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
+        <div className="h-full bg-sky-500" style={{ width: `${clamp(v, 0, 99)}%` }} />
+      </div>
+      <div className="w-7 text-right tnum text-xs text-slate-300">{v}</div>
+    </div>
+  );
+}
+
+function PlayerModal({ G, pid, onClose, onGo }) {
+  const p = G.players[pid];
+  if (!p) return null;
+  const isG = p.pos === "G";
+  const t = p.teamId != null ? G.teams[p.teamId] : null;
+  const keys = isG ? GOALIE_KEYS : SKATER_KEYS;
+  const career = (p.career || []);
+  const totals = career.reduce((a, c) => {
+    Object.keys(c).forEach((k) => { if (typeof c[k] === "number" && k !== "year" && k !== "teamId") a[k] = (a[k] || 0) + c[k]; });
+    return a;
+  }, {});
+  return (
+    <Modal wide title={
+      <span className="flex items-center gap-2">
+        <PosBadge pos={p.pos} /> {fullName(p)}
+        {hasNtc(p) ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900 text-amber-200">NTC</span> : null}
+        {p.inj > 0 ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-900 text-rose-200">INJ {p.inj}</span> : null}
+      </span>
+    } onClose={onClose}>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2">
+            <Stat label="Overall" value={p.ovr} sub={`ceiling ${p.pot}`} />
+            <Stat label="Age" value={p.age} sub={t ? `${t.city} ${t.name}` : "free agent"} />
+            <Stat label="Cap hit" value={`$${effectiveCap(G, p)}M`} sub={`${p.contract.yrs} yr${p.contract.yrs === 1 ? "" : "s"} left`} />
+            <Stat label="Condition" value={`${Math.round(100 - p.fatigue)}%`} sub={p.farm ? "on the farm" : "on the roster"} />
+          </div>
+          <Section title="Ratings" className="p-3 space-y-1.5">
+            <div className="space-y-1.5 pt-1">
+              {keys.map((k) => p.r[k] != null ? <RatingBar key={k} label={k} v={p.r[k]} /> : null)}
+            </div>
+          </Section>
+          {p.trophies && p.trophies.length ? (
+            <Section title="Honours" className="p-3">
+              <div className="text-sm text-slate-300 space-y-0.5 pt-1">
+                {p.trophies.slice(-8).reverse().map((tr, i) => (
+                  <div key={i}>{tr.year} — {AWARD_LABEL[tr.award] || tr.award}</div>
+                ))}
+              </div>
+            </Section>
+          ) : null}
+        </div>
+
+        <div className="space-y-3">
+          <Section title={isG ? "Shots faced" : "Where he shoots from"} className="p-3">
+            <ShotRink z={(p.season && p.season.z) || blankZones(isG ? "G" : "S")} mode={isG ? "G" : "S"} />
+          </Section>
+          <Section title="This season" className="p-3">
+            {isG ? (
+              <div className="grid grid-cols-3 gap-2 text-sm pt-1">
+                <div><span className="text-slate-400">GP </span>{p.season.gp}</div>
+                <div><span className="text-slate-400">W-L-OTL </span>{p.season.w}-{p.season.l}-{p.season.otl}</div>
+                <div><span className="text-slate-400">SO </span>{p.season.so}</div>
+                <div><span className="text-slate-400">SV% </span>{(svPct(p.season) * 100).toFixed(1)}</div>
+                <div><span className="text-slate-400">GAA </span>{gaa(p.season).toFixed(2)}</div>
+                <div><span className="text-slate-400">Shootout </span>{p.season.sosv}/{p.season.sosa}</div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 gap-2 text-sm pt-1">
+                <div><span className="text-slate-400">GP </span>{p.season.gp}</div>
+                <div><span className="text-slate-400">G </span>{p.season.g}</div>
+                <div><span className="text-slate-400">A </span>{p.season.a}</div>
+                <div><span className="text-slate-400">P </span>{pts(p.season)}</div>
+                <div><span className="text-slate-400">+/- </span>{p.season.pm > 0 ? "+" : ""}{p.season.pm}</div>
+                <div><span className="text-slate-400">PIM </span>{p.season.pim}</div>
+                <div><span className="text-slate-400">SOG </span>{p.season.sog}</div>
+                <div><span className="text-slate-400">Hits </span>{p.season.hit}</div>
+                <div><span className="text-slate-400">Blocks </span>{p.season.blk}</div>
+                <div><span className="text-slate-400">PPG </span>{p.season.ppg}</div>
+                <div><span className="text-slate-400">EN </span>{p.season.eng}</div>
+                <div><span className="text-slate-400">Fights </span>{p.season.fights}</div>
+              </div>
+            )}
+          </Section>
+          {p.farmSeason ? (
+            <Section title="On the farm" className="p-3">
+              <div className="text-sm pt-1 text-slate-300">
+                {p.farmSeason.gp} games · {p.farmSeason.g}G {p.farmSeason.a}A
+                {prospectReady(G, p) ? <span className="ml-2 text-emerald-400">ready for a call-up</span> : null}
+              </div>
+            </Section>
+          ) : null}
+          {career.length ? (
+            <Section title="Career">
+              <SortTable min={340} initial="year" asc
+                rows={career.map((c, i) => ({ ...c, _i: i }))}
+                rowKey={(r) => r._i}
+                cols={isG ? [
+                  { key: "year", label: "Yr", get: (r) => (r.total ? `${r.year}–${r.to}` : r.year) },
+                  { key: "gp", label: "GP", get: (r) => r.gp || 0 },
+                  { key: "w", label: "W", get: (r) => r.w || 0 },
+                  { key: "so", label: "SO", get: (r) => r.so || 0 },
+                  { key: "sv", label: "SV%", get: (r) => (r.sa ? r.sv / r.sa : 0), cell: (r) => (r.sa ? (r.sv / r.sa * 100).toFixed(1) : "—") },
+                ] : [
+                  { key: "year", label: "Yr", get: (r) => (r.total ? `${r.year}–${r.to}` : r.year) },
+                  { key: "gp", label: "GP", get: (r) => r.gp || 0 },
+                  { key: "g", label: "G", get: (r) => r.g || 0 },
+                  { key: "a", label: "A", get: (r) => r.a || 0 },
+                  { key: "p", label: "P", get: (r) => (r.g || 0) + (r.a || 0) },
+                  { key: "pim", label: "PIM", get: (r) => r.pim || 0 },
+                ]} />
+              <div className="px-3 py-2 text-xs text-slate-400 border-t border-[#1e2b45] tnum">
+                Career: {totals.gp || 0} GP
+                {isG ? ` · ${totals.w || 0}W · ${totals.so || 0} SO`
+                     : ` · ${totals.g || 0}G ${totals.a || 0}A · ${(totals.g || 0) + (totals.a || 0)} P`}
+              </div>
+            </Section>
+          ) : null}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+const AWARD_LABEL = {
+  mvp: "Most Valuable Player", scoring: "Scoring title", goals: "Goal-scoring title",
+  defence: "Best defenceman", goalie: "Best goaltender", rookie: "Rookie of the year",
+};
 
 /* --------------------------------- splash --------------------------------- */
+
+function SlotCard({ slot, meta, onLoad, onDelete }) {
+  if (!meta) return <div className="bg-[#0d1728] border border-[#1e2b45] rounded-lg p-3 text-sm text-slate-500">Empty slot {slot + 1}</div>;
+  return (
+    <div className="bg-[#0d1728] border border-[#1e2b45] rounded-lg p-3">
+      <div className="font-medium">{meta.city} {meta.team}</div>
+      <div className="text-xs text-slate-400">{meta.year} · {meta.record} · {meta.cups} cup{meta.cups === 1 ? "" : "s"}</div>
+      <div className="flex gap-2 mt-2">
+        <button className={btnPri} onClick={() => onLoad(slot)}>Continue</button>
+        <button className={btnGhost} onClick={() => onDelete(slot)}>Delete</button>
+      </div>
+    </div>
+  );
+}
 
 function Splash({ onStart }) {
   const [team, setTeam] = useState(0);
   const [difficulty, setDifficulty] = useState("normal");
   const [seasonLen, setSeasonLen] = useState(82);
-  const [slots] = useState(() => [0, 1, 2].map((s) => ({ slot: s, meta: slotMeta(s) })));
+  const [tick, setTick] = useState(0);
+  const slots = [0, 1, 2].map((s) => ({ slot: s, meta: slotMeta(s) }));
   return (
-    <div className="max-w-3xl mx-auto p-6 space-y-5">
+    <div className="max-w-3xl mx-auto p-4 sm:p-6 space-y-5">
       <div>
-        <h1 className="text-3xl font-bold">Pocket GM <span className="text-sky-400">Hockey</span></h1>
+        <h1 className="text-2xl sm:text-3xl font-bold">Pocket GM <span className="text-sky-400">Hockey</span></h1>
         <p className="text-slate-400 text-sm mt-1">32 clubs, a hard cap, four lines and a Cup.</p>
       </div>
 
-      <div className={`${card} p-4 space-y-3`}>
-        <div className="text-sm font-medium text-slate-300">Continue</div>
-        <div className="grid sm:grid-cols-3 gap-2">
+      <Section title="Continue" className="p-4">
+        <div className="grid sm:grid-cols-3 gap-2 pt-1">
           {slots.map(({ slot, meta }) => (
-            <div key={slot} className="bg-[#0d1728] border border-[#1e2b45] rounded-lg p-3">
-              {meta ? (
-                <>
-                  <div className="font-medium">{meta.city} {meta.team}</div>
-                  <div className="text-xs text-slate-400">{meta.year} · {meta.record} · {meta.cups} cups</div>
-                  <div className="flex gap-2 mt-2">
-                    <button className={btnPri} onClick={() => onStart({ load: slot })}>Continue</button>
-                    <button className={btnGhost} onClick={() => { deleteSlot(slot); location.reload(); }}>Delete</button>
-                  </div>
-                </>
-              ) : <div className="text-sm text-slate-500">Empty slot {slot + 1}</div>}
-            </div>
+            <SlotCard key={slot} slot={slot} meta={meta}
+              onLoad={(s) => onStart({ load: s })}
+              onDelete={(s) => { deleteSlot(s); setTick(tick + 1); }} />
           ))}
         </div>
+      </Section>
+
+      <Section title="New career" className="p-4">
+        <div className="space-y-4 pt-1">
+          <div>
+            <div className="text-xs text-slate-400 mb-1">Club</div>
+            <select className={`${inputCls} w-full`} value={team} onChange={(e) => setTeam(+e.target.value)}>
+              {TEAMS.map((t, i) => (
+                <option key={i} value={i}>{t.city} {t.name} — {CONFS[t.conf]} / {DIVS[t.div]}</option>
+              ))}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="text-xs text-slate-400 mb-1">Difficulty</div>
+              <select className={`${inputCls} w-full`} value={difficulty} onChange={(e) => setDifficulty(e.target.value)}>
+                {Object.entries(DIFFICULTIES).map(([k, d]) => <option key={k} value={k}>{d.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <div className="text-xs text-slate-400 mb-1">Season length</div>
+              <select className={`${inputCls} w-full`} value={seasonLen} onChange={(e) => setSeasonLen(+e.target.value)}>
+                <option value={82}>82 games</option>
+                <option value={56}>56 games</option>
+                <option value={41}>41 games</option>
+              </select>
+            </div>
+          </div>
+          <button className={`${btnPri} w-full py-2`}
+            onClick={() => onStart({ team, difficulty, rules: { seasonLen } })}>Start career</button>
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/* --------------------------------- home ----------------------------------- */
+
+function form5(t) { return (t.l10 || []).slice(-5); }
+
+function HomeTab({ G, setG, go, openPlayer }) {
+  const t = G.teams[G.userTeam];
+  const today = G.schedule[G.day] || [];
+  const mine = today.find((f) => f.home === G.userTeam || f.away === G.userTeam);
+  const dl = daysToDeadline(G);
+  const leaders = rosterOf(G, G.userTeam).filter((p) => p.pos !== "G")
+    .sort((a, b) => pts(b.season) - pts(a.season)).slice(0, 5);
+  const hurt = rosterOf(G, G.userTeam, true).filter((p) => p.inj > 0).sort((a, b) => b.inj - a.inj);
+  const recent = G.results.slice(-8).reverse();
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Record" value={`${t.w}-${t.l}-${t.otl}`} sub={`${t.pts} pts`} />
+        <Stat label="Goals" value={`${t.gf}–${t.ga}`} sub={`${t.gf - t.ga > 0 ? "+" : ""}${t.gf - t.ga} diff`} />
+        <Stat label="Cap space" value={`$${capSpace(G, G.userTeam)}M`}
+          tone={capSpace(G, G.userTeam) < 0 ? "text-rose-400" : ""} />
+        <Stat label="Board" value={Math.round(G.boardConfidence)} sub="confidence"
+          tone={G.boardConfidence < 30 ? "text-rose-400" : G.boardConfidence > 70 ? "text-emerald-400" : ""} />
       </div>
 
-      <div className={`${card} p-4 space-y-4`}>
-        <div className="text-sm font-medium text-slate-300">New career</div>
-        <div>
-          <div className="text-xs text-slate-400 mb-1">Club</div>
-          <select className="w-full bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2"
-            value={team} onChange={(e) => setTeam(+e.target.value)}>
-            {TEAMS.map((t, i) => (
-              <option key={i} value={i}>{t.city} {t.name} — {CONFS[t.conf]} / {DIVS[t.div]}</option>
+      <div className={`${card} p-3 flex flex-wrap items-center gap-x-4 gap-y-1`}>
+        <div className="text-sm font-medium text-slate-300">
+          {G.phase === "regular" ? `Day ${G.day + 1} of ${G.schedule.length}` : G.phase === "playoffs" ? "Playoffs" : "Offseason"}
+        </div>
+        {mine ? (
+          <div className="text-sm text-slate-300">
+            {mine.home === G.userTeam
+              ? <>vs {G.teams[mine.away].city} {G.teams[mine.away].name}</>
+              : <>at {G.teams[mine.home].city} {G.teams[mine.home].name}</>}
+            <span className="text-slate-500 ml-2">{restFor(G, G.userTeam) === 0 ? "· back-to-back" : `· ${restFor(G, G.userTeam)} days rest`}</span>
+          </div>
+        ) : <div className="text-sm text-slate-500">No game today.</div>}
+        {dl != null && dl > 0 ? <div className="text-sm text-amber-300">Deadline in {dl} days</div> : null}
+        {dl != null && dl <= 0 ? <div className="text-sm text-slate-500">Deadline passed</div> : null}
+        {G.allStar && G.allStar.year === G.year ? (
+          <button className="text-sm text-sky-400 hover:underline" onClick={() => go("allstar")}>All-Star result</button>
+        ) : null}
+      </div>
+
+      {G.lastGame ? (
+        <div className={`${card} p-3 flex items-center justify-between gap-3`}>
+          <div className="text-sm">
+            <span className="text-slate-400">Last game </span>
+            {G.teams[G.lastGame.away].abbr} {G.lastGame.ag} — {G.lastGame.hg} {G.teams[G.lastGame.home].abbr}
+            {G.lastGame.so ? " (SO)" : G.lastGame.ot ? " (OT)" : ""}
+          </div>
+          <button className={btnGhost} onClick={() => go("game")}>Watch it</button>
+        </div>
+      ) : null}
+
+      {G.news.length ? (
+        <Section title="Wire" className="p-3">
+          <div className="space-y-1 pt-1">
+            {G.news.slice(0, 7).map((n, i) => (
+              <div key={i} className={`text-sm ${n.kind === "bad" ? "text-rose-300" : n.kind === "good" ? "text-emerald-300" : "text-slate-300"}`}>{n.text}</div>
             ))}
-          </select>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <div className="text-xs text-slate-400 mb-1">Difficulty</div>
-            <select className="w-full bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2"
-              value={difficulty} onChange={(e) => setDifficulty(e.target.value)}>
-              {Object.entries(DIFFICULTIES).map(([k, d]) => <option key={k} value={k}>{d.label}</option>)}
-            </select>
           </div>
-          <div>
-            <div className="text-xs text-slate-400 mb-1">Season length</div>
-            <select className="w-full bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2"
-              value={seasonLen} onChange={(e) => setSeasonLen(+e.target.value)}>
-              <option value={82}>82 games</option>
-              <option value={56}>56 games</option>
-              <option value={41}>41 games</option>
-            </select>
+        </Section>
+      ) : null}
+
+      <div className="grid md:grid-cols-2 gap-3">
+        <Section title="Recent results" className="p-3">
+          <div className="pt-1">
+            {recent.length ? recent.map((r, i) => (
+              <div key={i} className="text-sm flex justify-between py-0.5">
+                <span className={r.home === G.userTeam || r.away === G.userTeam ? "text-sky-300" : ""}>
+                  {G.teams[r.away].abbr} @ {G.teams[r.home].abbr}
+                </span>
+                <span className="tnum">{r.ag}–{r.hg}{r.so ? " SO" : r.ot ? " OT" : ""}</span>
+              </div>
+            )) : <div className="text-sm text-slate-500">Nothing yet.</div>}
           </div>
+        </Section>
+        <div className="space-y-3">
+          <Section title="Team scoring" className="p-3">
+            <div className="pt-1">
+              {leaders.map((p) => (
+                <div key={p.id} className="text-sm flex justify-between py-0.5 cursor-pointer hover:text-sky-300"
+                  onClick={() => openPlayer(p.id)}>
+                  <span>{shortName(p)}</span>
+                  <span className="tnum text-slate-400">{p.season.g}G {p.season.a}A · {pts(p.season)}</span>
+                </div>
+              ))}
+            </div>
+          </Section>
+          {hurt.length ? (
+            <Section title="Injuries" className="p-3">
+              <div className="pt-1">
+                {hurt.slice(0, 6).map((p) => (
+                  <div key={p.id} className="text-sm flex justify-between py-0.5 cursor-pointer hover:text-sky-300"
+                    onClick={() => openPlayer(p.id)}>
+                    <span>{shortName(p)}</span>
+                    <span className="text-rose-300 text-xs">{p.injDesc} · {p.inj} games</span>
+                  </div>
+                ))}
+              </div>
+            </Section>
+          ) : null}
         </div>
-        <button className={`${btnPri} w-full py-2`} onClick={() => onStart({ team, difficulty, rules: { seasonLen } })}>
-          Start career
-        </button>
       </div>
     </div>
   );
 }
 
-/* -------------------------------- roster tab ------------------------------- */
+/* -------------------------------- roster ---------------------------------- */
 
-function RosterTab({ G, setG }) {
+// Points in the last stretch, used for the hot/cold flag.
+function formOf(G, p) {
+  if (!p.season.gp) return 0;
+  return pts(p.season) / p.season.gp;
+}
+function HotCold({ G, p }) {
+  const rate = formOf(G, p);
+  if (!p.season.gp || p.season.gp < 5) return null;
+  if (rate >= 0.9) return <span className="ml-1.5 text-[10px] text-orange-300" title="on a tear">🔥</span>;
+  if (rate <= 0.18) return <span className="ml-1.5 text-[10px] text-sky-300" title="ice cold">❄</span>;
+  return null;
+}
+
+function RosterTab({ G, setG, openPlayer, notify }) {
   const [showFarm, setShowFarm] = useState(false);
-  const roster = rosterOf(G, G.userTeam, true)
-    .filter((p) => (showFarm ? p.farm : !p.farm))
-    .sort((a, b) => POS.indexOf(a.pos) - POS.indexOf(b.pos) || b.ovr - a.ovr);
+  const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); const r = fn(g2); setG(g2); return r; };
+  const roster = rosterOf(G, G.userTeam, true).filter((p) => (showFarm ? p.farm : !p.farm));
   const hit = capHit(G, G.userTeam), space = capSpace(G, G.userTeam);
+  const dead = retainedBy(G, G.userTeam);
+
+  const move = (p) => {
+    if (p.farm) {
+      const r = upd((g) => recall(g, p.id));
+      notify(r.ok ? `${fullName(p)} recalled.` : r.why);
+    } else {
+      const r = upd((g) => sendDown(g, p.id));
+      notify(!r.ok ? r.why : r.waivers
+        ? `${fullName(p)} has been placed on waivers.`
+        : `${fullName(p)} sent to the farm.`);
+    }
+  };
+
+  const cols = [
+    { key: "name", label: "Player", get: (p) => p.ln, min: 1,
+      cell: (p) => (
+        <span className="whitespace-nowrap">
+          {fullName(p)}
+          <HotCold G={G} p={p} />
+          {hasNtc(p) ? <span className="ml-1.5 text-[10px] text-amber-300" title="no-trade clause">NTC</span> : null}
+          {p.inj > 0 ? <span className="ml-1.5 text-[10px] text-rose-400">INJ {p.inj}</span> : null}
+          {(G.waivers || []).some((w) => w.pid === p.id) ? <span className="ml-1.5 text-[10px] text-sky-300">on waivers</span> : null}
+        </span>
+      ) },
+    { key: "pos", label: "Pos", get: (p) => POS.indexOf(p.pos), cell: (p) => <PosBadge pos={p.pos} /> },
+    { key: "age", label: "Age", get: (p) => p.age },
+    { key: "ovr", label: "Ovr", get: (p) => p.ovr, cls: "font-semibold" },
+    { key: "pot", label: "Pot", get: (p) => p.pot, cls: "text-slate-400" },
+    { key: "gp", label: "GP", get: (p) => p.season.gp },
+    { key: "g", label: "G", get: (p) => (p.pos === "G" ? p.season.w : p.season.g),
+      cell: (p) => (p.pos === "G" ? p.season.w : p.season.g) },
+    { key: "a", label: "A", get: (p) => (p.pos === "G" ? p.season.so : p.season.a),
+      cell: (p) => (p.pos === "G" ? p.season.so : p.season.a) },
+    { key: "p", label: "P / SV%", get: (p) => (p.pos === "G" ? svPct(p.season) * 100 : pts(p.season)),
+      cls: "font-semibold",
+      cell: (p) => (p.pos === "G" ? (p.season.sa ? (svPct(p.season) * 100).toFixed(1) : "—") : pts(p.season)) },
+    { key: "pm", label: "+/-", get: (p) => (p.pos === "G" ? 0 : p.season.pm),
+      cell: (p) => (p.pos === "G" ? "—" : `${p.season.pm > 0 ? "+" : ""}${p.season.pm}`) },
+    { key: "cap", label: "Cap", get: (p) => effectiveCap(G, p), cell: (p) => `$${effectiveCap(G, p)}M` },
+    { key: "yrs", label: "Yrs", get: (p) => p.contract.yrs },
+    { key: "act", label: "", get: () => 0, cell: (p) => (
+      <button className="text-xs text-sky-400 hover:underline"
+        onClick={(e) => { e.stopPropagation(); move(p); }}>
+        {p.farm ? "Recall" : "Send down"}
+      </button>
+    ) },
+  ];
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <Stat label="Cap hit" value={`$${hit}M`} sub={`of $${rules(G).capAmount}M`} />
-        <Stat label="Cap space" value={`$${space}M`} sub={space < 0 ? "over the cap" : "available"} />
+        <Stat label="Cap space" value={`$${space}M`} tone={space < 0 ? "text-rose-400" : ""}
+          sub={dead.length ? `$${round1(dead.reduce((s, r) => s + r.amt, 0))}M retained` : "available"} />
         <Stat label="Roster" value={rosterOf(G, G.userTeam).length} sub={`max ${ROSTER_MAX}`} />
         <Stat label="Team rating" value={teamStrength(G, G.userTeam)} sub="top 18 average" />
       </div>
-      <div className="flex gap-2">
+      <div className="flex gap-2 flex-wrap">
         <button className={showFarm ? btnGhost : btnPri} onClick={() => setShowFarm(false)}>NHL roster</button>
-        <button className={showFarm ? btnPri : btnGhost} onClick={() => setShowFarm(true)}>Farm</button>
+        <button className={showFarm ? btnPri : btnGhost} onClick={() => setShowFarm(true)}>
+          Farm{rosterOf(G, G.userTeam, true).filter((p) => p.farm && prospectReady(G, p)).length
+            ? ` · ${rosterOf(G, G.userTeam, true).filter((p) => p.farm && prospectReady(G, p)).length} ready` : ""}
+        </button>
       </div>
-      <div className={`${card} overflow-x-auto`}>
-        <table className="w-full min-w-[720px]">
-          <thead><tr className="border-b border-[#1e2b45]">
-            <Th>Player</Th><Th>Pos</Th><Th>Age</Th><Th>Ovr</Th><Th>Pot</Th>
-            <Th>GP</Th><Th>G</Th><Th>A</Th><Th>P</Th><Th>+/-</Th><Th>Cap</Th><Th>Yrs</Th><Th></Th>
-          </tr></thead>
-          <tbody>
-            {roster.map((p) => (
-              <tr key={p.id} className="border-b border-[#16223a] hover:bg-[#16223a]">
-                <Td className="whitespace-nowrap">
-                  {fullName(p)}
-                  {p.inj > 0 ? <span className="ml-2 text-[10px] text-rose-400">INJ {p.inj}</span> : null}
-                </Td>
-                <Td><PosBadge pos={p.pos} /></Td>
-                <Td>{p.age}</Td>
-                <Td className="font-semibold">{p.ovr}</Td>
-                <Td className="text-slate-400">{p.pot}</Td>
-                {p.pos === "G" ? (
-                  <>
-                    <Td>{p.season.gp}</Td>
-                    <Td colSpan={3} className="text-slate-400">
-                      {p.season.gp ? `${(svPct(p.season) * 100).toFixed(1)} SV% · ${gaa(p.season).toFixed(2)} GAA` : "—"}
-                    </Td>
-                    <Td>—</Td>
-                  </>
-                ) : (
-                  <>
-                    <Td>{p.season.gp}</Td><Td>{p.season.g}</Td><Td>{p.season.a}</Td>
-                    <Td className="font-semibold">{pts(p.season)}</Td>
-                    <Td className={p.season.pm > 0 ? "text-emerald-400" : p.season.pm < 0 ? "text-rose-400" : ""}>
-                      {p.season.pm > 0 ? "+" : ""}{p.season.pm}
-                    </Td>
-                  </>
-                )}
-                <Td>${p.contract.amt}M</Td>
-                <Td>{p.contract.yrs}</Td>
-                <Td>
-                  <button className="text-xs text-sky-400 hover:underline" onClick={() => {
-                    const g2 = { ...G };
-                    g2.players = { ...G.players };
-                    const q = { ...p, farm: !p.farm };
-                    g2.players[p.id] = q;
-                    g2.teams = G.teams.map((t) => (t.id === G.userTeam ? { ...t, lines: null } : t));
-                    setG(g2);
-                  }}>{p.farm ? "Recall" : "Send down"}</button>
-                </Td>
-              </tr>
+      {dead.length ? (
+        <div className={`${card} p-3 text-sm`}>
+          <span className="text-slate-400">Retained salary: </span>
+          {dead.map((r) => `${G.players[r.pid] ? shortName(G.players[r.pid]) : "?"} $${r.amt}M (${r.yrs}y)`).join(" · ")}
+        </div>
+      ) : null}
+      <Section>
+        <SortTable min={860} cols={cols} rows={roster} initial="ovr" rowKey={(p) => p.id}
+          onRow={(p) => openPlayer(p.id)}
+          rowCls={(p) => (prospectReady(G, p) && p.farm ? "bg-emerald-950/30" : "")}
+          empty={showFarm ? "Nobody on the farm." : "No players."} />
+      </Section>
+      {showFarm ? (
+        <Section title="Prospect development" className="p-3">
+          <div className="space-y-1 pt-1">
+            {rosterOf(G, G.userTeam, true).filter((p) => p.farm).sort((a, b) => b.pot - a.pot).map((p) => (
+              <div key={p.id} className="flex items-center gap-2 text-sm cursor-pointer hover:text-sky-300"
+                onClick={() => openPlayer(p.id)}>
+                <PosBadge pos={p.pos} />
+                <span className="flex-1">{shortName(p)} <span className="text-slate-500">({p.age})</span></span>
+                <span className="tnum text-slate-400">{p.ovr} → {p.pot}</span>
+                <span className="tnum text-slate-500 w-24 text-right">
+                  {p.farmSeason ? `${p.farmSeason.g}G ${p.farmSeason.a}A` : "—"}
+                </span>
+                {prospectReady(G, p) ? <span className="text-emerald-400 text-xs">ready</span> : null}
+              </div>
             ))}
-          </tbody>
-        </table>
-      </div>
+          </div>
+        </Section>
+      ) : null}
     </div>
   );
 }
 
-/* ------------------------------- lines tab -------------------------------- */
+/* --------------------------------- lines ---------------------------------- */
 
 function LinesTab({ G, setG }) {
   const lines = ensureLines(G, G.userTeam);
   const bench = activeRoster(G, G.userTeam);
   const used = new Set([].concat(...lines.F, ...lines.D, lines.G).filter(Boolean));
   const scratches = bench.filter((p) => !used.has(p.id));
-  const nameFor = (id) => (G.players[id] ? shortName(G.players[id]) : "—");
-  const ovrFor = (id) => (G.players[id] ? G.players[id].ovr : "");
 
   function swap(kind, li, si, newId) {
     const g2 = { ...G, teams: G.teams.slice() };
     const t = { ...g2.teams[G.userTeam] };
     const L = JSON.parse(JSON.stringify(t.lines || lines));
     const old = kind === "F" ? L.F[li][si] : kind === "D" ? L.D[li][si] : L.G[si];
-    // If the incoming player is already in the lineup, swap the two slots.
     const findSlot = (id) => {
       for (let i = 0; i < L.F.length; i++) for (let j = 0; j < 3; j++) if (L.F[i][j] === id) return ["F", i, j];
       for (let i = 0; i < L.D.length; i++) for (let j = 0; j < 2; j++) if (L.D[i][j] === id) return ["D", i, j];
@@ -2191,98 +2642,171 @@ function LinesTab({ G, setG }) {
   }
 
   const Slot = ({ kind, li, si, id, filter }) => (
-    <select className="bg-[#0d1728] border border-[#243250] rounded px-2 py-1 text-sm w-full"
+    <select className="bg-[#0d1728] border border-[#243250] rounded px-2 py-1 text-sm w-full min-w-0"
       value={id || ""} onChange={(e) => swap(kind, li, si, +e.target.value)}>
       {bench.filter(filter).map((p) => (
         <option key={p.id} value={p.id}>{shortName(p)} ({p.ovr})</option>
       ))}
     </select>
   );
+  const starter = G.players[lines.G[0]];
 
   return (
     <div className="space-y-3">
-      <div className="flex gap-2">
+      <div className="flex gap-2 flex-wrap items-center">
         <button className={btnGhost} onClick={() => {
           const g2 = { ...G, teams: G.teams.slice() };
           g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], lines: autoLines(G, G.userTeam) };
           setG(g2);
         }}>Auto lines</button>
-        <div className="text-xs text-slate-400 self-center">
-          Line 1 gets {Math.round(LINE_TOI[0] * 100)}% of even-strength ice; at home your top line sees soft matchups more often.
+        <div className="text-xs text-slate-400">
+          Line 1 takes {Math.round(LINE_TOI[0] * 100)}% of even-strength ice; at home your top line sees soft matchups more often.
         </div>
       </div>
 
-      <div className={`${card} p-3 space-y-2`}>
-        <div className="text-sm font-medium text-slate-300">Forwards</div>
-        {lines.F.map((ln, i) => (
-          <div key={i} className="grid grid-cols-[2.5rem_1fr_1fr_1fr] gap-2 items-center">
-            <div className="text-xs text-slate-500">L{i + 1}</div>
-            {[0, 1, 2].map((si) => (
-              <Slot key={si} kind="F" li={i} si={si} id={ln[si]} filter={(p) => p.pos !== "G" && p.pos !== "D"} />
-            ))}
-          </div>
-        ))}
-      </div>
+      <Section title="Forwards" className="p-3">
+        <div className="space-y-2 pt-1">
+          {lines.F.map((ln, i) => (
+            <div key={i} className="grid grid-cols-[2rem_1fr_1fr_1fr] gap-1.5 sm:gap-2 items-center">
+              <div className="text-xs text-slate-500">L{i + 1}</div>
+              {[0, 1, 2].map((si) => (
+                <Slot key={si} kind="F" li={i} si={si} id={ln[si]} filter={(p) => p.pos !== "G" && p.pos !== "D"} />
+              ))}
+            </div>
+          ))}
+        </div>
+      </Section>
 
-      <div className={`${card} p-3 space-y-2`}>
-        <div className="text-sm font-medium text-slate-300">Defence</div>
-        {lines.D.map((pr, i) => (
-          <div key={i} className="grid grid-cols-[2.5rem_1fr_1fr] gap-2 items-center">
-            <div className="text-xs text-slate-500">D{i + 1}</div>
-            {[0, 1].map((si) => (
-              <Slot key={si} kind="D" li={i} si={si} id={pr[si]} filter={(p) => p.pos === "D"} />
-            ))}
-          </div>
-        ))}
-      </div>
+      <Section title="Defence" className="p-3">
+        <div className="space-y-2 pt-1">
+          {lines.D.map((pr, i) => (
+            <div key={i} className="grid grid-cols-[2rem_1fr_1fr] gap-1.5 sm:gap-2 items-center">
+              <div className="text-xs text-slate-500">D{i + 1}</div>
+              {[0, 1].map((si) => <Slot key={si} kind="D" li={i} si={si} id={pr[si]} filter={(p) => p.pos === "D"} />)}
+            </div>
+          ))}
+        </div>
+      </Section>
 
-      <div className={`${card} p-3 space-y-2`}>
-        <div className="text-sm font-medium text-slate-300">Goaltenders</div>
-        <div className="grid grid-cols-[2.5rem_1fr_1fr] gap-2 items-center">
+      <Section title="Goaltenders" className="p-3">
+        <div className="grid grid-cols-[2rem_1fr_1fr] gap-1.5 sm:gap-2 items-center pt-1">
           <div className="text-xs text-slate-500">G</div>
           {[0, 1].map((si) => <Slot key={si} kind="G" li={0} si={si} id={lines.G[si]} filter={(p) => p.pos === "G"} />)}
         </div>
-      </div>
+        {starter ? (
+          <div className="text-xs text-slate-400 mt-2">
+            {starter.fatigue > 55
+              ? `${shortName(starter)} is worn down (${Math.round(100 - starter.fatigue)}% fresh) — the backup will get the next start.`
+              : `${shortName(starter)} is ${Math.round(100 - starter.fatigue)}% fresh.`}
+          </div>
+        ) : null}
+      </Section>
 
       {scratches.length ? (
-        <div className={`${card} p-3`}>
-          <div className="text-sm font-medium text-slate-300 mb-1">Healthy scratches</div>
-          <div className="text-sm text-slate-400">{scratches.map((p) => `${shortName(p)} (${p.ovr})`).join(" · ")}</div>
-        </div>
+        <Section title="Healthy scratches" className="p-3">
+          <div className="text-sm text-slate-400 pt-1">{scratches.map((p) => `${shortName(p)} (${p.ovr})`).join(" · ")}</div>
+        </Section>
       ) : null}
     </div>
   );
 }
 
-/* ------------------------------ standings tab ------------------------------ */
+/* -------------------------------- schedule -------------------------------- */
 
-function StandingsTab({ G }) {
-  const [mode, setMode] = useState("div");
-  const rows = (list) => list.map((t, i) => (
-    <tr key={t.id} className={`border-b border-[#16223a] ${t.id === G.userTeam ? "bg-sky-950/40" : ""}`}>
-      <Td className="text-slate-500">{i + 1}</Td>
-      <Td className="whitespace-nowrap font-medium">{t.city} {t.name}</Td>
-      <Td>{t.gp}</Td><Td>{t.w}</Td><Td>{t.l}</Td><Td>{t.otl}</Td>
-      <Td className="font-semibold">{t.pts}</Td>
-      <Td>{t.gf}</Td><Td>{t.ga}</Td>
-      <Td className={t.gf - t.ga > 0 ? "text-emerald-400" : "text-rose-400"}>{t.gf - t.ga > 0 ? "+" : ""}{t.gf - t.ga}</Td>
-      <Td className="text-xs text-slate-400">{t.l10.join("")}</Td>
-    </tr>
-  ));
-  const Table = ({ title, list }) => (
-    <div className={`${card} overflow-x-auto`}>
-      <div className="px-3 py-2 text-sm font-medium text-slate-300 border-b border-[#1e2b45]">{title}</div>
-      <table className="w-full min-w-[620px]">
-        <thead><tr className="border-b border-[#1e2b45]">
-          <Th></Th><Th>Team</Th><Th>GP</Th><Th>W</Th><Th>L</Th><Th>OTL</Th><Th>PTS</Th><Th>GF</Th><Th>GA</Th><Th>Diff</Th><Th>L10</Th>
-        </tr></thead>
-        <tbody>{rows(list)}</tbody>
-      </table>
-    </div>
-  );
+function ScheduleTab({ G, openTeam }) {
+  const [scope, setScope] = useState("mine");
+  const rows = [];
+  G.schedule.forEach((day, d) => {
+    day.forEach((f) => {
+      if (scope === "mine" && f.home !== G.userTeam && f.away !== G.userTeam) return;
+      rows.push({ ...f, d });
+    });
+  });
+  const upcoming = rows.filter((r) => !r.played);
+  const done = rows.filter((r) => r.played).reverse();
+  const Row = ({ r }) => {
+    const home = r.home === G.userTeam;
+    const opp = G.teams[home ? r.away : r.home];
+    const mine = r.home === G.userTeam || r.away === G.userTeam;
+    const win = r.played && mine && ((home && r.hg > r.ag) || (!home && r.ag > r.hg));
+    return (
+      <div className="flex items-center gap-2 text-sm px-3 py-1.5 border-b border-[#16223a] last:border-0">
+        <span className="w-14 text-slate-500 tnum">Day {r.d + 1}</span>
+        {mine ? (
+          <span className="flex-1">
+            <span className="text-slate-500">{home ? "vs" : "at"} </span>
+            <button className="hover:text-sky-300" onClick={() => openTeam(opp.id)}>{opp.city} {opp.name}</button>
+          </span>
+        ) : (
+          <span className="flex-1">
+            <button className="hover:text-sky-300" onClick={() => openTeam(r.away)}>{G.teams[r.away].abbr}</button>
+            <span className="text-slate-500"> @ </span>
+            <button className="hover:text-sky-300" onClick={() => openTeam(r.home)}>{G.teams[r.home].abbr}</button>
+          </span>
+        )}
+        {r.played ? (
+          <span className={`tnum ${mine ? (win ? "text-emerald-400" : "text-rose-400") : "text-slate-300"}`}>
+            {r.ag}–{r.hg}{r.so ? " SO" : r.ot ? " OT" : ""}
+          </span>
+        ) : <span className="text-slate-600 text-xs">—</span>}
+      </div>
+    );
+  };
   return (
     <div className="space-y-3">
       <div className="flex gap-2">
+        <button className={scope === "mine" ? btnPri : btnGhost} onClick={() => setScope("mine")}>My club</button>
+        <button className={scope === "all" ? btnPri : btnGhost} onClick={() => setScope("all")}>Whole league</button>
+      </div>
+      <div className="text-xs text-slate-400">
+        The break is days {G.allStarDay}–{G.allStarDay + 1}. The trade deadline is day {deadlineDay(G) + 1}.
+      </div>
+      <Section title={`Upcoming (${upcoming.length})`}>
+        <div className="max-h-[26rem] overflow-y-auto">
+          {upcoming.slice(0, 120).map((r, i) => <Row key={i} r={r} />)}
+          {!upcoming.length ? <div className="px-3 py-4 text-sm text-slate-500">The season is over.</div> : null}
+        </div>
+      </Section>
+      <Section title={`Played (${done.length})`}>
+        <div className="max-h-[26rem] overflow-y-auto">
+          {done.slice(0, 120).map((r, i) => <Row key={i} r={r} />)}
+          {!done.length ? <div className="px-3 py-4 text-sm text-slate-500">No games yet.</div> : null}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/* ------------------------------- standings -------------------------------- */
+
+function StandingsTab({ G, openTeam }) {
+  const [mode, setMode] = useState("div");
+  const cols = [
+    { key: "team", label: "Team", get: (t) => t.city, cell: (t) => (
+      <span className="whitespace-nowrap font-medium">{t.city} {t.name}</span>
+    ) },
+    { key: "gp", label: "GP", get: (t) => t.gp },
+    { key: "w", label: "W", get: (t) => t.w },
+    { key: "l", label: "L", get: (t) => t.l },
+    { key: "otl", label: "OTL", get: (t) => t.otl },
+    { key: "pts", label: "PTS", get: (t) => t.pts, cls: "font-semibold" },
+    { key: "gf", label: "GF", get: (t) => t.gf },
+    { key: "ga", label: "GA", get: (t) => t.ga },
+    { key: "diff", label: "Diff", get: (t) => t.gf - t.ga,
+      cell: (t) => <span className={t.gf - t.ga > 0 ? "text-emerald-400" : "text-rose-400"}>{t.gf - t.ga > 0 ? "+" : ""}{t.gf - t.ga}</span> },
+    { key: "l10", label: "L10", get: (t) => (t.l10 || []).filter((x) => x === "W").length,
+      cell: (t) => <span className="text-xs text-slate-400">{(t.l10 || []).join("")}</span> },
+  ];
+  const Table = ({ title, list }) => (
+    <Section title={title}>
+      <SortTable min={640} cols={cols} rows={list} initial="pts" rowKey={(t) => t.id}
+        onRow={(t) => openTeam(t.id)}
+        rowCls={(t) => (t.id === G.userTeam ? "bg-sky-950/40" : "")} />
+    </Section>
+  );
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap">
         {[["div", "Division"], ["conf", "Conference"], ["league", "League"]].map(([k, l]) => (
           <button key={k} className={mode === k ? btnPri : btnGhost} onClick={() => setMode(k)}>{l}</button>
         ))}
@@ -2294,180 +2818,470 @@ function StandingsTab({ G }) {
   );
 }
 
-/* -------------------------------- stats tab -------------------------------- */
+/* ---------------------------------- stats --------------------------------- */
 
-function StatsTab({ G }) {
+function StatsTab({ G, openPlayer }) {
   const [mode, setMode] = useState("skaters");
-  const skaters = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 0)
-    .sort((a, b) => pts(b.season) - pts(a.season) || b.season.g - a.season.g).slice(0, 60);
-  const goalies = playersOf(G).filter((p) => p.pos === "G" && p.season.gp >= 5)
-    .sort((a, b) => svPct(b.season) - svPct(a.season)).slice(0, 30);
+  const [scope, setScope] = useState("league");
+  const pool = (p) => (scope === "mine" ? p.teamId === G.userTeam : true);
+  const skaters = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 0 && pool(p));
+  const goalies = playersOf(G).filter((p) => p.pos === "G" && p.season.gp >= 3 && pool(p));
+  const teamCell = (p) => <span className="text-slate-400">{p.teamId != null ? G.teams[p.teamId].abbr : "FA"}</span>;
+  const nameCell = (p) => <span className="whitespace-nowrap">{fullName(p)}<HotCold G={G} p={p} /></span>;
+
+  const skaterCols = [
+    { key: "name", label: "Player", get: (p) => p.ln, cell: nameCell },
+    { key: "team", label: "Tm", get: (p) => (p.teamId != null ? G.teams[p.teamId].abbr : "FA"), cell: teamCell },
+    { key: "pos", label: "Pos", get: (p) => POS.indexOf(p.pos), cell: (p) => <PosBadge pos={p.pos} /> },
+    { key: "gp", label: "GP", get: (p) => p.season.gp },
+    { key: "g", label: "G", get: (p) => p.season.g },
+    { key: "a", label: "A", get: (p) => p.season.a },
+    { key: "p", label: "P", get: (p) => pts(p.season), cls: "font-semibold" },
+    { key: "pm", label: "+/-", get: (p) => p.season.pm, cell: (p) => `${p.season.pm > 0 ? "+" : ""}${p.season.pm}` },
+    { key: "pim", label: "PIM", get: (p) => p.season.pim },
+    { key: "sog", label: "SOG", get: (p) => p.season.sog },
+    { key: "shp", label: "SH%", get: (p) => (p.season.sog ? p.season.g / p.season.sog : 0),
+      cell: (p) => (p.season.sog ? (p.season.g / p.season.sog * 100).toFixed(1) : "—") },
+    { key: "ppg", label: "PPG", get: (p) => p.season.ppg },
+    { key: "hit", label: "Hits", get: (p) => p.season.hit },
+    { key: "blk", label: "Blk", get: (p) => p.season.blk },
+  ];
+  const goalieCols = [
+    { key: "name", label: "Goalie", get: (p) => p.ln, cell: nameCell },
+    { key: "team", label: "Tm", get: (p) => (p.teamId != null ? G.teams[p.teamId].abbr : "FA"), cell: teamCell },
+    { key: "gp", label: "GP", get: (p) => p.season.gp },
+    { key: "w", label: "W", get: (p) => p.season.w },
+    { key: "l", label: "L", get: (p) => p.season.l },
+    { key: "otl", label: "OTL", get: (p) => p.season.otl },
+    { key: "sv", label: "SV%", get: (p) => svPct(p.season), cls: "font-semibold",
+      cell: (p) => (svPct(p.season) * 100).toFixed(1) },
+    { key: "gaa", label: "GAA", get: (p) => -gaa(p.season), cell: (p) => gaa(p.season).toFixed(2) },
+    { key: "so", label: "SO", get: (p) => p.season.so },
+    { key: "sa", label: "SA", get: (p) => p.season.sa },
+    { key: "sosv", label: "SO SV", get: (p) => p.season.sosa ? p.season.sosv / p.season.sosa : 0,
+      cell: (p) => (p.season.sosa ? `${p.season.sosv}/${p.season.sosa}` : "—") },
+  ];
   return (
     <div className="space-y-3">
-      <div className="flex gap-2">
+      <div className="flex gap-2 flex-wrap">
         <button className={mode === "skaters" ? btnPri : btnGhost} onClick={() => setMode("skaters")}>Skaters</button>
         <button className={mode === "goalies" ? btnPri : btnGhost} onClick={() => setMode("goalies")}>Goalies</button>
+        <div className="flex-1" />
+        <button className={scope === "league" ? btnPri : btnGhost} onClick={() => setScope("league")}>League</button>
+        <button className={scope === "mine" ? btnPri : btnGhost} onClick={() => setScope("mine")}>My club</button>
       </div>
-      <div className={`${card} overflow-x-auto`}>
-        {mode === "skaters" ? (
-          <table className="w-full min-w-[700px]">
-            <thead><tr className="border-b border-[#1e2b45]">
-              <Th></Th><Th>Player</Th><Th>Team</Th><Th>Pos</Th><Th>GP</Th><Th>G</Th><Th>A</Th><Th>P</Th><Th>+/-</Th><Th>PIM</Th><Th>SOG</Th>
-            </tr></thead>
-            <tbody>{skaters.map((p, i) => (
-              <tr key={p.id} className={`border-b border-[#16223a] ${p.teamId === G.userTeam ? "bg-sky-950/30" : ""}`}>
-                <Td className="text-slate-500">{i + 1}</Td>
-                <Td className="whitespace-nowrap">{fullName(p)}</Td>
-                <Td className="text-slate-400">{p.teamId != null ? G.teams[p.teamId].abbr : "FA"}</Td>
-                <Td><PosBadge pos={p.pos} /></Td>
-                <Td>{p.season.gp}</Td><Td>{p.season.g}</Td><Td>{p.season.a}</Td>
-                <Td className="font-semibold">{pts(p.season)}</Td>
-                <Td>{p.season.pm > 0 ? "+" : ""}{p.season.pm}</Td>
-                <Td>{p.season.pim}</Td><Td>{p.season.sog}</Td>
-              </tr>
-            ))}</tbody>
-          </table>
-        ) : (
-          <table className="w-full min-w-[620px]">
-            <thead><tr className="border-b border-[#1e2b45]">
-              <Th></Th><Th>Goalie</Th><Th>Team</Th><Th>GP</Th><Th>W</Th><Th>L</Th><Th>OTL</Th><Th>SV%</Th><Th>GAA</Th><Th>SO</Th>
-            </tr></thead>
-            <tbody>{goalies.map((p, i) => (
-              <tr key={p.id} className={`border-b border-[#16223a] ${p.teamId === G.userTeam ? "bg-sky-950/30" : ""}`}>
-                <Td className="text-slate-500">{i + 1}</Td>
-                <Td className="whitespace-nowrap">{fullName(p)}</Td>
-                <Td className="text-slate-400">{p.teamId != null ? G.teams[p.teamId].abbr : "FA"}</Td>
-                <Td>{p.season.gp}</Td><Td>{p.season.w}</Td><Td>{p.season.l}</Td><Td>{p.season.otl}</Td>
-                <Td className="font-semibold">{(svPct(p.season) * 100).toFixed(1)}</Td>
-                <Td>{gaa(p.season).toFixed(2)}</Td><Td>{p.season.so}</Td>
-              </tr>
-            ))}</tbody>
-          </table>
-        )}
-      </div>
+      <Section>
+        <SortTable min={880} rowKey={(p) => p.id} onRow={(p) => openPlayer(p.id)}
+          rowCls={(p) => (p.teamId === G.userTeam ? "bg-sky-950/30" : "")}
+          cols={mode === "skaters" ? skaterCols : goalieCols}
+          rows={mode === "skaters" ? skaters : goalies}
+          initial={mode === "skaters" ? "p" : "sv"} />
+      </Section>
     </div>
   );
 }
 
-/* -------------------------------- trade tab -------------------------------- */
+/* ------------------------------ the game viewer --------------------------- */
 
-function TradeTab({ G, setG }) {
+const clockOf = (t) => {
+  const per = Math.min(3, Math.floor(t / 20));
+  const inPer = t - per * 20;
+  const m = Math.floor(inPer), s = Math.floor((inPer - m) * 60);
+  return t >= 60 ? `OT ${Math.floor(t - 60)}:${String(s).padStart(2, "0")}` : `P${per + 1} ${m}:${String(s).padStart(2, "0")}`;
+};
+
+function GameTab({ G, openPlayer }) {
+  const lg = G.lastGame;
+  const [upTo, setUpTo] = useState(1e9);
+  const [tab, setTab] = useState("play");
+  if (!lg) return <div className="text-slate-400 text-sm">No game to watch yet — play a day first.</div>;
+  const H = G.teams[lg.home], A = G.teams[lg.away];
+  const events = (lg.events || []).filter((e) => e.t <= upTo);
+  const running = events.reduce((acc, e) => {
+    if (e.kind === "goal") acc[e.team === lg.home ? 0 : 1]++;
+    if (e.kind === "shootout") acc[e.team === lg.home ? 0 : 1]++;
+    return acc;
+  }, [0, 0]);
+  const nm = (id) => (G.players[id] ? shortName(G.players[id]) : "—");
+  const line = (e) => {
+    if (e.kind === "goal") return `${nm(e.pid)} scores${e.strength === "pp" ? " on the power play" : e.strength === "sh" ? " shorthanded" : e.strength === "en" ? " into the empty net" : ""}${e.zone && e.zone !== "empty" ? ` from the ${e.zone}` : ""}.`;
+    if (e.kind === "save") return `${nm(e.pid)} turns aside ${nm(e.shooter)} on the rush.`;
+    if (e.kind === "penalty") return `${nm(e.pid)} to the box, two minutes.`;
+    if (e.kind === "fight") return `${nm(e.pid)} and ${nm(e.other)} drop the gloves.`;
+    if (e.kind === "shootout") return `Shootout won by ${G.teams[e.team].name}.`;
+    return e.kind;
+  };
+  const boxRows = (tid) => {
+    const b = lg.boxes[tid];
+    if (!b) return [];
+    return Object.entries(b.players)
+      .map(([pid, s]) => ({ p: G.players[pid], s }))
+      .filter((r) => r.p && r.s.toi > 0)
+      .sort((a, b2) => (b2.s.g || 0) + (b2.s.a || 0) - ((a.s.g || 0) + (a.s.a || 0)) || b2.s.toi - a.s.toi);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className={`${card} p-4 text-center`}>
+        <div className="flex items-center justify-center gap-6">
+          <div className="flex-1 text-right">
+            <div className="text-sm text-slate-400">{A.city}</div>
+            <div className="font-semibold">{A.name}</div>
+          </div>
+          <div className="text-3xl font-bold tnum">
+            {upTo >= 1e9 ? lg.ag : running[1]}<span className="text-slate-600 mx-2">–</span>{upTo >= 1e9 ? lg.hg : running[0]}
+          </div>
+          <div className="flex-1 text-left">
+            <div className="text-sm text-slate-400">{H.city}</div>
+            <div className="font-semibold">{H.name}</div>
+          </div>
+        </div>
+        <div className="text-xs text-slate-500 mt-1">{lg.so ? "Decided in a shootout" : lg.ot ? "Overtime" : "Regulation"}</div>
+      </div>
+
+      <div className="flex gap-2 flex-wrap">
+        <button className={tab === "play" ? btnPri : btnGhost} onClick={() => setTab("play")}>Play-by-play</button>
+        <button className={tab === "box" ? btnPri : btnGhost} onClick={() => setTab("box")}>Box score</button>
+        {tab === "play" ? (
+          <>
+            <div className="flex-1" />
+            <button className={btnGhost} onClick={() => setUpTo(0)}>Rewind</button>
+            <button className={btnGhost} onClick={() => {
+              const next = (lg.events || []).find((e) => e.t > upTo);
+              setUpTo(next ? next.t : 1e9);
+            }}>Next event</button>
+            <button className={btnGhost} onClick={() => setUpTo(1e9)}>Show all</button>
+          </>
+        ) : null}
+      </div>
+
+      {tab === "play" ? (
+        <Section title={`${events.length} of ${(lg.events || []).length} events`}>
+          <div className="max-h-[30rem] overflow-y-auto">
+            {events.map((e, i) => (
+              <div key={i} className={`flex items-start gap-3 px-3 py-1.5 border-b border-[#16223a] text-sm
+                ${e.kind === "goal" ? "bg-[#16223a]" : ""}`}>
+                <span className="w-20 shrink-0 text-slate-500 tnum text-xs pt-0.5">{clockOf(e.t)}</span>
+                <span className="w-10 shrink-0 text-slate-400 text-xs pt-0.5">{G.teams[e.team].abbr}</span>
+                <span className={`flex-1 ${e.kind === "goal" ? "font-medium" : "text-slate-300"}`}>{line(e)}</span>
+                <button className="text-xs text-sky-400 hover:underline shrink-0" onClick={() => openPlayer(e.pid)}>view</button>
+              </div>
+            ))}
+            {!events.length ? <div className="px-3 py-4 text-sm text-slate-500">Puck drop. Step through with “Next event”.</div> : null}
+          </div>
+        </Section>
+      ) : (
+        <div className="grid md:grid-cols-2 gap-3">
+          {[lg.away, lg.home].map((tid) => (
+            <Section key={tid} title={`${G.teams[tid].city} ${G.teams[tid].name}`}>
+              <SortTable min={320} rowKey={(r) => r.p.id} onRow={(r) => openPlayer(r.p.id)}
+                rows={boxRows(tid)} initial="p"
+                cols={[
+                  { key: "name", label: "Player", get: (r) => r.p.ln, cell: (r) => <span className="whitespace-nowrap">{shortName(r.p)}</span> },
+                  { key: "g", label: "G", get: (r) => r.s.g || 0 },
+                  { key: "a", label: "A", get: (r) => r.s.a || 0 },
+                  { key: "p", label: "P", get: (r) => (r.s.g || 0) + (r.s.a || 0), cls: "font-semibold" },
+                  { key: "sog", label: "SOG", get: (r) => r.s.sog != null ? r.s.sog : (r.s.sa || 0),
+                    cell: (r) => (r.p.pos === "G" ? `${r.s.sv}/${r.s.sa}` : r.s.sog) },
+                  { key: "toi", label: "TOI", get: (r) => r.s.toi, cell: (r) => r.s.toi.toFixed(1) },
+                ]} />
+            </Section>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------------- trades --------------------------------- */
+
+function TradeTab({ G, setG, notify, openPlayer }) {
   const [other, setOther] = useState(G.userTeam === 0 ? 1 : 0);
   const [mine, setMine] = useState([]);
   const [theirs, setTheirs] = useState([]);
-  const [msg, setMsg] = useState(null);
+  const [myPicks, setMyPicks] = useState([]);
+  const [theirPicks, setTheirPicks] = useState([]);
+  const [retain, setRetain] = useState({});
   const myRoster = rosterOf(G, G.userTeam, true).sort((a, b) => b.ovr - a.ovr);
   const theirRoster = rosterOf(G, other, true).sort((a, b) => b.ovr - a.ovr);
+  const picksOf = (tid) => (G.picks || []).filter((pk) => pk.owner === tid && pk.year > G.year)
+    .sort((a, b) => a.year - b.year || a.round - b.round);
+  const pkId = (pk) => `${pk.year}-${pk.round}-${pk.orig}`;
   const toggle = (list, set, id) => set(list.includes(id) ? list.filter((x) => x !== id) : list.concat(id));
 
-  const ev = useMemo(() => evalTrade(G, G.userTeam, mine, [], other, theirs, []),
-    [G, mine, theirs, other]);
+  const selPicks = (tid, ids) => picksOf(tid).filter((pk) => ids.includes(pkId(pk)));
+  const ev = useMemo(
+    () => evalTrade(G, G.userTeam, mine, selPicks(G.userTeam, myPicks), other, theirs, selPicks(other, theirPicks), { retain }),
+    [G, mine, theirs, myPicks, theirPicks, other, retain]);
 
-  const Side = ({ roster, sel, set, label }) => (
-    <div className={`${card} p-3 space-y-1 max-h-[26rem] overflow-y-auto`}>
-      <div className="text-sm font-medium text-slate-300 sticky top-0 bg-[#111c30] pb-1">{label}</div>
-      {roster.map((p) => (
-        <label key={p.id} className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer text-sm
-          ${sel.includes(p.id) ? "bg-sky-900/50" : "hover:bg-[#16223a]"}`}>
-          <input type="checkbox" checked={sel.includes(p.id)} onChange={() => toggle(sel, set, p.id)} />
-          <PosBadge pos={p.pos} />
-          <span className="flex-1">{shortName(p)}</span>
-          <span className="text-slate-400 tnum">{p.ovr}</span>
-          <span className="text-slate-500 tnum text-xs">${p.contract.amt}M</span>
-        </label>
-      ))}
-    </div>
+  const Side = ({ tid, roster, sel, set, picks, pickSel, setPickSel, label, canRetain }) => (
+    <Section title={label} className="max-h-[30rem] overflow-y-auto">
+      <div className="p-2 space-y-0.5">
+        {roster.map((p) => (
+          <div key={p.id} className={`flex items-center gap-2 px-2 py-1 rounded text-sm
+            ${sel.includes(p.id) ? "bg-sky-900/50" : "hover:bg-[#16223a]"}`}>
+            <input type="checkbox" checked={sel.includes(p.id)} onChange={() => toggle(sel, set, p.id)} />
+            <PosBadge pos={p.pos} />
+            <button className="flex-1 text-left truncate hover:text-sky-300" onClick={() => openPlayer(p.id)}>
+              {shortName(p)}
+              {hasNtc(p) ? <span className="ml-1 text-[10px] text-amber-300">NTC</span> : null}
+            </button>
+            <span className="text-slate-400 tnum">{p.ovr}</span>
+            <span className="text-slate-500 tnum text-xs w-14 text-right">${effectiveCap(G, p)}M</span>
+            {canRetain && sel.includes(p.id) && rules(G).retainedSalary ? (
+              <select className="bg-[#0d1728] border border-[#243250] rounded text-[11px] px-1 py-0.5"
+                value={retain[p.id] || 0}
+                onChange={(e) => setRetain({ ...retain, [p.id]: +e.target.value })}>
+                <option value={0}>keep 0%</option>
+                <option value={0.25}>keep 25%</option>
+                <option value={0.5}>keep 50%</option>
+              </select>
+            ) : null}
+          </div>
+        ))}
+        {picks.length ? <div className="text-[11px] uppercase tracking-wide text-slate-500 px-2 pt-2">Draft picks</div> : null}
+        {picks.map((pk) => (
+          <label key={pkId(pk)} className={`flex items-center gap-2 px-2 py-1 rounded text-sm cursor-pointer
+            ${pickSel.includes(pkId(pk)) ? "bg-sky-900/50" : "hover:bg-[#16223a]"}`}>
+            <input type="checkbox" checked={pickSel.includes(pkId(pk))} onChange={() => toggle(pickSel, setPickSel, pkId(pk))} />
+            <span className="flex-1">{pk.year} round {pk.round}
+              {pk.orig !== tid ? <span className="text-slate-500"> (from {G.teams[pk.orig].abbr})</span> : null}</span>
+          </label>
+        ))}
+      </div>
+    </Section>
   );
+
+  const lockedIn = mine.concat(theirs).map((id) => G.players[id]).filter((p) => hasNtc(p));
 
   return (
     <div className="space-y-3">
-      <select className="bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2"
-        value={other} onChange={(e) => { setOther(+e.target.value); setTheirs([]); setMsg(null); }}>
-        {G.teams.filter((t) => t.id !== G.userTeam).map((t) => (
-          <option key={t.id} value={t.id}>{t.city} {t.name} — ${capSpace(G, t.id)}M space</option>
-        ))}
-      </select>
-      <div className="grid md:grid-cols-2 gap-3">
-        <Side roster={myRoster} sel={mine} set={setMine} label={`You send (${G.teams[G.userTeam].abbr})`} />
-        <Side roster={theirRoster} sel={theirs} set={setTheirs} label={`You get (${G.teams[other].abbr})`} />
+      {!tradesOpen(G) ? (
+        <div className={`${card} p-3 text-sm text-amber-300`}>
+          {G.phase === "playoffs" ? "Rosters are frozen for the playoffs." : "The trade deadline has passed for this season."}
+        </div>
+      ) : null}
+      <div className="flex gap-2 flex-wrap items-center">
+        <select className={inputCls} value={other}
+          onChange={(e) => { setOther(+e.target.value); setTheirs([]); setTheirPicks([]); }}>
+          {G.teams.filter((t) => t.id !== G.userTeam).map((t) => (
+            <option key={t.id} value={t.id}>{t.city} {t.name} — ${capSpace(G, t.id)}M space</option>
+          ))}
+        </select>
+        {daysToDeadline(G) != null && daysToDeadline(G) > 0
+          ? <span className="text-xs text-amber-300">{daysToDeadline(G)} days to the deadline</span> : null}
       </div>
+
+      <div className="grid md:grid-cols-2 gap-3">
+        <Side tid={G.userTeam} roster={myRoster} sel={mine} set={setMine}
+          picks={picksOf(G.userTeam)} pickSel={myPicks} setPickSel={setMyPicks}
+          label={`You send (${G.teams[G.userTeam].abbr})`} canRetain />
+        <Side tid={other} roster={theirRoster} sel={theirs} set={setTheirs}
+          picks={picksOf(other)} pickSel={theirPicks} setPickSel={setTheirPicks}
+          label={`You get (${G.teams[other].abbr})`} />
+      </div>
+
+      {lockedIn.length ? (
+        <div className={`${card} p-3 space-y-2`}>
+          <div className="text-sm text-amber-300">
+            {lockedIn.map((p) => fullName(p)).join(", ")} {lockedIn.length === 1 ? "has" : "have"} a no-trade clause.
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            {lockedIn.map((p) => (
+              <button key={p.id} className={btnGhost} onClick={() => {
+                const g2 = migrate(JSON.parse(JSON.stringify(G)));
+                const r = requestNtcWaiver(g2, p.id);
+                setG(g2);
+                notify(r.ok ? `${fullName(p)} will waive it.` : `${fullName(p)} won't waive it.`);
+              }}>Ask {shortName(p)} to waive</button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       <div className={`${card} p-3 flex flex-wrap items-center gap-3`}>
         <div className="text-sm">
           <span className="text-slate-400">Their read: </span>
-          {mine.length || theirs.length
+          {mine.length || theirs.length || myPicks.length || theirPicks.length
             ? <span className={ev.ok ? "text-emerald-400" : "text-amber-400"}>{ev.why}</span>
-            : <span className="text-slate-500">pick some players</span>}
+            : <span className="text-slate-500">pick some pieces</span>}
+          {ev.aVal != null ? <span className="text-slate-500 ml-2 tnum">({ev.aVal} out / {ev.bVal} in)</span> : null}
         </div>
+        <div className="flex-1" />
         <button className={btnPri} disabled={!ev.ok} onClick={() => {
           const g2 = migrate(JSON.parse(JSON.stringify(G)));
-          const r = doTrade(g2, g2.userTeam, mine, [], other, theirs, []);
-          if (r.ok) { setG(g2); setMine([]); setTheirs([]); setMsg("Trade completed."); }
-          else setMsg(r.why);
+          const r = doTrade(g2, g2.userTeam, mine, selPicks(G.userTeam, myPicks), other, theirs, selPicks(other, theirPicks), { retain });
+          if (r.ok) {
+            setG(g2); setMine([]); setTheirs([]); setMyPicks([]); setTheirPicks([]); setRetain({});
+            notify("Trade completed.");
+          } else notify(r.why);
         }}>Propose</button>
-        {msg ? <div className="text-sm text-slate-400">{msg}</div> : null}
       </div>
     </div>
   );
 }
 
-/* ----------------------------- free agency tab ----------------------------- */
+/* ------------------------------ free agency ------------------------------- */
 
-function FreeAgencyTab({ G, setG }) {
-  const [msg, setMsg] = useState(null);
-  const fas = G.freeAgents.map((id) => G.players[id]).filter(Boolean).sort((a, b) => b.ovr - a.ovr);
+function FreeAgencyTab({ G, setG, notify, openPlayer }) {
+  const [target, setTarget] = useState(null);
+  const [amt, setAmt] = useState(1);
+  const [yrs, setYrs] = useState(3);
+  const [counter, setCounter] = useState(null);
+  const fas = G.freeAgents.map((id) => G.players[id]).filter(Boolean);
+
+  const open = (p) => {
+    setTarget(p.id);
+    setYrs(3);
+    setAmt(askingPrice(G, p.id, G.userTeam, 3));
+    setCounter(null);
+  };
+  const p = target != null ? G.players[target] : null;
+
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-2">
-        <Stat label="Cap space" value={`$${capSpace(G, G.userTeam)}M`} />
+        <Stat label="Cap space" value={`$${capSpace(G, G.userTeam)}M`} tone={capSpace(G, G.userTeam) < 0 ? "text-rose-400" : ""} />
         <Stat label="Roster" value={rosterOf(G, G.userTeam).length} sub={`max ${ROSTER_MAX}`} />
         <Stat label="Available" value={fas.length} />
       </div>
-      {msg ? <div className="text-sm text-slate-400">{msg}</div> : null}
-      <div className={`${card} overflow-x-auto`}>
-        <table className="w-full min-w-[640px]">
-          <thead><tr className="border-b border-[#1e2b45]">
-            <Th>Player</Th><Th>Pos</Th><Th>Age</Th><Th>Ovr</Th><Th>Pot</Th><Th>Asking</Th><Th></Th>
-          </tr></thead>
-          <tbody>{fas.slice(0, 60).map((p) => {
-            const ask = marketValue(G, p);
-            return (
-              <tr key={p.id} className="border-b border-[#16223a] hover:bg-[#16223a]">
-                <Td className="whitespace-nowrap">{fullName(p)}</Td>
-                <Td><PosBadge pos={p.pos} /></Td>
-                <Td>{p.age}</Td><Td className="font-semibold">{p.ovr}</Td><Td className="text-slate-400">{p.pot}</Td>
-                <Td>${ask}M</Td>
-                <Td>
-                  <button className="text-xs text-sky-400 hover:underline" onClick={() => {
-                    const g2 = migrate(JSON.parse(JSON.stringify(G)));
-                    const offer = round1(ask * 1.05);
-                    if (!contractOffer(g2, g2.players[p.id], offer, 3)) { setMsg(`${fullName(p)} turned it down.`); return; }
-                    const r = signPlayer(g2, p.id, g2.userTeam, offer, 3);
-                    if (!r.ok) { setMsg(r.why); return; }
-                    setMsg(`Signed ${fullName(p)} — $${offer}M × 3.`);
+
+      {p ? (
+        <Section title={`Negotiating with ${fullName(p)}`} className="p-3">
+          <div className="space-y-3 pt-1">
+            <div className="flex flex-wrap gap-4 text-sm">
+              <div><PosBadge pos={p.pos} /> <span className="text-slate-400 ml-1">age {p.age}</span></div>
+              <div><span className="text-slate-400">Overall </span>{p.ovr} <span className="text-slate-500">/ {p.pot}</span></div>
+              <div><span className="text-slate-400">He's asking </span>${askingPrice(G, p.id, G.userTeam, yrs)}M × {yrs}</div>
+            </div>
+            <div className="grid sm:grid-cols-3 gap-3 items-end">
+              <div>
+                <div className="text-xs text-slate-400 mb-1">Salary ($M per year)</div>
+                <input type="number" step="0.1" min="0.8" className={`${inputCls} w-full`}
+                  value={amt} onChange={(e) => setAmt(+e.target.value)} />
+              </div>
+              <div>
+                <div className="text-xs text-slate-400 mb-1">Term (years)</div>
+                <select className={`${inputCls} w-full`} value={yrs} onChange={(e) => { setYrs(+e.target.value); setCounter(null); }}>
+                  {[1, 2, 3, 4, 5, 6, 7].map((y) => <option key={y} value={y}>{y}</option>)}
+                </select>
+              </div>
+              <div className="flex gap-2">
+                <button className={btnPri} onClick={() => {
+                  const g2 = migrate(JSON.parse(JSON.stringify(G)));
+                  const r = negotiate(g2, p.id, g2.userTeam, amt, yrs);
+                  if (!r.ok) {
+                    setCounter(r.counter || null);
+                    notify(r.why || "He turned it down.");
                     setG(g2);
-                  }}>Offer ${round1(ask * 1.05)}M × 3</button>
-                </Td>
-              </tr>
-            );
-          })}</tbody>
-        </table>
-      </div>
+                    return;
+                  }
+                  const s = signPlayer(g2, p.id, g2.userTeam, amt, yrs);
+                  if (!s.ok) { notify(s.why); return; }
+                  setG(g2); setTarget(null); setCounter(null);
+                  notify(`Signed ${fullName(p)} — $${round1(amt)}M × ${yrs}.`);
+                }}>Offer</button>
+                <button className={btnGhost} onClick={() => { setTarget(null); setCounter(null); }}>Walk away</button>
+              </div>
+            </div>
+            {counter ? (
+              <div className="text-sm text-amber-300">
+                He'd sign for ${counter}M × {yrs}.
+                <button className="ml-2 text-sky-400 hover:underline" onClick={() => { setAmt(counter); setCounter(null); }}>
+                  Meet it
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </Section>
+      ) : null}
+
+      <Section>
+        <SortTable min={720} rowKey={(x) => x.id} rows={fas} initial="ovr"
+          onRow={(x) => open(x)}
+          cols={[
+            { key: "name", label: "Player", get: (x) => x.ln, cell: (x) => <span className="whitespace-nowrap">{fullName(x)}</span> },
+            { key: "pos", label: "Pos", get: (x) => POS.indexOf(x.pos), cell: (x) => <PosBadge pos={x.pos} /> },
+            { key: "age", label: "Age", get: (x) => x.age },
+            { key: "ovr", label: "Ovr", get: (x) => x.ovr, cls: "font-semibold" },
+            { key: "pot", label: "Pot", get: (x) => x.pot, cls: "text-slate-400" },
+            { key: "ask", label: "Asking", get: (x) => askingPrice(G, x.id, G.userTeam, 3),
+              cell: (x) => `$${askingPrice(G, x.id, G.userTeam, 3)}M` },
+            { key: "act", label: "", get: () => 0, cell: (x) => (
+              <button className="text-xs text-sky-400 hover:underline"
+                onClick={(e) => { e.stopPropagation(); open(x); }}>Negotiate</button>
+            ) },
+          ]} empty="Nobody available." />
+      </Section>
     </div>
   );
 }
 
-/* ------------------------------ playoffs tab ------------------------------- */
+/* -------------------------------- playoffs -------------------------------- */
 
-function PlayoffsTab({ G, setG }) {
+function roundName(n) {
+  if (n === 1) return "Cup Final";
+  if (n === 2) return "Conference Finals";
+  if (n === 4) return "Second Round";
+  return "First Round";
+}
+
+function SeriesPage({ G, s, onClose, openPlayer }) {
+  const hi = G.teams[s.hi], lo = G.teams[s.lo];
+  // Who's actually driving the series.
+  const stars = [s.hi, s.lo].map((tid) => rosterOf(G, tid).filter((p) => p.po && p.po.gp)
+    .sort((a, b) => pts(b.po) - pts(a.po)).slice(0, 5));
+  return (
+    <Modal wide title={`${hi.city} ${hi.name} vs ${lo.city} ${lo.name}`} onClose={onClose}>
+      <div className="space-y-3">
+        <div className={`${card} p-4 text-center`}>
+          <div className="text-3xl font-bold tnum">{s.w[0]} – {s.w[1]}</div>
+          <div className="text-xs text-slate-400 mt-1">
+            {s.done ? `${G.teams[s.winner].name} advance` : `first to ${winsNeeded(G)}`}
+          </div>
+        </div>
+        <Section title="Games">
+          <div>
+            {s.games.map((g, i) => (
+              <div key={i} className="flex items-center gap-3 px-3 py-1.5 border-b border-[#16223a] last:border-0 text-sm">
+                <span className="w-16 text-slate-500">Game {i + 1}</span>
+                <span className="flex-1">{G.teams[g.away].abbr} @ {G.teams[g.home].abbr}</span>
+                <span className="tnum">{g.ag}–{g.hg}{g.ot ? " OT" : ""}</span>
+              </div>
+            ))}
+            {!s.games.length ? <div className="px-3 py-4 text-sm text-slate-500">Not started.</div> : null}
+          </div>
+        </Section>
+        <div className="grid sm:grid-cols-2 gap-3">
+          {[0, 1].map((i) => (
+            <Section key={i} title={`${G.teams[i === 0 ? s.hi : s.lo].name} leaders`} className="p-3">
+              <div className="pt-1">
+                {stars[i].length ? stars[i].map((p) => (
+                  <div key={p.id} className="flex justify-between text-sm py-0.5 cursor-pointer hover:text-sky-300"
+                    onClick={() => openPlayer(p.id)}>
+                    <span>{shortName(p)}</span>
+                    <span className="tnum text-slate-400">{p.po.g}G {p.po.a}A · {pts(p.po)}</span>
+                  </div>
+                )) : <div className="text-sm text-slate-500">No games played.</div>}
+              </div>
+            </Section>
+          ))}
+        </div>
+        <Section title="Unavailable" className="p-3">
+          <div className="text-sm text-slate-400 pt-1">
+            {[s.hi, s.lo].flatMap((tid) => rosterOf(G, tid, true).filter((p) => p.inj > 0)
+              .map((p) => `${G.teams[tid].abbr} ${shortName(p)} (${p.injDesc})`)).join(" · ") || "Everybody's healthy."}
+          </div>
+        </Section>
+      </div>
+    </Modal>
+  );
+}
+
+function PlayoffsTab({ G, setG, openPlayer }) {
+  const [open, setOpen] = useState(null);
   if (!G.playoffs) return <div className="text-slate-400 text-sm">The playoffs haven't started.</div>;
   const P = G.playoffs;
-  const roundName = (i, n) => {
-    const total = P.rounds.length;
-    if (n === 1) return "Cup Final";
-    if (n === 2) return "Conference Finals";
-    if (n === 4) return "Second Round";
-    return "First Round";
-  };
   return (
     <div className="space-y-3">
       {P.champion != null ? (
@@ -2477,17 +3291,19 @@ function PlayoffsTab({ G, setG }) {
         </div>
       ) : null}
       {P.rounds.map((rd, i) => (
-        <div key={i} className={`${card} p-3 space-y-2`}>
-          <div className="text-sm font-medium text-slate-300">{roundName(i, rd.length)}</div>
-          {rd.map((s, j) => (
-            <div key={j} className={`flex items-center gap-3 text-sm px-2 py-1.5 rounded
-              ${s.hi === G.userTeam || s.lo === G.userTeam ? "bg-sky-950/40" : ""}`}>
-              <div className="flex-1">{G.teams[s.hi].city} {G.teams[s.hi].name}</div>
-              <div className="tnum font-semibold">{s.w[0]}–{s.w[1]}</div>
-              <div className="flex-1 text-right">{G.teams[s.lo].city} {G.teams[s.lo].name}</div>
-            </div>
-          ))}
-        </div>
+        <Section key={i} title={roundName(rd.length)} className="p-3">
+          <div className="space-y-1 pt-1">
+            {rd.map((s, j) => (
+              <button key={j} onClick={() => setOpen(s)}
+                className={`w-full flex items-center gap-3 text-sm px-2 py-1.5 rounded hover:bg-[#16223a]
+                  ${s.hi === G.userTeam || s.lo === G.userTeam ? "bg-sky-950/40" : ""}`}>
+                <span className="flex-1 text-left">{G.teams[s.hi].city} {G.teams[s.hi].name}</span>
+                <span className="tnum font-semibold">{s.w[0]}–{s.w[1]}</span>
+                <span className="flex-1 text-right">{G.teams[s.lo].city} {G.teams[s.lo].name}</span>
+              </button>
+            ))}
+          </div>
+        </Section>
       ))}
       {P.champion == null ? (
         <button className={btnPri} onClick={() => {
@@ -2496,14 +3312,205 @@ function PlayoffsTab({ G, setG }) {
           setG(g2);
         }}>Play next round</button>
       ) : null}
+      {open ? <SeriesPage G={G} s={open} onClose={() => setOpen(null)} openPlayer={openPlayer} /> : null}
     </div>
   );
 }
 
-/* ------------------------------ offseason tab ------------------------------ */
+/* -------------------------------- All-Star -------------------------------- */
 
-function OffseasonTab({ G, setG }) {
-  const step = G.offseasonStep || "review";
+function AllStarTab({ G, openPlayer }) {
+  const a = G.allStar;
+  if (!a) return <div className="text-slate-400 text-sm">The All-Star break hasn't come round yet.</div>;
+  const Side = ({ title, ids, score }) => (
+    <Section title={title} className="p-3">
+      <div className="text-3xl font-bold tnum text-center py-1">{score}</div>
+      <div className="pt-1">
+        {ids.map((id) => {
+          const p = G.players[id];
+          if (!p) return null;
+          return (
+            <div key={id} className="flex items-center gap-2 text-sm py-0.5 cursor-pointer hover:text-sky-300"
+              onClick={() => openPlayer(id)}>
+              <PosBadge pos={p.pos} />
+              <span className="flex-1">{fullName(p)}</span>
+              <span className="text-slate-500 text-xs">{G.teams[p.teamId] ? G.teams[p.teamId].abbr : ""}</span>
+              <span className="tnum text-slate-400">{p.pos === "G" ? `${(svPct(p.season) * 100).toFixed(1)}` : pts(p.season)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+  return (
+    <div className="space-y-3">
+      <div className={`${card} p-4 text-center`}>
+        <div className="text-xs uppercase tracking-wide text-slate-400">{a.year} All-Star Game</div>
+        <div className="text-lg font-semibold mt-1">
+          {CONFS[0]} {a.eastScore} — {a.westScore} {CONFS[1]}
+        </div>
+        {a.mvp != null && G.players[a.mvp] ? (
+          <div className="text-sm text-slate-400 mt-1">MVP: {fullName(G.players[a.mvp])}</div>
+        ) : null}
+      </div>
+      <div className="grid md:grid-cols-2 gap-3">
+        <Side title={CONFS[0]} ids={a.east} score={a.eastScore} />
+        <Side title={CONFS[1]} ids={a.west} score={a.westScore} />
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------- records -------------------------------- */
+
+function RecordsTab({ G, openPlayer }) {
+  const recs = G.records || {};
+  return (
+    <div className="space-y-3">
+      <Section title="League record book" className="p-3">
+        <div className="space-y-1 pt-1">
+          {RECORD_DEFS.map((d) => {
+            const r = recs[d.key];
+            return (
+              <div key={d.key} className="flex items-center gap-3 text-sm py-0.5">
+                <span className="flex-1 text-slate-400">{d.label}</span>
+                {r ? (
+                  <>
+                    <button className="hover:text-sky-300" onClick={() => openPlayer(r.pid)}>{r.name}</button>
+                    <span className="text-slate-500 text-xs w-12 text-right">{r.year}</span>
+                    <span className="tnum font-semibold w-10 text-right">{r.v}</span>
+                  </>
+                ) : <span className="text-slate-600">unset</span>}
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+      <Section title="Cups won" className="p-3">
+        <div className="grid sm:grid-cols-2 gap-x-6 pt-1">
+          {G.teams.filter((t) => t.cupWins > 0).sort((a, b) => b.cupWins - a.cupWins).map((t) => (
+            <div key={t.id} className="flex justify-between text-sm py-0.5">
+              <span>{t.city} {t.name}</span><span className="tnum text-slate-400">{t.cupWins}</span>
+            </div>
+          ))}
+          {!G.teams.some((t) => t.cupWins > 0) ? <div className="text-sm text-slate-500">Nobody has won one yet.</div> : null}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/* ------------------------------ club history ------------------------------ */
+
+function ClubModal({ G, teamId, onClose, openPlayer }) {
+  const t = G.teams[teamId];
+  const seasons = (t.seasons || []).slice().reverse();
+  const alumni = playersOf(G).filter((p) => p.teamId === teamId).sort((a, b) => b.ovr - a.ovr).slice(0, 6);
+  const best = seasons.slice().sort((a, b) => b.pts - a.pts)[0];
+  return (
+    <Modal wide title={`${t.city} ${t.name}`} onClose={onClose}>
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <Stat label="Cups" value={t.cupWins} />
+          <Stat label="Playoff years" value={t.playoffApps} />
+          <Stat label="Seasons" value={seasons.length} />
+          <Stat label="Best season" value={best ? `${best.pts} pts` : "—"} sub={best ? String(best.year) : ""} />
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <Stat label="Conference" value={CONFS[t.conf]} sub={DIVS[t.div]} />
+          <Stat label="Cap hit" value={`$${capHit(G, teamId)}M`} sub={`$${capSpace(G, teamId)}M space`} />
+          <Stat label="Rating" value={teamStrength(G, teamId)} sub="top 18 average" />
+          <Stat label="Market" value={"★".repeat(t.mkt)} sub="size" />
+        </div>
+
+        {t.honours && t.honours.length ? (
+          <Section title="Honoured numbers" className="p-3">
+            <div className="space-y-1 pt-1">
+              {t.honours.map((h, i) => (
+                <div key={i} className="flex items-center gap-2 text-sm">
+                  <PosBadge pos={h.pos} />
+                  <span className="flex-1">{h.name}</span>
+                  <span className="text-slate-500 text-xs">{h.seasons} seasons · {h.pts} pts</span>
+                  <span className="text-slate-500 text-xs">{h.year}</span>
+                </div>
+              ))}
+            </div>
+          </Section>
+        ) : null}
+
+        <Section title="Season by season">
+          <SortTable min={520} rows={seasons} initial="year" rowKey={(s) => s.year}
+            cols={[
+              { key: "year", label: "Year", get: (s) => s.year },
+              { key: "rec", label: "Record", get: (s) => s.w, cell: (s) => `${s.w}-${s.l}-${s.otl}` },
+              { key: "pts", label: "Pts", get: (s) => s.pts, cls: "font-semibold" },
+              { key: "gf", label: "GF", get: (s) => s.gf },
+              { key: "ga", label: "GA", get: (s) => s.ga },
+              { key: "res", label: "Result", get: (s) => (s.cup ? 99 : s.rounds),
+                cell: (s) => s.cup ? <span className="text-sky-400">Won the Cup</span>
+                  : s.playoffs ? `${s.rounds} round${s.rounds === 1 ? "" : "s"} won` : <span className="text-slate-500">missed</span> },
+            ]} empty="No completed seasons." />
+        </Section>
+
+        <Section title="Current roster leaders" className="p-3">
+          <div className="pt-1">
+            {alumni.map((p) => (
+              <div key={p.id} className="flex items-center gap-2 text-sm py-0.5 cursor-pointer hover:text-sky-300"
+                onClick={() => openPlayer(p.id)}>
+                <PosBadge pos={p.pos} />
+                <span className="flex-1">{fullName(p)}</span>
+                <span className="tnum text-slate-400">{p.ovr}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      </div>
+    </Modal>
+  );
+}
+
+function HistoryTab({ G, openPlayer, openTeam }) {
+  return (
+    <div className="space-y-3">
+      <Section title="League history">
+        <SortTable min={560} rows={G.history} initial="year" rowKey={(h) => h.year}
+          cols={[
+            { key: "year", label: "Year", get: (h) => h.year },
+            { key: "champ", label: "Champion", get: (h) => (h.champion != null ? G.teams[h.champion].city : ""),
+              cell: (h) => h.champion != null
+                ? <button className="hover:text-sky-300" onClick={() => openTeam(h.champion)}>{G.teams[h.champion].city} {G.teams[h.champion].name}</button>
+                : "—" },
+            { key: "rec", label: "Your record", get: (h) => h.userRecord.pts,
+              cell: (h) => `${h.userRecord.w}-${h.userRecord.l}-${h.userRecord.otl}` },
+            { key: "mvp", label: "MVP", get: (h) => 0,
+              cell: (h) => (h.awards && h.awards.mvp != null && G.players[h.awards.mvp])
+                ? <button className="hover:text-sky-300" onClick={() => openPlayer(h.awards.mvp)}>{fullName(G.players[h.awards.mvp])}</button>
+                : "—" },
+          ]} empty="No completed seasons yet." />
+      </Section>
+      <Section title="Clubs">
+        <SortTable min={560} rows={G.teams} initial="cupWins" rowKey={(t) => t.id}
+          onRow={(t) => openTeam(t.id)}
+          rowCls={(t) => (t.id === G.userTeam ? "bg-sky-950/40" : "")}
+          cols={[
+            { key: "team", label: "Club", get: (t) => t.city, cell: (t) => `${t.city} ${t.name}` },
+            { key: "conf", label: "Conf", get: (t) => CONFS[t.conf] },
+            { key: "div", label: "Division", get: (t) => DIVS[t.div] },
+            { key: "cupWins", label: "Cups", get: (t) => t.cupWins },
+            { key: "playoffApps", label: "Playoffs", get: (t) => t.playoffApps },
+            { key: "seasons", label: "Seasons", get: (t) => (t.seasons || []).length },
+          ]} />
+      </Section>
+    </div>
+  );
+}
+
+/* -------------------------------- offseason ------------------------------- */
+
+function OffseasonTab({ G, setG, notify, openPlayer }) {
+  // Derived from the phase, not from a stored field — otherwise a finished
+  // rollover leaves a stale draft board on screen.
+  const step = G.phase !== "offseason" ? "done" : (G.offseasonStep || "review");
   const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); fn(g2); setG(g2); };
   const A = G.awards;
   const nm = (id) => (id != null && G.players[id] ? fullName(G.players[id]) : "—");
@@ -2511,56 +3518,67 @@ function OffseasonTab({ G, setG }) {
 
   return (
     <div className="space-y-3">
-      <div className={`${card} p-3`}>
-        <div className="text-sm font-medium text-slate-300 mb-2">{G.year} awards</div>
+      <Section title={`${G.year} awards`} className="p-3">
         {A ? (
-          <div className="grid sm:grid-cols-3 gap-2 text-sm">
-            <div><span className="text-slate-400">MVP </span>{nm(A.mvp)}</div>
-            <div><span className="text-slate-400">Scoring </span>{nm(A.scoring)}</div>
-            <div><span className="text-slate-400">Goals </span>{nm(A.goals)}</div>
-            <div><span className="text-slate-400">Best D </span>{nm(A.defence)}</div>
-            <div><span className="text-slate-400">Goaltender </span>{nm(A.goalie)}</div>
-            <div><span className="text-slate-400">Rookie </span>{nm(A.rookie)}</div>
+          <div className="grid sm:grid-cols-3 gap-2 text-sm pt-1">
+            {["mvp", "scoring", "goals", "defence", "goalie", "rookie"].map((k) => (
+              <div key={k}>
+                <span className="text-slate-400">{AWARD_LABEL[k]} </span>
+                {A[k] != null && G.players[A[k]]
+                  ? <button className="hover:text-sky-300" onClick={() => openPlayer(A[k])}>{nm(A[k])}</button>
+                  : "—"}
+              </div>
+            ))}
           </div>
         ) : <div className="text-slate-500 text-sm">—</div>}
-      </div>
+      </Section>
+
+      {step === "done" ? (
+        <div className={`${card} p-3 text-sm text-slate-400`}>
+          The {G.year} season is under way. The draft and free agency open again once the Cup is decided.
+        </div>
+      ) : null}
 
       {step === "review" ? (
         <button className={btnPri} onClick={() => upd((g) => { g.offseasonStep = "draft"; })}>Go to the draft</button>
       ) : null}
 
       {step === "draft" ? (
-        <div className={`${card} p-3 space-y-2`}>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium text-slate-300">
-              Draft — pick {G.draftPick + 1}
-              {onClock != null ? <span className="text-slate-400"> · {G.teams[onClock].abbr} on the clock</span> : null}
-            </div>
+        <Section title={`Draft — pick ${Math.min(G.draftPick + 1, G.teams.length * 2)} of ${G.teams.length * 2}`} className="p-3"
+          right={
             <div className="flex gap-2">
               <button className={btnGhost} onClick={() => upd((g) => autoDraft(g, true))}>Sim to my pick</button>
-              <button className={btnGhost} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>Auto-draft the rest</button>
+              <button className={btnGhost} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>Auto the rest</button>
             </div>
+          }>
+          <div className="space-y-2 pt-2">
+            <div className="text-sm text-slate-400">
+              {onClock != null ? <>{G.teams[onClock].city} {G.teams[onClock].name} on the clock</> : "The draft is complete."}
+            </div>
+            {onClock === G.userTeam ? (
+              <div className="max-h-80 overflow-y-auto space-y-1">
+                {G.draftClass.map((id) => G.players[id]).sort((a, b) => b.pot - a.pot).slice(0, 30).map((p) => (
+                  <div key={p.id} className="flex items-center gap-2 text-sm px-2 py-1 rounded hover:bg-[#16223a]">
+                    <PosBadge pos={p.pos} />
+                    <button className="flex-1 text-left hover:text-sky-300" onClick={() => openPlayer(p.id)}>{fullName(p)}</button>
+                    <span className="text-slate-400 tnum">{p.ovr} / {p.pot}</span>
+                    <button className="text-xs text-sky-400 hover:underline"
+                      onClick={() => upd((g) => { draftPlayer(g, p.id); autoDraft(g, true); })}>Draft</button>
+                  </div>
+                ))}
+              </div>
+            ) : <div className="text-sm text-slate-500">Not your pick.</div>}
+            <button className={btnPri} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>
+              Finish the draft
+            </button>
           </div>
-          {onClock === G.userTeam ? (
-            <div className="max-h-80 overflow-y-auto space-y-1">
-              {G.draftClass.map((id) => G.players[id]).sort((a, b) => b.pot - a.pot).slice(0, 25).map((p) => (
-                <div key={p.id} className="flex items-center gap-2 text-sm px-2 py-1 rounded hover:bg-[#16223a]">
-                  <PosBadge pos={p.pos} />
-                  <span className="flex-1">{fullName(p)}</span>
-                  <span className="text-slate-400 tnum">{p.ovr} / {p.pot}</span>
-                  <button className="text-xs text-sky-400 hover:underline" onClick={() => upd((g) => draftPlayer(g, p.id))}>Draft</button>
-                </div>
-              ))}
-            </div>
-          ) : <div className="text-sm text-slate-500">Not your pick.</div>}
-          <button className={btnPri} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>Finish draft</button>
-        </div>
+        </Section>
       ) : null}
 
       {step === "fa" ? (
         <div className="space-y-3">
-          <FreeAgencyTab G={G} setG={setG} />
-          <button className={btnPri} onClick={() => upd((g) => { aiFreeAgency(g); startNextSeason(g); })}>
+          <FreeAgencyTab G={G} setG={setG} notify={notify} openPlayer={openPlayer} />
+          <button className={btnPri} onClick={() => upd((g) => { startNextSeason(g); })}>
             Start the {G.year + 1} season
           </button>
         </div>
@@ -2569,7 +3587,7 @@ function OffseasonTab({ G, setG }) {
   );
 }
 
-/* -------------------------------- rules modal ------------------------------ */
+/* ------------------------------- rules modal ------------------------------ */
 
 function RulesModal({ G, setG, onClose }) {
   const upd = (k, v) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); setRule(g2, k, v); setG(g2); };
@@ -2581,7 +3599,7 @@ function RulesModal({ G, setG, onClose }) {
   );
   const Sel = ({ k, opts }) => (
     <select className="bg-[#0d1728] border border-[#243250] rounded px-2 py-1 text-sm"
-      value={ruleValue(G, k)} onChange={(e) => {
+      value={String(ruleValue(G, k))} onChange={(e) => {
         const v = e.target.value;
         upd(k, v === "true" ? true : v === "false" ? false : isNaN(+v) || v === "" ? v : +v);
       }}>
@@ -2589,136 +3607,120 @@ function RulesModal({ G, setG, onClose }) {
     </select>
   );
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={onClose}>
-      <div className={`${card} p-4 w-full max-w-lg max-h-[80vh] overflow-y-auto`} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-2">
-          <div className="font-semibold">League rules</div>
-          <button className={btnGhost} onClick={onClose}>Close</button>
-        </div>
-        <Row label="Season length" hint="takes effect next season"><Sel k="seasonLen" opts={[[82, "82"], [56, "56"], [41, "41"]]} /></Row>
-        <Row label="Loser point" hint="a point for losing past regulation"><Sel k="otLoserPoint" opts={[[true, "On"], [false, "Off"]]} /></Row>
-        <Row label="Overtime" hint="3-on-3, 5-on-5, or let it be a tie"><Sel k="otFormat" opts={[["3on3", "3-on-3"], ["5on5", "5-on-5"], ["none", "Ties"]]} /></Row>
-        <Row label="Shootout" hint="decides games OT doesn't"><Sel k="shootout" opts={[[true, "On"], [false, "Off"]]} /></Row>
-        <Row label="Playoff format" hint="takes effect next season"><Sel k="playoffFormat" opts={[["divisional", "Divisional + wildcards"], ["seeded", "Seeded 1–8"]]} /></Row>
-        <Row label="Series length" hint="takes effect next season"><Sel k="seriesLen" opts={[[7, "Best of 7"], [5, "Best of 5"]]} /></Row>
-        <Row label="Hard cap" hint="off means the cap is advisory"><Sel k="hardCap" opts={[[true, "On"], [false, "Off"]]} /></Row>
-        <Row label="Cap amount" hint="$M per club"><Sel k="capAmount" opts={[[75, "$75M"], [88, "$88M"], [105, "$105M"]]} /></Row>
-        <Row label="Injuries" hint="how often bodies break"><Sel k="injuries" opts={[["low", "Low"], ["normal", "Normal"], ["high", "High"]]} /></Row>
-        {G.pendingRules && Object.keys(G.pendingRules).length ? (
-          <div className="mt-3 text-xs text-amber-400">
-            Staged for next season: {Object.keys(G.pendingRules).join(", ")}
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-/* ---------------------------------- home ---------------------------------- */
-
-function HomeTab({ G, setG }) {
-  const t = G.teams[G.userTeam];
-  const today = G.schedule[G.day] || [];
-  const mine = today.find((f) => f.home === G.userTeam || f.away === G.userTeam);
-  const recent = G.results.slice(-6).reverse();
-  const leaders = rosterOf(G, G.userTeam).filter((p) => p.pos !== "G")
-    .sort((a, b) => pts(b.season) - pts(a.season)).slice(0, 5);
-  return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <Stat label="Record" value={`${t.w}-${t.l}-${t.otl}`} sub={`${t.pts} pts`} />
-        <Stat label="Goals" value={`${t.gf}–${t.ga}`} sub={`${t.gf - t.ga > 0 ? "+" : ""}${t.gf - t.ga} diff`} />
-        <Stat label="Cap space" value={`$${capSpace(G, G.userTeam)}M`} />
-        <Stat label="Board" value={Math.round(G.boardConfidence)} sub="confidence" />
-      </div>
-
-      <div className={`${card} p-3`}>
-        <div className="text-sm font-medium text-slate-300 mb-1">
-          {G.phase === "regular" ? `Game ${G.day + 1} of ${G.schedule.length}` : G.phase === "playoffs" ? "Playoffs" : "Offseason"}
-        </div>
-        {mine ? (
-          <div className="text-sm text-slate-300">
-            {mine.home === G.userTeam
-              ? <>vs {G.teams[mine.away].city} {G.teams[mine.away].name}</>
-              : <>at {G.teams[mine.home].city} {G.teams[mine.home].name}</>}
-          </div>
-        ) : <div className="text-sm text-slate-500">No game today.</div>}
-      </div>
-
-      {G.news.length ? (
-        <div className={`${card} p-3 space-y-1`}>
-          <div className="text-sm font-medium text-slate-300 mb-1">Wire</div>
-          {G.news.slice(0, 6).map((n, i) => (
-            <div key={i} className={`text-sm ${n.kind === "bad" ? "text-rose-300" : n.kind === "good" ? "text-emerald-300" : "text-slate-300"}`}>{n.text}</div>
-          ))}
+    <Modal title="League rules" onClose={onClose}>
+      <Row label="Season length" hint="takes effect next season"><Sel k="seasonLen" opts={[[82, "82"], [56, "56"], [41, "41"]]} /></Row>
+      <Row label="Loser point" hint="a point for losing past regulation"><Sel k="otLoserPoint" opts={[[true, "On"], [false, "Off"]]} /></Row>
+      <Row label="Overtime" hint="3-on-3, 5-on-5, or let it be a tie"><Sel k="otFormat" opts={[["3on3", "3-on-3"], ["5on5", "5-on-5"], ["none", "Ties"]]} /></Row>
+      <Row label="Shootout" hint="decides what overtime doesn't"><Sel k="shootout" opts={[[true, "On"], [false, "Off"]]} /></Row>
+      <Row label="Fighting" hint="five each, and a swing in momentum"><Sel k="fighting" opts={[[true, "On"], [false, "Off"]]} /></Row>
+      <Row label="Playoff format" hint="takes effect next season"><Sel k="playoffFormat" opts={[["divisional", "Divisional + wildcards"], ["seeded", "Seeded 1–8"]]} /></Row>
+      <Row label="Series length" hint="takes effect next season"><Sel k="seriesLen" opts={[[7, "Best of 7"], [5, "Best of 5"]]} /></Row>
+      <Row label="Hard cap" hint="off means the cap is advisory"><Sel k="hardCap" opts={[[true, "On"], [false, "Off"]]} /></Row>
+      <Row label="Cap amount" hint="$M per club"><Sel k="capAmount" opts={[[75, "$75M"], [88, "$88M"], [105, "$105M"]]} /></Row>
+      <Row label="Retained salary" hint="keep part of a contract you trade away"><Sel k="retainedSalary" opts={[[true, "On"], [false, "Off"]]} /></Row>
+      <Row label="Injuries" hint="how often bodies break"><Sel k="injuries" opts={[["low", "Low"], ["normal", "Normal"], ["high", "High"]]} /></Row>
+      {G.pendingRules && Object.keys(G.pendingRules).length ? (
+        <div className="mt-3 text-xs text-amber-400">
+          Staged for next season: {Object.keys(G.pendingRules).join(", ")}
         </div>
       ) : null}
-
-      <div className="grid md:grid-cols-2 gap-3">
-        <div className={`${card} p-3`}>
-          <div className="text-sm font-medium text-slate-300 mb-2">Recent results</div>
-          {recent.length ? recent.map((r, i) => (
-            <div key={i} className="text-sm flex justify-between py-0.5">
-              <span>{G.teams[r.away].abbr} @ {G.teams[r.home].abbr}</span>
-              <span className="tnum">{r.ag}–{r.hg}{r.so ? " SO" : r.ot ? " OT" : ""}</span>
-            </div>
-          )) : <div className="text-sm text-slate-500">Nothing yet.</div>}
-        </div>
-        <div className={`${card} p-3`}>
-          <div className="text-sm font-medium text-slate-300 mb-2">Team scoring</div>
-          {leaders.map((p) => (
-            <div key={p.id} className="text-sm flex justify-between py-0.5">
-              <span>{shortName(p)}</span>
-              <span className="tnum text-slate-400">{p.season.g}G {p.season.a}A · {pts(p.season)}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
-/* --------------------------------- history --------------------------------- */
+/* ----------------------------- command palette ---------------------------- */
 
-function HistoryTab({ G }) {
+const TABS = [
+  { key: "home", label: "Home", group: "Club" },
+  { key: "roster", label: "Roster", group: "Club" },
+  { key: "lines", label: "Lines", group: "Club" },
+  { key: "game", label: "Game", group: "Club" },
+  { key: "schedule", label: "Schedule", group: "League" },
+  { key: "standings", label: "Standings", group: "League" },
+  { key: "stats", label: "Stats", group: "League" },
+  { key: "playoffs", label: "Playoffs", group: "League" },
+  { key: "allstar", label: "All-Star", group: "League" },
+  { key: "trade", label: "Trade", group: "Market" },
+  { key: "fa", label: "Free agents", group: "Market" },
+  { key: "offseason", label: "Offseason", group: "Market" },
+  { key: "records", label: "Records", group: "History" },
+  { key: "history", label: "History", group: "History" },
+];
+const GROUPS = ["Club", "League", "Market", "History"];
+
+function CommandPalette({ G, onClose, go, openPlayer, openTeam }) {
+  const [q, setQ] = useState("");
+  const ref = useRef(null);
+  useEffect(() => { if (ref.current && ref.current.focus) ref.current.focus(); }, []);
+  const ql = q.trim().toLowerCase();
+  const hits = useMemo(() => {
+    const out = [];
+    TABS.forEach((t) => {
+      if (!ql || t.label.toLowerCase().includes(ql)) out.push({ kind: "tab", label: t.label, sub: t.group, go: () => go(t.key) });
+    });
+    if (ql.length >= 2) {
+      G.teams.forEach((t) => {
+        if (`${t.city} ${t.name} ${t.abbr}`.toLowerCase().includes(ql))
+          out.push({ kind: "club", label: `${t.city} ${t.name}`, sub: `${CONFS[t.conf]} · ${DIVS[t.div]}`, go: () => openTeam(t.id) });
+      });
+      playersOf(G).forEach((p) => {
+        if (out.length > 60 || p.retired) return;
+        if (fullName(p).toLowerCase().includes(ql))
+          out.push({ kind: "player", label: fullName(p), sub: `${p.pos} · ${p.ovr} ovr · ${p.teamId != null ? G.teams[p.teamId].abbr : "FA"}`, go: () => openPlayer(p.id) });
+      });
+    }
+    return out.slice(0, 40);
+  }, [ql, G]);
+
   return (
-    <div className={`${card} overflow-x-auto`}>
-      <table className="w-full min-w-[520px]">
-        <thead><tr className="border-b border-[#1e2b45]">
-          <Th>Year</Th><Th>Champion</Th><Th>Your record</Th><Th>MVP</Th>
-        </tr></thead>
-        <tbody>
-          {G.history.slice().reverse().map((h) => (
-            <tr key={h.year} className="border-b border-[#16223a]">
-              <Td>{h.year}</Td>
-              <Td>{h.champion != null ? `${G.teams[h.champion].city} ${G.teams[h.champion].name}` : "—"}</Td>
-              <Td>{h.userRecord.w}-{h.userRecord.l}-{h.userRecord.otl}</Td>
-              <Td>{h.awards && h.awards.mvp != null && G.players[h.awards.mvp] ? fullName(G.players[h.awards.mvp]) : "—"}</Td>
-            </tr>
+    <div className="fixed inset-0 bg-black/70 flex items-start justify-center p-4 pt-20 z-50" onClick={onClose}>
+      <div className={`${card} w-full max-w-lg overflow-hidden`} onClick={(e) => e.stopPropagation()}>
+        <input ref={ref} className="w-full bg-transparent px-4 py-3 outline-none border-b border-[#1e2b45]"
+          placeholder="Jump to a screen, club or player…" value={q} onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && hits[0]) { hits[0].go(); onClose(); } }} />
+        <div className="max-h-80 overflow-y-auto">
+          {hits.map((h, i) => (
+            <button key={i} className="w-full flex items-center gap-3 px-4 py-2 text-left text-sm hover:bg-[#16223a]"
+              onClick={() => { h.go(); onClose(); }}>
+              <span className="flex-1">{h.label}</span>
+              <span className="text-xs text-slate-500">{h.sub}</span>
+            </button>
           ))}
-          {!G.history.length ? <tr><Td className="text-slate-500">No completed seasons yet.</Td></tr> : null}
-        </tbody>
-      </table>
+          {!hits.length ? <div className="px-4 py-4 text-sm text-slate-500">Nothing matches.</div> : null}
+        </div>
+      </div>
     </div>
   );
 }
 
 /* ----------------------------------- app ---------------------------------- */
 
-const TABS = [
-  ["home", "Home"], ["roster", "Roster"], ["lines", "Lines"], ["standings", "Standings"],
-  ["stats", "Stats"], ["trade", "Trade"], ["fa", "Free agents"], ["playoffs", "Playoffs"],
-  ["offseason", "Offseason"], ["history", "History"],
-];
-
 function App() {
   const [G, setG] = useState(null);
   const [tab, setTab] = useState("home");
+  const [group, setGroup] = useState("Club");
   const [slot, setSlot] = useState(0);
   const [showRules, setShowRules] = useState(false);
+  const [showSlots, setShowSlots] = useState(false);
+  const [palette, setPalette] = useState(false);
+  const [player, setPlayer] = useState(null);
+  const [club, setClub] = useState(null);
+  const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => { if (G) saveGame(G, slot); }, [G, slot]);
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 3200);
+    return () => clearTimeout(id);
+  }, [toast]);
+
+  const go = useCallback((k) => {
+    setTab(k);
+    const t = TABS.find((x) => x.key === k);
+    if (t) setGroup(t.group);
+  }, []);
+  const notify = useCallback((m) => setToast(m), []);
 
   const start = (opts) => {
     if (opts.load != null) {
@@ -2731,7 +3733,7 @@ function App() {
     setG(g);
   };
 
-  const advance = (n) => {
+  const advance = useCallback((n) => {
     if (!G || busy) return;
     setBusy(true);
     const g2 = migrate(JSON.parse(JSON.stringify(G)));
@@ -2739,52 +3741,114 @@ function App() {
     else if (g2.phase === "playoffs") simPlayoffRound(g2);
     setG(g2);
     setBusy(false);
-    if (g2.phase === "playoffs" && G.phase === "regular") setTab("playoffs");
-    if (g2.phase === "offseason") setTab("offseason");
-  };
+    if (g2.phase === "playoffs" && G.phase === "regular") go("playoffs");
+    if (g2.phase === "offseason" && G.phase !== "offseason") go("offseason");
+  }, [G, busy, go]);
+
+  // Keyboard: d for a day, w for a week, ⌘K or ? for the palette.
+  useEffect(() => {
+    const onKey = (e) => {
+      const el = e.target;
+      const typing = el && (el.tagName === "INPUT" || el.tagName === "SELECT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+      if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setPalette(true); return; }
+      if (typing) return;
+      if (e.key === "?") { e.preventDefault(); setPalette(true); return; }
+      if (!G || G.phase !== "regular") return;
+      if (e.key === "d") { e.preventDefault(); advance(1); }
+      if (e.key === "w") { e.preventDefault(); advance(7); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [G, advance]);
 
   if (!G) return <Splash onStart={start} />;
   const t = G.teams[G.userTeam];
+  const visible = TABS.filter((x) => x.group === group);
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen pb-10">
       <div className="sticky top-0 z-40 bg-[#0b1220]/95 backdrop-blur border-b border-[#1e2b45]">
-        <div className="max-w-6xl mx-auto px-3 py-2 flex items-center gap-3 flex-wrap">
-          <div className="font-semibold">{t.city} <span className="text-sky-400">{t.name}</span></div>
-          <div className="text-xs text-slate-400">{G.year} · {t.w}-{t.l}-{t.otl} · {t.pts} pts</div>
+        <div className="max-w-6xl mx-auto px-3 py-2 flex items-center gap-2 sm:gap-3 flex-wrap">
+          <button className="font-semibold truncate hover:text-sky-300" onClick={() => setClub(G.userTeam)}>
+            {t.city} <span className="text-sky-400">{t.name}</span>
+          </button>
+          <div className="text-xs text-slate-400 whitespace-nowrap">{G.year} · {t.w}-{t.l}-{t.otl} · {t.pts} pts</div>
           <div className="flex-1" />
-          {G.phase === "regular" ? (
-            <>
-              <button className={btnGhost} onClick={() => advance(1)} disabled={busy}>Play day</button>
-              <button className={btnGhost} onClick={() => advance(7)} disabled={busy}>Play week</button>
-              <button className={btnPri} onClick={() => advance(G.schedule.length)} disabled={busy}>Sim season</button>
-            </>
-          ) : null}
-          {G.phase === "playoffs" ? <button className={btnPri} onClick={() => advance(1)} disabled={busy}>Play round</button> : null}
-          <button className={btnGhost} onClick={() => setShowRules(true)}>📋 Rules</button>
+          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+            {G.phase === "regular" ? (
+              <>
+                <button className={btnGhost} onClick={() => advance(1)} disabled={busy} title="d">Day</button>
+                <button className={btnGhost} onClick={() => advance(7)} disabled={busy} title="w">Week</button>
+                <button className={btnPri} onClick={() => advance(G.schedule.length)} disabled={busy}>Sim season</button>
+              </>
+            ) : null}
+            {G.phase === "playoffs" ? <button className={btnPri} onClick={() => advance(1)} disabled={busy}>Play round</button> : null}
+            <button className={btnGhost} onClick={() => setPalette(true)} title="⌘K">⌘K</button>
+            <button className={btnGhost} onClick={() => setShowSlots(true)}>💾</button>
+            <button className={btnGhost} onClick={() => setShowRules(true)}>📋</button>
+          </div>
+        </div>
+        <div className="max-w-6xl mx-auto px-3 pb-1 flex gap-1 overflow-x-auto">
+          {GROUPS.map((g) => (
+            <button key={g} onClick={() => { setGroup(g); const first = TABS.find((x) => x.group === g); if (first) setTab(first.key); }}
+              className={`px-3 py-1 rounded-lg text-xs uppercase tracking-wide whitespace-nowrap
+                ${group === g ? "bg-[#22314f] text-slate-100" : "text-slate-500 hover:text-slate-300"}`}>{g}</button>
+          ))}
         </div>
         <div className="max-w-6xl mx-auto px-3 pb-2 flex gap-1 overflow-x-auto">
-          {TABS.map(([k, l]) => (
-            <button key={k} onClick={() => setTab(k)}
-              className={`px-3 py-1 rounded-lg text-sm whitespace-nowrap ${tab === k ? "bg-sky-600 text-white" : "text-slate-300 hover:bg-[#18243c]"}`}>{l}</button>
+          {visible.map((x) => (
+            <button key={x.key} onClick={() => setTab(x.key)}
+              className={`px-3 py-1 rounded-lg text-sm whitespace-nowrap ${tab === x.key ? "bg-sky-600 text-white" : "text-slate-300 hover:bg-[#18243c]"}`}>
+              {x.label}
+            </button>
           ))}
         </div>
       </div>
 
       <div className="max-w-6xl mx-auto p-3">
-        {tab === "home" && <HomeTab G={G} setG={setG} />}
-        {tab === "roster" && <RosterTab G={G} setG={setG} />}
+        {tab === "home" && <HomeTab G={G} setG={setG} go={go} openPlayer={setPlayer} />}
+        {tab === "roster" && <RosterTab G={G} setG={setG} openPlayer={setPlayer} notify={notify} />}
         {tab === "lines" && <LinesTab G={G} setG={setG} />}
-        {tab === "standings" && <StandingsTab G={G} />}
-        {tab === "stats" && <StatsTab G={G} />}
-        {tab === "trade" && <TradeTab G={G} setG={setG} />}
-        {tab === "fa" && <FreeAgencyTab G={G} setG={setG} />}
-        {tab === "playoffs" && <PlayoffsTab G={G} setG={setG} />}
-        {tab === "offseason" && <OffseasonTab G={G} setG={setG} />}
-        {tab === "history" && <HistoryTab G={G} />}
+        {tab === "game" && <GameTab G={G} openPlayer={setPlayer} />}
+        {tab === "schedule" && <ScheduleTab G={G} openTeam={setClub} />}
+        {tab === "standings" && <StandingsTab G={G} openTeam={setClub} />}
+        {tab === "stats" && <StatsTab G={G} openPlayer={setPlayer} />}
+        {tab === "playoffs" && <PlayoffsTab G={G} setG={setG} openPlayer={setPlayer} />}
+        {tab === "allstar" && <AllStarTab G={G} openPlayer={setPlayer} />}
+        {tab === "trade" && <TradeTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
+        {tab === "fa" && <FreeAgencyTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
+        {tab === "offseason" && <OffseasonTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
+        {tab === "records" && <RecordsTab G={G} openPlayer={setPlayer} />}
+        {tab === "history" && <HistoryTab G={G} openPlayer={setPlayer} openTeam={setClub} />}
       </div>
 
+      {toast ? (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 bg-[#18243c] border border-[#243250] px-4 py-2 rounded-lg text-sm shadow-lg z-50">
+          {toast}
+        </div>
+      ) : null}
+
       {showRules ? <RulesModal G={G} setG={setG} onClose={() => setShowRules(false)} /> : null}
+      {palette ? <CommandPalette G={G} go={go} openPlayer={setPlayer} openTeam={setClub} onClose={() => setPalette(false)} /> : null}
+      {player != null ? <PlayerModal G={G} pid={player} onClose={() => setPlayer(null)} /> : null}
+      {club != null ? <ClubModal G={G} teamId={club} onClose={() => setClub(null)} openPlayer={(id) => { setClub(null); setPlayer(id); }} /> : null}
+      {showSlots ? (
+        <Modal title="Save slots" onClose={() => setShowSlots(false)}>
+          <div className="space-y-2">
+            <div className="text-sm text-slate-400">
+              You're playing slot {slot + 1}. Saves live in IndexedDB and fall back to local storage.
+            </div>
+            {[0, 1, 2].map((s) => (
+              <div key={s} className="flex items-center gap-2">
+                <div className="flex-1"><SlotCard slot={s} meta={slotMeta(s)}
+                  onLoad={(x) => { Promise.resolve(loadGame(x)).then((g) => { if (g) { setSlot(x); setG(g); setShowSlots(false); } }); }}
+                  onDelete={(x) => { deleteSlot(x); setShowSlots(false); }} /></div>
+                {s !== slot ? <button className={btnGhost} onClick={() => { setSlot(s); saveGame(G, s); notify(`Now saving to slot ${s + 1}.`); }}>Save here</button> : null}
+              </div>
+            ))}
+          </div>
+        </Modal>
+      ) : null}
     </div>
   );
 }
