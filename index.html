@@ -1,0 +1,2100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Pocket GM — Hockey</title>
+<script src="vendor/tailwind.js"></script>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/babel.min.js"></script>
+<style>
+  html, body { background:#0b1220; color:#e6edf7; -webkit-text-size-adjust:100%; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#1e2b45; border-radius:6px; }
+  .tnum { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body class="bg-[#0b1220] text-slate-100">
+<div id="root"></div>
+
+<script type="text/babel-src" id="app-src">
+/* ============================================================================
+ * Pocket GM — Hockey
+ * Sibling of ~/soccer-gm and ~/baseball-gm. One file, one `G` state object.
+ * The engine is deliberately NOT the soccer xG model: shots are generated per
+ * forward-line vs defence-pair matchup across a 60-minute shift budget, which
+ * is what makes line construction, matchups and last change matter.
+ * ========================================================================== */
+
+/* --------------------------------- world ---------------------------------- */
+
+const TEAMS = [
+  // East / Atlantic
+  { city:"Hartford",    name:"Colonials",   abbr:"HFD", conf:0, div:0, mkt:3 },
+  { city:"Providence",  name:"Anchors",     abbr:"PRO", conf:0, div:0, mkt:2 },
+  { city:"Portland",    name:"Lumberjacks", abbr:"POR", conf:0, div:0, mkt:2 },
+  { city:"Quebec",      name:"Voyageurs",   abbr:"QUE", conf:0, div:0, mkt:4 },
+  { city:"Halifax",     name:"Harbour",     abbr:"HAL", conf:0, div:0, mkt:2 },
+  { city:"Rochester",   name:"Rapids",      abbr:"ROC", conf:0, div:0, mkt:2 },
+  { city:"Springfield", name:"Sentinels",   abbr:"SPR", conf:0, div:0, mkt:1 },
+  { city:"Worcester",   name:"Wolves",      abbr:"WOR", conf:0, div:0, mkt:2 },
+  // East / Metro
+  { city:"Newark",      name:"Ironmen",     abbr:"NWK", conf:0, div:1, mkt:5 },
+  { city:"Baltimore",   name:"Blaze",       abbr:"BAL", conf:0, div:1, mkt:4 },
+  { city:"Richmond",    name:"Foundry",     abbr:"RIC", conf:0, div:1, mkt:2 },
+  { city:"Charlotte",   name:"Chargers",    abbr:"CLT", conf:0, div:1, mkt:3 },
+  { city:"Scranton",    name:"Miners",      abbr:"SCR", conf:0, div:1, mkt:1 },
+  { city:"Albany",      name:"Admirals",    abbr:"ALB", conf:0, div:1, mkt:2 },
+  { city:"Trenton",     name:"Titans",      abbr:"TRE", conf:0, div:1, mkt:2 },
+  { city:"Norfolk",     name:"Nor'easters", abbr:"NOR", conf:0, div:1, mkt:2 },
+  // West / Central
+  { city:"Omaha",       name:"Outlaws",     abbr:"OMA", conf:1, div:2, mkt:2 },
+  { city:"Wichita",     name:"Wranglers",   abbr:"WIC", conf:1, div:2, mkt:2 },
+  { city:"Des Moines",  name:"Drifters",    abbr:"DSM", conf:1, div:2, mkt:1 },
+  { city:"Madison",     name:"Mallards",    abbr:"MAD", conf:1, div:2, mkt:2 },
+  { city:"Duluth",      name:"Ironbacks",   abbr:"DUL", conf:1, div:2, mkt:1 },
+  { city:"Fargo",       name:"Frost",       abbr:"FAR", conf:1, div:2, mkt:1 },
+  { city:"Tulsa",       name:"Twisters",    abbr:"TUL", conf:1, div:2, mkt:2 },
+  { city:"Kansas City", name:"Monarchs",    abbr:"KC",  conf:1, div:2, mkt:3 },
+  // West / Pacific
+  { city:"Boise",       name:"Bighorns",    abbr:"BOI", conf:1, div:3, mkt:2 },
+  { city:"Spokane",     name:"Summit",      abbr:"SPO", conf:1, div:3, mkt:2 },
+  { city:"Reno",        name:"Silver",      abbr:"RNO", conf:1, div:3, mkt:2 },
+  { city:"Fresno",      name:"Falcons",     abbr:"FRE", conf:1, div:3, mkt:2 },
+  { city:"Bakersfield", name:"Bandits",     abbr:"BAK", conf:1, div:3, mkt:1 },
+  { city:"Victoria",    name:"Vipers",      abbr:"VIC", conf:1, div:3, mkt:3 },
+  { city:"Anchorage",   name:"Aurora",      abbr:"ANC", conf:1, div:3, mkt:1 },
+  { city:"Eugene",      name:"Emeralds",    abbr:"EUG", conf:1, div:3, mkt:2 },
+];
+const CONFS = ["East", "West"];
+const DIVS  = ["Atlantic", "Metro", "Central", "Pacific"];
+const DIV_CONF = [0, 0, 1, 1];
+
+const FIRST = ["Alex","Mikko","Nathan","Elias","Cole","Tomas","Jakob","Rasmus","Liam","Dylan",
+  "Anton","Nikita","Marcus","Owen","Brady","Sebastian","Viktor","Emil","Connor","Trevor",
+  "Hugo","Patrik","Lucas","Mason","Kirill","Joel","Adam","Simon","Ryan","Felix","Otto",
+  "Dawson","Casey","Jonas","Andrei","Tage","Wyatt","Lars","Miles","Quinn","Rory","Beau",
+  "Matias","Teddy","Zach","Nolan","Isak","Gustav","Sam","Denis","Brock","Kaden","Petr","Levi"];
+const LAST = ["Hedman","Barlow","Voss","Lindqvist","Bergeron","Novak","Kessel","Rahkonen","Mackey",
+  "Turcotte","Strand","Petrov","Halloran","Sundin","Kane","Duchesne","Rask","Nilsson","O'Hara",
+  "Belanger","Larkin","Sokolov","Beaumont","Vasko","Hagen","Trudeau","Kaplan","Forsberg","Delisle",
+  "Kovac","Ahlberg","Marchand","Riis","Denault","Volkov","Steen","Bouchard","Lehto","Grimaldi",
+  "Ackerman","Poulin","Wallin","Cormier","Radulov","Fennell","Sorenson","Dubois","Malkov","Tanev",
+  "Aho","Brodeur","Vlasic","Kubina","Renaud","Salo","Whitaker","Zima","Gagne","Holt","Sandberg"];
+
+/* skater positions and how many of each a roster carries */
+const POS = ["C", "LW", "RW", "D", "G"];
+const ROSTER_SHAPE = { C: 4, LW: 4, RW: 4, D: 7, G: 2 };  // 21 dressed + scratches from depth
+const ROSTER_MAX = 23;
+const FARM_MAX = 12;
+
+/* ------------------------------ rules & money ----------------------------- */
+
+const RULES_DEFAULT = {
+  seasonLen: 82,        // 82 | 56 | 41
+  otLoserPoint: true,   // the loser point
+  otFormat: "3on3",     // 3on3 | 5on5 | none  (none => ties)
+  shootout: true,
+  playoffFormat: "divisional", // divisional (3+3+2 wildcards) | seeded (1-8)
+  seriesLen: 7,         // 7 | 5
+  hardCap: true,
+  capAmount: 88,        // $M
+  retainedSalary: true,
+  injuries: "normal",   // low | normal | high
+  fighting: true,
+};
+// Knobs that change the shape of a season must wait for the rollover.
+const STRUCTURAL_RULES = ["seasonLen", "playoffFormat", "seriesLen"];
+
+const DIFFICULTIES = {
+  casual:    { label:"Casual",    budget:1.15, askPrice:0.9,  injury:0.75, patience:2.0 },
+  normal:    { label:"Normal",    budget:1.0,  askPrice:1.0,  injury:1.0,  patience:1.0 },
+  cutthroat: { label:"Cutthroat", budget:0.9,  askPrice:1.15, injury:1.25, patience:0.55 },
+};
+
+const CAP_FLOOR_PCT = 0.76;
+const MIN_SALARY = 0.78;
+const ELC_SALARY = 0.95;   // entry-level contract
+const MAX_SALARY_PCT = 0.20;
+
+function rules(G) { return Object.assign({}, RULES_DEFAULT, (G && G.rules) || {}); }
+function ruleValue(G, k) {
+  if (G && G.pendingRules && k in G.pendingRules) return G.pendingRules[k];
+  return rules(G)[k];
+}
+function setRule(G, k, v) {
+  if (STRUCTURAL_RULES.includes(k)) { G.pendingRules = G.pendingRules || {}; G.pendingRules[k] = v; }
+  else { G.rules = Object.assign({}, G.rules); G.rules[k] = v; }
+  return G;
+}
+function applyPendingRules(G) {
+  if (!G.pendingRules) return;
+  G.rules = Object.assign({}, rules(G), G.pendingRules);
+  G.pendingRules = null;
+}
+function diff(G) { return DIFFICULTIES[(G && G.difficulty) || "normal"]; }
+
+/* --------------------------------- random --------------------------------- */
+// Seeded so the headless harness reproduces a season exactly.
+function rnd(G) {
+  G.seed = (G.seed + 0x6d2b79f5) | 0;
+  let t = G.seed;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const ri = (G, a, b) => a + Math.floor(rnd(G) * (b - a + 1));
+const pick = (G, arr) => arr[Math.floor(rnd(G) * arr.length)];
+// Roughly normal, clamped — used for ratings and game variance.
+function gauss(G, mean, sd) {
+  const u = Math.max(1e-9, rnd(G)), v = rnd(G);
+  return mean + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const round1 = (v) => Math.round(v * 10) / 10;
+
+/* -------------------------------- players --------------------------------- */
+/* Skater ratings: sht shooting, pss passing, hnd hands, spd skating,
+   dfn defence, phy physical, fo faceoffs (C only), sta stamina, dur durability.
+   Goalie ratings: rfx reflexes, pos positioning, reb rebound control, sta, dur. */
+
+const SKATER_KEYS = ["sht", "pss", "hnd", "spd", "dfn", "phy", "fo", "sta", "dur"];
+const GOALIE_KEYS = ["rfx", "pos", "reb", "sta", "dur"];
+
+function ovrOf(p) {
+  const r = p.r;
+  if (p.pos === "G") return Math.round(0.42 * r.rfx + 0.4 * r.pos + 0.18 * r.reb);
+  if (p.pos === "D") return Math.round(0.34 * r.dfn + 0.16 * r.phy + 0.16 * r.spd + 0.14 * r.pss + 0.12 * r.hnd + 0.08 * r.sht);
+  // forwards
+  const fo = p.pos === "C" ? 0.06 : 0;
+  return Math.round((0.3 * r.sht + 0.22 * r.pss + 0.18 * r.hnd + 0.14 * r.spd + 0.1 * r.dfn + fo * r.fo) / (0.94 + fo) );
+}
+
+function genPlayer(G, pos, tier, age) {
+  const base = clamp(gauss(G, tier, 7), 24, 96);
+  const p = {
+    id: G.nextPid++,
+    fn: pick(G, FIRST), ln: pick(G, LAST),
+    pos,
+    age: age != null ? age : ri(G, 19, 35),
+    teamId: null, farm: false,
+    r: {}, pot: 0, ovr: 0,
+    contract: { amt: MIN_SALARY, yrs: 1 },
+    stats: blankStats(pos), season: blankStats(pos), career: [],
+    inj: 0, injDesc: "", fatigue: 0,
+    trophies: [],
+  };
+  const keys = pos === "G" ? GOALIE_KEYS : SKATER_KEYS;
+  keys.forEach((k) => { p.r[k] = Math.round(clamp(gauss(G, base, 8), 20, 99)); });
+  if (pos !== "C") p.r.fo = Math.round(clamp(p.r.fo * 0.6, 15, 70));
+  if (pos === "D") { p.r.dfn = Math.round(clamp(p.r.dfn + 8, 20, 99)); p.r.sht = Math.round(clamp(p.r.sht - 8, 15, 99)); }
+  p.ovr = ovrOf(p);
+  // Younger players carry upside; a 30-year-old is what he is.
+  p.pot = Math.round(clamp(p.ovr + Math.max(0, (26 - p.age)) * gauss(G, 1.5, 1.1), p.ovr, 99));
+  return p;
+}
+
+function blankStats(pos) {
+  return pos === "G"
+    ? { gp:0, w:0, l:0, otl:0, sa:0, sv:0, ga:0, so:0, toi:0 }
+    : { gp:0, g:0, a:0, pim:0, sog:0, hit:0, blk:0, toi:0, pm:0, fow:0, fol:0, ppg:0, shg:0, gwg:0 };
+}
+const pts = (s) => (s.g || 0) + (s.a || 0);
+const svPct = (s) => (s.sa ? s.sv / s.sa : 0);
+const gaa = (s) => (s.toi ? (s.ga * 60) / s.toi : 0);
+
+const fullName = (p) => `${p.fn} ${p.ln}`;
+const shortName = (p) => `${p.fn[0]}. ${p.ln}`;
+
+/* --------------------------- contracts & the cap --------------------------- */
+
+function marketValue(G, p) {
+  const o = p.ovr, y = p.pot - p.ovr;
+  let v = Math.pow(Math.max(0, o - 45) / 22, 2.35) * 1.05 + MIN_SALARY;
+  if (p.pos === "G") v *= 0.92;
+  if (p.age < 24) v *= 0.88 + y * 0.012;
+  if (p.age > 32) v *= Math.max(0.45, 1 - (p.age - 32) * 0.11);
+  return round1(clamp(v, MIN_SALARY, rules(G).capAmount * MAX_SALARY_PCT));
+}
+function capHit(G, teamId) {
+  return round1(rosterOf(G, teamId, true).reduce((s, p) => s + p.contract.amt, 0));
+}
+function capSpace(G, teamId) { return round1(rules(G).capAmount - capHit(G, teamId)); }
+function capFloor(G) { return round1(rules(G).capAmount * CAP_FLOOR_PCT); }
+
+/* --------------------------------- rosters -------------------------------- */
+
+const playersOf = (G) => Object.values(G.players);
+function rosterOf(G, teamId, includeFarm) {
+  return playersOf(G).filter((p) => p.teamId === teamId && (includeFarm || !p.farm));
+}
+const activeRoster = (G, teamId) => rosterOf(G, teamId).filter((p) => p.inj <= 0);
+const teamOf = (G, teamId) => G.teams[teamId];
+
+/* ----------------------------- lines & pairings ---------------------------- */
+/* lines.F : 4 lines of [LW, C, RW] player ids
+   lines.D : 3 pairs of [LD, RD]
+   lines.G : [starter, backup]
+   lines.PP: 2 units of 5, lines.PK: 2 units of 4 */
+
+const LINE_TOI = [0.30, 0.27, 0.24, 0.19];   // share of even-strength forward ice time
+const PAIR_TOI = [0.38, 0.34, 0.28];
+
+function autoLines(G, teamId) {
+  const r = activeRoster(G, teamId).slice().sort((a, b) => b.ovr - a.ovr);
+  const byPos = (pos) => r.filter((p) => p.pos === pos);
+  const cs = byPos("C"), lws = byPos("LW"), rws = byPos("RW"), ds = byPos("D");
+  // If both goaltenders are hurt, somebody still has to stand in the crease:
+  // recall from the farm, then dress the least-injured body available.
+  let gs = byPos("G");
+  if (!gs.length) gs = rosterOf(G, teamId, true).filter((p) => p.pos === "G").sort((a, b) => a.inj - b.inj);
+  if (!gs.length) gs = r.slice(-1);
+  // A short bench borrows from the nearest position rather than icing an empty slot.
+  const spare = r.filter((p) => p.pos !== "G" && p.pos !== "D");
+  const take = (arr, i) => arr[i] || spare[i + 8] || spare[spare.length - 1] || r[0];
+  const F = [0, 1, 2, 3].map((i) => [take(lws, i), take(cs, i), take(rws, i)].map((p) => (p ? p.id : null)));
+  const D = [0, 1, 2].map((i) => [ds[i * 2], ds[i * 2 + 1]].map((p) => (p ? p.id : (ds[0] ? ds[0].id : null))));
+  const Gk = [gs[0] ? gs[0].id : null, gs[1] ? gs[1].id : null];
+  const skaters = r.filter((p) => p.pos !== "G");
+  const PP = [skaters.slice(0, 5).map((p) => p.id), skaters.slice(5, 10).map((p) => p.id)];
+  const pkPool = skaters.slice().sort((a, b) => b.r.dfn - a.r.dfn);
+  const PK = [pkPool.slice(0, 4).map((p) => p.id), pkPool.slice(4, 8).map((p) => p.id)];
+  return { F, D, G: Gk, PP, PK };
+}
+function ensureLines(G, teamId) {
+  const t = G.teams[teamId];
+  const ids = new Set(activeRoster(G, teamId).map((p) => p.id));
+  const valid = t.lines && t.lines.F.every((ln) => ln.every((id) => id != null && ids.has(id)))
+    && t.lines.D.every((pr) => pr.every((id) => id != null && ids.has(id)))
+    && t.lines.G[0] != null && ids.has(t.lines.G[0]);
+  if (!valid) t.lines = autoLines(G, teamId);
+  return t.lines;
+}
+
+/* Offensive and defensive strength of a unit, on a ~0.7–1.4 scale. */
+function lineOff(G, ids) {
+  const ps = ids.map((id) => G.players[id]).filter(Boolean);
+  if (!ps.length) return 1;
+  const v = ps.reduce((s, p) => s + 0.44 * p.r.sht + 0.32 * p.r.pss + 0.24 * p.r.hnd, 0) / ps.length;
+  return 0.55 + v / 110;
+}
+function unitDef(G, fIds, dIds) {
+  const ps = fIds.concat(dIds).map((id) => G.players[id]).filter(Boolean);
+  if (!ps.length) return 1;
+  const v = ps.reduce((s, p) => s + 0.7 * p.r.dfn + 0.3 * p.r.spd, 0) / ps.length;
+  return 0.55 + v / 110;
+}
+function goalieQuality(G, id) {
+  const g = G.players[id];
+  if (!g) return 0.9;
+  return 0.42 * g.r.rfx + 0.4 * g.r.pos + 0.18 * g.r.reb;
+}
+function teamStrength(G, teamId) {
+  const r = rosterOf(G, teamId).slice().sort((a, b) => b.ovr - a.ovr);
+  if (!r.length) return 50;
+  const top = r.slice(0, 18);
+  return Math.round(top.reduce((s, p) => s + p.ovr, 0) / top.length);
+}
+
+/* ------------------------------- the schedule ------------------------------ */
+/* Circle-method round robin over all 32 clubs, repeated until the season length
+   is met, with the home side alternating so home/away stays balanced. */
+
+function buildSchedule(G) {
+  const n = TEAMS.length;
+  const len = ruleValue(G, "seasonLen");
+  const rounds = [];
+  const arr = TEAMS.map((_, i) => i);
+  const half = n / 2;
+  // The circle method decides WHO plays; a running home count decides WHERE, so
+  // the split stays even however many times the cycle repeats.
+  const homeCount = new Array(n).fill(0);
+  while (rounds.length < len) {
+    for (let r = 0; r < n - 1 && rounds.length < len; r++) {
+      const day = [];
+      for (let i = 0; i < half; i++) {
+        const a = arr[i], b = arr[n - 1 - i];
+        const aHome = homeCount[a] < homeCount[b] || (homeCount[a] === homeCount[b] && (r + i) % 2 === 0);
+        const home = aHome ? a : b, away = aHome ? b : a;
+        homeCount[home]++;
+        day.push({ home, away, played: false });
+      }
+      rounds.push(day);
+      arr.splice(1, 0, arr.pop());   // rotate all but the first
+    }
+  }
+  G.schedule = rounds;
+  G.day = 0;
+  return rounds;
+}
+
+/* -------------------------------- new game -------------------------------- */
+
+function newGame(userTeam, opts) {
+  opts = opts || {};
+  const G = {
+    v: 1,
+    seed: (opts.seed != null ? opts.seed : Math.floor(Math.random() * 1e9)) | 0,
+    nextPid: 1,
+    year: opts.year || 2026,
+    userTeam: userTeam || 0,
+    difficulty: opts.difficulty || "normal",
+    rules: Object.assign({}, RULES_DEFAULT, opts.rules || {}),
+    pendingRules: null,
+    phase: "regular",
+    day: 0,
+    players: {},
+    teams: [],
+    schedule: [],
+    results: [],
+    playoffs: null,
+    draftClass: [],
+    freeAgents: [],
+    picks: [],
+    history: [],
+    log: [],
+    awards: null,
+    boardConfidence: 62,
+    news: [],
+  };
+
+  G.teams = TEAMS.map((t, i) => ({
+    id: i, ...t,
+    w:0, l:0, otl:0, pts:0, gf:0, ga:0, gp:0, streak:0, l10:[],
+    lines: null,
+    cupWins: 0, playoffApps: 0,
+    revenue: 0, budget: 0,
+  }));
+
+  // Roster generation. Team tier spreads the league from contender to lottery.
+  const tiers = G.teams.map(() => clamp(gauss(G, 56, 6), 42, 70));
+  G.teams.forEach((t, i) => {
+    const tier = tiers[i];
+    Object.entries(ROSTER_SHAPE).forEach(([pos, count]) => {
+      for (let k = 0; k < count; k++) {
+        // Top-line talent sits well above roster filler.
+        const slot = 1 - k / (count + 1);
+        const p = genPlayer(G, pos, tier + slot * 16 - 6);
+        p.teamId = i;
+        G.players[p.id] = p;
+      }
+    });
+    // A few depth bodies on the farm.
+    for (let k = 0; k < 5; k++) {
+      const p = genPlayer(G, pick(G, ["C","LW","RW","D","G"]), tier - 14, ri(G, 19, 24));
+      p.teamId = i; p.farm = true;
+      G.players[p.id] = p;
+    }
+  });
+
+  // Contracts, sized to market with a little noise, then squeezed under the cap.
+  G.teams.forEach((t) => {
+    rosterOf(G, t.id, true).forEach((p) => {
+      p.contract = {
+        amt: round1(clamp(marketValue(G, p) * (0.85 + rnd(G) * 0.35), MIN_SALARY, rules(G).capAmount * MAX_SALARY_PCT)),
+        yrs: p.age < 23 ? ri(G, 1, 3) : ri(G, 1, 5),
+      };
+      if (p.farm) p.contract.amt = MIN_SALARY;
+    });
+    let guard = 0;
+    while (capHit(G, t.id) > rules(G).capAmount && guard++ < 60) {
+      const worst = rosterOf(G, t.id).sort((a, b) => b.contract.amt / Math.max(1, b.ovr) - a.contract.amt / Math.max(1, a.ovr))[0];
+      if (!worst) break;
+      worst.contract.amt = round1(Math.max(MIN_SALARY, worst.contract.amt * 0.85));
+    }
+    t.lines = autoLines(G, t.id);
+    t.budget = round1(20 + t.mkt * 6);
+  });
+
+  // Free agent pool and this year's draft picks.
+  for (let k = 0; k < 40; k++) {
+    const p = genPlayer(G, pick(G, ["C","LW","RW","D","G"]), 46, ri(G, 24, 36));
+    G.players[p.id] = p;
+    G.freeAgents.push(p.id);
+  }
+  seedPicks(G, G.year + 1, 3);
+
+  buildSchedule(G);
+  return G;
+}
+
+function seedPicks(G, fromYear, years) {
+  for (let y = 0; y < years; y++) {
+    for (let rd = 1; rd <= 2; rd++) {
+      G.teams.forEach((t) => G.picks.push({ year: fromYear + y, round: rd, owner: t.id, orig: t.id }));
+    }
+  }
+}
+
+/* --------------------------- migrating old saves --------------------------- */
+function migrate(G) {
+  if (!G) return G;
+  G.rules = Object.assign({}, RULES_DEFAULT, G.rules || {});
+  if (!G.picks) G.picks = [];
+  if (!G.news) G.news = [];
+  if (!G.history) G.history = [];
+  if (!G.log) G.log = [];
+  if (!G.freeAgents) G.freeAgents = [];
+  if (!G.draftClass) G.draftClass = [];
+  if (G.boardConfidence == null) G.boardConfidence = 62;
+  playersOf(G).forEach((p) => {
+    if (!p.stats) p.stats = blankStats(p.pos);
+    if (!p.season) p.season = blankStats(p.pos);
+    if (!p.career) p.career = [];
+    if (!p.trophies) p.trophies = [];
+    if (p.fatigue == null) p.fatigue = 0;
+    p.ovr = ovrOf(p);
+  });
+  G.teams.forEach((t) => { if (!t.l10) t.l10 = []; });
+  return G;
+}
+
+/* ============================ THE GAME ENGINE ==============================
+ * A game is 60 minutes of shift time split across line-vs-line matchups.
+ * For each matchup we work out a shot rate from the offensive unit against the
+ * defensive unit, roll shots, then resolve each shot against the goalie. The
+ * home side gets last change: a small bias toward putting its top line against
+ * the opponent's weaker pairs.
+ * ========================================================================== */
+
+const ES_MINUTES = 47;      // even strength
+const PP_MIN_PER = 1.7;     // ice time per power play
+
+function emptyBox(G, teamId) {
+  const box = { teamId, g: 0, sog: 0, pim: 0, pp: 0, ppg: 0, hits: 0, blk: 0, fow: 0, fol: 0, players: {}, goalie: null, scorers: [] };
+  // Farm and injured players are included so a stray id can never miss — only
+  // players who actually take ice time are credited in applyGame.
+  rosterOf(G, teamId, true).forEach((p) => {
+    box.players[p.id] = p.pos === "G"
+      ? { sa: 0, sv: 0, ga: 0, toi: 0 }
+      : { g: 0, a: 0, sog: 0, pim: 0, hit: 0, blk: 0, toi: 0, pm: 0, fow: 0, fol: 0, ppg: 0, shg: 0 };
+  });
+  return box;
+}
+
+// Who takes the shot in a given unit — weighted by shooting and hands.
+function shooterFrom(G, ids) {
+  const ps = ids.map((id) => G.players[id]).filter(Boolean);
+  if (!ps.length) return null;
+  const wts = ps.map((p) => Math.pow(Math.max(1, p.r.sht * 0.7 + p.r.hnd * 0.3 - 20), 1.6) * (p.pos === "D" ? 0.55 : 1));
+  const tot = wts.reduce((a, b) => a + b, 0);
+  let x = rnd(G) * tot;
+  for (let i = 0; i < ps.length; i++) { x -= wts[i]; if (x <= 0) return ps[i]; }
+  return ps[ps.length - 1];
+}
+// Assists go to the linemates who actually move the puck.
+function assistsFrom(G, ids, scorerId) {
+  const ps = ids.map((id) => G.players[id]).filter((p) => p && p.id !== scorerId);
+  const out = [];
+  if (!ps.length) return out;
+  const roll = rnd(G);
+  const n = roll < 0.24 ? 0 : roll < 0.62 ? 1 : 2;
+  const pool = ps.slice();
+  for (let i = 0; i < n && pool.length; i++) {
+    const wts = pool.map((p) => Math.pow(Math.max(1, p.r.pss - 15), 1.7));
+    const tot = wts.reduce((a, b) => a + b, 0);
+    let x = rnd(G) * tot, chosen = pool[pool.length - 1];
+    for (let k = 0; k < pool.length; k++) { x -= wts[k]; if (x <= 0) { chosen = pool[k]; break; } }
+    out.push(chosen.id);
+    pool.splice(pool.indexOf(chosen), 1);
+  }
+  return out;
+}
+
+function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
+  const off = ctx[strength === "pp" ? "ppOff" : "off"];
+  const gq = goalieQuality(G, gid);
+  // Save percentage lives in a believable band; a great goalie is ~.925.
+  let base = 0.9 + (gq - 55) * 0.0016;
+  if (strength === "pp") base -= 0.028;
+  const gBox = ctx.gBox, sBox = ctx.sBox;
+  if (!gBox.players[gid]) return;   // no dressed goaltender — nothing to resolve against
+  for (let s = 0; s < shots; s++) {
+    const shooter = shooterFrom(G, offIds);
+    if (!shooter || !sBox.players[shooter.id]) continue;
+    const quality = (shooter.r.sht - 55) * 0.0013 + (rnd(G) - 0.5) * 0.02;
+    const saveP = clamp(base - quality, 0.845, 0.965);
+    sBox.sog++; sBox.players[shooter.id].sog++;
+    gBox.players[gid].sa++;
+    if (rnd(G) > saveP) {
+      sBox.g++; sBox.players[shooter.id].g++;
+      gBox.players[gid].ga++; gBox.ga = (gBox.ga || 0) + 1;
+      if (strength === "pp") { sBox.ppg++; sBox.players[shooter.id].ppg++; }
+      if (strength === "sh") sBox.players[shooter.id].shg++;
+      const helpers = assistsFrom(G, offIds, shooter.id);
+      helpers.forEach((id) => { if (sBox.players[id]) sBox.players[id].a++; });
+      sBox.scorers.push({ id: shooter.id, a: helpers, strength });
+      if (strength === "es") {
+        offIds.forEach((id) => { if (sBox.players[id]) sBox.players[id].pm++; });
+        defIds.forEach((id) => { if (ctx.oppBox.players[id]) ctx.oppBox.players[id].pm--; });
+      }
+    } else {
+      gBox.players[gid].sv++;
+    }
+  }
+}
+
+function simGame(G, homeId, awayId, opts) {
+  opts = opts || {};
+  const R = rules(G);
+  const hl = ensureLines(G, homeId), al = ensureLines(G, awayId);
+  const home = emptyBox(G, homeId), away = emptyBox(G, awayId);
+  const hG = hl.G[0], aG = al.G[0];
+  home.goalie = hG; away.goalie = aG;
+
+  const sides = [
+    { box: home, opp: away, lines: hl, gid: hG, oppGid: aG, oppLines: al, isHome: true },
+    { box: away, opp: home, lines: al, gid: aG, oppGid: hG, oppLines: hl, isHome: false },
+  ];
+
+  // ---- even strength, line matchup by line matchup ----
+  sides.forEach((side) => {
+    side.lines.F.forEach((fLine, li) => {
+      const mins = ES_MINUTES * LINE_TOI[li];
+      // Last change: at home, the top line sees soft matchups more often.
+      side.oppLines.D.forEach((pair, pi) => {
+        let share = PAIR_TOI[pi];
+        if (side.isHome) share *= li === 0 ? (pi === 2 ? 1.28 : pi === 1 ? 1.05 : 0.78) : 1;
+        const m = mins * share;
+        const oppF = side.oppLines.F[Math.min(3, li)];
+        const off = lineOff(G, fLine);
+        const def = unitDef(G, oppF, pair);
+        // ~30 shots per 60 at even strength for an average team.
+        const rate = (28 / 60) * (off / def);
+        const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)) * 0.9)));
+        resolveShots(G,
+          { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp },
+          shots, fLine, pair.concat(oppF), side.oppGid, "es");
+        fLine.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m / 3; });
+        pair.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m / 6; });
+      });
+    });
+  });
+
+  // ---- penalties and special teams ----
+  sides.forEach((side) => {
+    const drawn = Math.max(0, Math.round(gauss(G, 3.1, 1.2)));
+    side.opp.pim += drawn * 2;
+    side.box.pp += drawn;
+    const skaters = activeRoster(G, side.opp.teamId).filter((p) => p.pos !== "G");
+    for (let i = 0; i < drawn && skaters.length; i++) {
+      const off = skaters[Math.floor(rnd(G) * skaters.length)];
+      if (side.opp.players[off.id]) side.opp.players[off.id].pim += 2;
+    }
+    const unit = side.lines.PP[0].length ? side.lines.PP[0] : side.lines.F[0];
+    const pkUnit = side.oppLines.PK[0].length ? side.oppLines.PK[0] : side.oppLines.D[0];
+    const m = drawn * PP_MIN_PER;
+    const rate = (52 / 60) * (lineOff(G, unit) / unitDef(G, pkUnit, side.oppLines.D[0]));
+    const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)))));
+    resolveShots(G, { off: 1, ppOff: 1, sBox: side.box, gBox: side.opp, oppBox: side.opp },
+      shots, unit, pkUnit, side.oppGid, "pp");
+    unit.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m; });
+    pkUnit.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m; });
+    // Shorthanded chances are rare but real.
+    if (rnd(G) < 0.16 * drawn) {
+      resolveShots(G, { off: 1, ppOff: 1, sBox: side.opp, gBox: side.box, oppBox: side.box },
+        1, pkUnit, unit, side.gid, "sh");
+    }
+  });
+
+  // ---- faceoffs, hits, blocks ----
+  sides.forEach((side) => {
+    const cs = side.lines.F.map((l) => G.players[l[1]]).filter(Boolean);
+    const oppCs = side.oppLines.F.map((l) => G.players[l[1]]).filter(Boolean);
+    const my = cs.reduce((s, p) => s + p.r.fo, 0) / Math.max(1, cs.length);
+    const th = oppCs.reduce((s, p) => s + p.r.fo, 0) / Math.max(1, oppCs.length);
+    const total = 30;
+    const winP = clamp(0.5 + (my - th) * 0.006, 0.3, 0.7);
+    let won = 0;
+    for (let i = 0; i < total; i++) if (rnd(G) < winP) won++;
+    side.box.fow += won; side.box.fol += total - won;
+    cs.forEach((p, i) => {
+      const share = Math.round(total * LINE_TOI[i]);
+      const w = Math.round(share * winP);
+      side.box.players[p.id].fow += w; side.box.players[p.id].fol += share - w;
+    });
+    activeRoster(G, side.box.teamId).filter((p) => p.pos !== "G").forEach((p) => {
+      const h = Math.round(Math.max(0, gauss(G, p.r.phy / 34, 1)));
+      const b = Math.round(Math.max(0, gauss(G, p.r.dfn / 45 * (p.pos === "D" ? 1.7 : 0.8), 0.9)));
+      side.box.players[p.id].hit += h; side.box.players[p.id].blk += b;
+      side.box.hits += h; side.box.blk += b;
+    });
+  });
+
+  // ---- overtime ----
+  let ot = false, so = false;
+  if (home.g === away.g) {
+    if (R.otFormat === "none") { /* a tie stands */ }
+    else {
+      ot = true;
+      const hS = lineOff(G, hl.F[0]) / unitDef(G, al.F[0], al.D[0]);
+      const aS = lineOff(G, al.F[0]) / unitDef(G, hl.F[0], hl.D[0]);
+      const pHome = clamp(0.5 + (hS - aS) * 0.55 + 0.02, 0.2, 0.8);
+      // In the playoffs, and whenever there's no shootout to fall back on, OT
+      // runs until somebody actually scores.
+      const decided = opts.playoff || !R.shootout ? true : rnd(G) < 0.62;
+      const homeWins = rnd(G) < pHome;
+      const winner = homeWins ? home : away, loser = homeWins ? away : home;
+      if (decided) {
+        const lines = homeWins ? hl : al;
+        let guard = 0;
+        while (winner.g <= loser.g && guard++ < 60) {
+          resolveShots(G, { off: 1, ppOff: 1, sBox: winner, gBox: loser, oppBox: loser },
+            1, lines.F[0], [], homeWins ? aG : hG, "es");
+        }
+      }
+      if (winner.g <= loser.g) {
+        // The shootout is the one goal nobody is credited with, exactly as in
+        // real bookkeeping: the team's score goes up, no skater's total does.
+        so = true;
+        winner.g++;
+      }
+    }
+  }
+
+  // Goalie minutes and the decision.
+  if (home.players[hG]) home.players[hG].toi += 60;
+  if (away.players[aG]) away.players[aG].toi += 60;
+  const res = {
+    home: homeId, away: awayId, hg: home.g, ag: away.g, ot, so,
+    boxes: { [homeId]: home, [awayId]: away },
+  };
+  return res;
+}
+
+/* --------------------------- writing a result down ------------------------- */
+
+function applyGame(G, res, opts) {
+  opts = opts || {};
+  const R = rules(G);
+  const H = G.teams[res.home], A = G.teams[res.away];
+  const homeWon = res.hg > res.ag;
+  const tie = res.hg === res.ag;
+
+  [res.home, res.away].forEach((tid) => {
+    const t = G.teams[tid];
+    const box = res.boxes[tid];
+    const gf = tid === res.home ? res.hg : res.ag;
+    const ga = tid === res.home ? res.ag : res.hg;
+    if (!opts.playoff) {
+      t.gp++; t.gf += gf; t.ga += ga;
+      const won = gf > ga;
+      if (tie) { t.otl++; t.pts += 1; }
+      else if (won) { t.w++; t.pts += 2; t.streak = t.streak >= 0 ? t.streak + 1 : 1; }
+      else if ((res.ot || res.so) && R.otLoserPoint) { t.otl++; t.pts += 1; t.streak = t.streak <= 0 ? t.streak - 1 : -1; }
+      else { t.l++; t.streak = t.streak <= 0 ? t.streak - 1 : -1; }
+      t.l10.push(won ? "W" : (res.ot || res.so) ? "O" : "L");
+      if (t.l10.length > 10) t.l10.shift();
+    }
+
+    Object.entries(box.players).forEach(([pid, s]) => {
+      const p = G.players[pid];
+      if (!p) return;
+      // The box carries the whole organisation so lookups can't miss; only the
+      // players who took a shift are credited with a game.
+      if (s.toi <= 0) return;
+      const dest = opts.playoff ? (p.po = p.po || blankStats(p.pos)) : p.season;
+      dest.gp++; dest.toi += s.toi;
+      if (p.pos === "G") {
+        dest.sa += s.sa; dest.sv += s.sv; dest.ga += s.ga;
+        if (s.ga === 0 && s.sa > 0) dest.so++;
+        const won = gf > ga;
+        if (won) dest.w++;
+        else if ((res.ot || res.so) && R.otLoserPoint) dest.otl++;
+        else dest.l++;
+      } else {
+        dest.g += s.g; dest.a += s.a; dest.sog += s.sog; dest.pim += s.pim;
+        dest.hit += s.hit; dest.blk += s.blk; dest.pm += s.pm;
+        dest.fow += s.fow; dest.fol += s.fol; dest.ppg += s.ppg; dest.shg += s.shg;
+      }
+      p.fatigue = clamp(p.fatigue + s.toi / 60 * 3 - 1.5, 0, 100);
+    });
+  });
+
+  rollInjuries(G, res);
+  G.results.push({
+    day: G.day, home: res.home, away: res.away, hg: res.hg, ag: res.ag,
+    ot: res.ot, so: res.so, playoff: !!opts.playoff,
+    scorers: [].concat(res.boxes[res.home].scorers.map((s) => ({ ...s, t: res.home })),
+                       res.boxes[res.away].scorers.map((s) => ({ ...s, t: res.away }))),
+  });
+  if (G.results.length > 1400) G.results.splice(0, 400);
+  return res;
+}
+
+const INJURIES = [
+  ["upper body", 3, 12], ["lower body", 4, 16], ["groin", 6, 22], ["concussion", 10, 40],
+  ["shoulder", 12, 45], ["knee", 20, 70], ["broken hand", 14, 35], ["ankle", 8, 26],
+];
+function rollInjuries(G, res) {
+  const R = rules(G);
+  const mult = ({ low: 0.55, normal: 1, high: 1.6 })[R.injuries] * diff(G).injury;
+  [res.home, res.away].forEach((tid) => {
+    rosterOf(G, tid).forEach((p) => {
+      if (p.inj > 0) return;
+      const risk = 0.0022 * mult * (1 + (70 - p.r.dur) / 90) * (1 + p.fatigue / 240);
+      if (rnd(G) < risk) {
+        const [desc, lo, hi] = pick(G, INJURIES);
+        p.inj = ri(G, lo, hi);
+        p.injDesc = desc;
+        if (tid === G.userTeam) news(G, `${fullName(p)} is out ~${p.inj} games (${desc}).`, "bad");
+        G.teams[tid].lines = null;
+      }
+    });
+  });
+}
+
+function news(G, text, kind) {
+  G.news.unshift({ day: G.day, year: G.year, text, kind: kind || "info" });
+  if (G.news.length > 120) G.news.pop();
+}
+
+/* --------------------------------- one day -------------------------------- */
+
+function simDay(G) {
+  if (G.phase !== "regular") return G;
+  const day = G.schedule[G.day];
+  if (!day) { endRegularSeason(G); return G; }
+  day.forEach((fx) => {
+    if (fx.played) return;
+    const res = simGame(G, fx.home, fx.away);
+    applyGame(G, res);
+    fx.played = true; fx.hg = res.hg; fx.ag = res.ag; fx.ot = res.ot; fx.so = res.so;
+  });
+  // Recovery: injuries tick down, fatigue bleeds off, lines re-form.
+  playersOf(G).forEach((p) => {
+    if (p.inj > 0) {
+      p.inj--;
+      if (p.inj === 0) { p.injDesc = ""; if (p.teamId != null) G.teams[p.teamId].lines = null; }
+    }
+    p.fatigue = clamp(p.fatigue - 2.2, 0, 100);
+  });
+  G.day++;
+  if (G.day >= G.schedule.length) endRegularSeason(G);
+  return G;
+}
+function simDays(G, n) { for (let i = 0; i < n && G.phase === "regular"; i++) simDay(G); return G; }
+
+/* ------------------------------- standings -------------------------------- */
+
+function standings(G, filterFn) {
+  return G.teams
+    .filter(filterFn || (() => true))
+    .slice()
+    .sort((a, b) => b.pts - a.pts || (b.w - a.w) || (b.gf - b.ga) - (a.gf - a.ga) || b.gf - a.gf);
+}
+function divStandings(G, div) { return standings(G, (t) => t.div === div); }
+function confStandings(G, conf) { return standings(G, (t) => t.conf === conf); }
+
+/* Playoff field. Divisional format is the interesting one: three from each
+   division plus two conference wildcards. */
+function playoffField(G, conf) {
+  if (ruleValue(G, "playoffFormat") === "seeded") {
+    return confStandings(G, conf).slice(0, 8).map((t, i) => ({ team: t, seed: i + 1 }));
+  }
+  const divs = DIVS.map((_, i) => i).filter((d) => DIV_CONF[d] === conf);
+  const top = [], rest = [];
+  divs.forEach((d) => {
+    const s = divStandings(G, d);
+    s.slice(0, 3).forEach((t, i) => top.push({ team: t, div: d, divRank: i + 1 }));
+    s.slice(3).forEach((t) => rest.push(t));
+  });
+  const wc = rest.sort((a, b) => b.pts - a.pts || b.w - a.w).slice(0, 2);
+  return { top, wc, divs };
+}
+
+/* -------------------------------- playoffs -------------------------------- */
+
+function seriesLen(G) { return ruleValue(G, "seriesLen"); }
+function winsNeeded(G) { return Math.ceil(seriesLen(G) / 2); }
+
+function buildBracket(G) {
+  const R = ruleValue(G, "playoffFormat");
+  const rounds = [];
+  const matchups = [];
+  [0, 1].forEach((conf) => {
+    if (R === "seeded") {
+      const f = playoffField(G, conf);
+      for (let i = 0; i < 4; i++) matchups.push(mkSeries(G, f[i].team.id, f[7 - i].team.id, conf));
+    } else {
+      const { top, wc, divs } = playoffField(G, conf);
+      // Each division's winner meets a wildcard; 2 vs 3 inside the division.
+      const winners = divs.map((d) => top.find((x) => x.div === d && x.divRank === 1).team);
+      const better = winners[0].pts >= winners[1].pts ? 0 : 1;
+      const pairs = [
+        [winners[better], wc[1] || wc[0]],
+        [winners[1 - better], wc[0]],
+      ];
+      pairs.forEach(([a, b]) => { if (a && b) matchups.push(mkSeries(G, a.id, b.id, conf)); });
+      divs.forEach((d) => {
+        const two = top.find((x) => x.div === d && x.divRank === 2);
+        const three = top.find((x) => x.div === d && x.divRank === 3);
+        if (two && three) matchups.push(mkSeries(G, two.team.id, three.team.id, conf));
+      });
+    }
+  });
+  rounds.push(matchups);
+  G.playoffs = { round: 0, rounds, champion: null };
+  return G.playoffs;
+}
+function mkSeries(G, hi, lo, conf) {
+  return { hi, lo, conf, w: [0, 0], games: [], done: false, winner: null };
+}
+
+function simSeriesGame(G, s) {
+  if (s.done) return s;
+  const gameNo = s.w[0] + s.w[1];
+  // 2-2-1-1-1 home ice.
+  const homeIsHi = [0, 1, 4, 6].includes(gameNo);
+  const home = homeIsHi ? s.hi : s.lo, away = homeIsHi ? s.lo : s.hi;
+  const res = simGame(G, home, away, { playoff: true });
+  applyGame(G, res, { playoff: true });
+  const hiWon = (res.hg > res.ag) === homeIsHi;
+  s.w[hiWon ? 0 : 1]++;
+  s.games.push({ home, away, hg: res.hg, ag: res.ag, ot: res.ot });
+  const need = winsNeeded(G);
+  if (s.w[0] >= need || s.w[1] >= need) {
+    s.done = true;
+    s.winner = s.w[0] >= need ? s.hi : s.lo;
+    const loser = s.winner === s.hi ? s.lo : s.hi;
+    if (s.winner === G.userTeam) news(G, `You beat ${G.teams[loser].name} ${s.w[0]}–${s.w[1]}.`, "good");
+    if (loser === G.userTeam) news(G, `Eliminated by ${G.teams[s.winner].name}.`, "bad");
+  }
+  return s;
+}
+
+function simPlayoffRound(G) {
+  if (!G.playoffs) return G;
+  const P = G.playoffs;
+  const cur = P.rounds[P.round];
+  let guard = 0;
+  while (cur.some((s) => !s.done) && guard++ < 60) cur.forEach((s) => simSeriesGame(G, s));
+  const winners = cur.map((s) => s.winner);
+  if (winners.length === 1) {
+    P.champion = winners[0];
+    const t = G.teams[P.champion];
+    t.cupWins++;
+    news(G, `${t.city} ${t.name} win the Cup.`, "good");
+    finishSeason(G);
+    return G;
+  }
+  // Reseed inside the conference, then cross over for the final.
+  const next = [];
+  if (winners.length === 8 || winners.length === 4) {
+    [0, 1].forEach((conf) => {
+      const cw = cur.filter((s) => s.conf === conf).map((s) => s.winner);
+      for (let i = 0; i < cw.length; i += 2) {
+        const a = cw[i], b = cw[i + 1];
+        if (b == null) { next.push(mkSeries(G, a, a, conf)); continue; }
+        const hi = G.teams[a].pts >= G.teams[b].pts ? a : b;
+        const lo = hi === a ? b : a;
+        next.push(mkSeries(G, hi, lo, conf));
+      }
+    });
+  } else {
+    const [a, b] = winners;
+    const hi = G.teams[a].pts >= G.teams[b].pts ? a : b;
+    next.push(mkSeries(G, hi, hi === a ? b : a, -1));
+  }
+  P.rounds.push(next);
+  P.round++;
+  return G;
+}
+
+function endRegularSeason(G) {
+  G.phase = "playoffs";
+  computeAwards(G);
+  buildBracket(G);
+  const field = new Set();
+  G.playoffs.rounds[0].forEach((s) => { field.add(s.hi); field.add(s.lo); });
+  field.forEach((id) => G.teams[id].playoffApps++);
+  if (!field.has(G.userTeam)) news(G, "You missed the playoffs.", "bad");
+  else news(G, "You're in the playoffs.", "good");
+  return G;
+}
+
+/* --------------------------------- awards --------------------------------- */
+
+function computeAwards(G) {
+  const sk = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 10);
+  const gs = playersOf(G).filter((p) => p.pos === "G" && p.season.gp > 15);
+  const byPts = sk.slice().sort((a, b) => pts(b.season) - pts(a.season) || b.season.g - a.season.g);
+  const byGoals = sk.slice().sort((a, b) => b.season.g - a.season.g);
+  const byDef = sk.filter((p) => p.pos === "D").sort((a, b) => (b.season.blk + b.season.pm * 3) - (a.season.blk + a.season.pm * 3));
+  const byGoalie = gs.slice().sort((a, b) => svPct(b.season) - svPct(a.season));
+  const rookies = playersOf(G).filter((p) => p.rookie && p.season.gp > 10)
+    .sort((a, b) => pts(b.season) - pts(a.season));
+  const A = {
+    year: G.year,
+    scoring: byPts[0] ? byPts[0].id : null,
+    goals: byGoals[0] ? byGoals[0].id : null,
+    mvp: byPts[0] ? byPts[0].id : null,
+    defence: byDef[0] ? byDef[0].id : null,
+    goalie: byGoalie[0] ? byGoalie[0].id : null,
+    rookie: rookies[0] ? rookies[0].id : null,
+  };
+  Object.entries(A).forEach(([k, id]) => {
+    if (k === "year" || id == null) return;
+    const p = G.players[id];
+    if (p) p.trophies.push({ year: G.year, award: k });
+  });
+  G.awards = A;
+  return A;
+}
+
+/* ------------------------------ end of season ----------------------------- */
+
+function finishSeason(G) {
+  G.phase = "offseason";
+  G.offseasonStep = "review";
+  const champ = G.playoffs && G.playoffs.champion;
+  G.history.push({
+    year: G.year,
+    champion: champ,
+    standings: G.teams.map((t) => ({ id: t.id, w: t.w, l: t.l, otl: t.otl, pts: t.pts })),
+    awards: G.awards,
+    userRecord: { w: G.teams[G.userTeam].w, l: G.teams[G.userTeam].l, otl: G.teams[G.userTeam].otl, pts: G.teams[G.userTeam].pts },
+  });
+  // Board reaction: making the playoffs is the baseline expectation.
+  const me = G.teams[G.userTeam];
+  const made = G.playoffs && G.playoffs.rounds[0].some((s) => s.hi === G.userTeam || s.lo === G.userTeam);
+  let swing = made ? 6 : -12;
+  if (champ === G.userTeam) swing = 30;
+  G.boardConfidence = clamp(G.boardConfidence + (swing < 0 ? swing / diff(G).patience : swing * diff(G).patience), 0, 100);
+
+  // Ageing, progression and contract expiry all happen HERE rather than at the
+  // rollover, so that the offseason screens show next year's ratings and a real
+  // free-agent class instead of last year's leftovers.
+  playersOf(G).forEach((p) => {
+    if (p.season.gp) p.career.push({ year: G.year, teamId: p.teamId, ...p.season });
+    p.stats = p.season;
+    p.season = blankStats(p.pos);
+    p.po = null;
+    p.rookie = false;
+    p.age++;
+    p.inj = 0; p.injDesc = ""; p.fatigue = 0;
+    progress(G, p);
+    if (p.contract.yrs > 0) p.contract.yrs--;
+  });
+  playersOf(G).forEach((p) => {
+    if (p.retired || p.teamId == null) return;
+    if (rnd(G) < retirementChance(G, p)) {
+      if (p.teamId === G.userTeam) news(G, `${fullName(p)} retires at ${p.age}.`, "info");
+      p.teamId = null; p.retired = true;
+      const i = G.freeAgents.indexOf(p.id); if (i >= 0) G.freeAgents.splice(i, 1);
+      return;
+    }
+    if (p.contract.yrs <= 0) {
+      p.teamId = null; p.farm = false;
+      if (!G.freeAgents.includes(p.id)) G.freeAgents.push(p.id);
+    }
+  });
+  G.teams.forEach((t) => { t.lines = null; });
+
+  buildDraftClass(G);
+  return G;
+}
+
+/* Nobody should start a season unable to ice a legal lineup. After free agency
+   has run its course, any club still short is topped up with depth bodies. */
+function fillRosters(G) {
+  const need = { G: 2, D: 6, C: 4, LW: 3, RW: 3 };
+  G.teams.forEach((t) => {
+    Object.entries(need).forEach(([pos, n]) => {
+      let have = rosterOf(G, t.id, true).filter((p) => p.pos === pos).length;
+      while (have < n) {
+        const p = genPlayer(G, pos, 40, ri(G, 20, 27));
+        p.teamId = t.id;
+        p.contract = { amt: MIN_SALARY, yrs: ri(G, 1, 2) };
+        G.players[p.id] = p;
+        have++;
+      }
+    });
+    // Recall from the farm first, and only then sign bodies off the street.
+    const short = 20 - rosterOf(G, t.id).length;
+    if (short > 0) {
+      rosterOf(G, t.id, true).filter((p) => p.farm).sort((a, b) => b.ovr - a.ovr)
+        .slice(0, short).forEach((p) => { p.farm = false; });
+    }
+    let guard = 0;
+    while (rosterOf(G, t.id).length < 20 && guard++ < 12) {
+      const p = genPlayer(G, pick(G, ["C", "LW", "RW", "D"]), 40, ri(G, 20, 27));
+      p.teamId = t.id;
+      p.contract = { amt: MIN_SALARY, yrs: 1 };
+      G.players[p.id] = p;
+    }
+    t.lines = null;
+  });
+  return G;
+}
+
+/* --------------------------------- draft ---------------------------------- */
+
+function buildDraftClass(G) {
+  G.draftClass = [];
+  for (let i = 0; i < 64; i++) {
+    const p = genPlayer(G, pick(G, ["C", "C", "LW", "RW", "D", "D", "G"]), 44 + (64 - i) * 0.16, 18);
+    p.pot = Math.round(clamp(p.ovr + gauss(G, 18, 7), p.ovr + 2, 99));
+    p.rookie = true;
+    G.players[p.id] = p;
+    G.draftClass.push(p.id);
+  }
+  // Lottery order: non-playoff teams worst-first, with a real lottery on top.
+  const nonPlayoff = G.teams.filter((t) => !inPlayoffs(G, t.id)).sort((a, b) => a.pts - b.pts);
+  const playoffTeams = G.teams.filter((t) => inPlayoffs(G, t.id)).sort((a, b) => a.pts - b.pts);
+  const order = nonPlayoff.map((t) => t.id);
+  // Weighted lottery for the top pick among the bottom ten.
+  const pool = order.slice(0, 10);
+  if (pool.length) {
+    const wts = pool.map((_, i) => Math.pow(pool.length - i, 1.6));
+    const tot = wts.reduce((a, b) => a + b, 0);
+    let x = rnd(G) * tot, winner = pool[0];
+    for (let i = 0; i < pool.length; i++) { x -= wts[i]; if (x <= 0) { winner = pool[i]; break; } }
+    order.splice(order.indexOf(winner), 1);
+    order.unshift(winner);
+  }
+  G.draftOrder = order.concat(playoffTeams.map((t) => t.id));
+  G.draftPick = 0;
+  return G.draftClass;
+}
+function inPlayoffs(G, teamId) {
+  if (!G.playoffs) return false;
+  return G.playoffs.rounds[0].some((s) => s.hi === teamId || s.lo === teamId);
+}
+// Whose turn it is, following traded picks.
+function pickOwner(G, index) {
+  const round = Math.floor(index / G.teams.length) + 1;
+  const orig = G.draftOrder[index % G.teams.length];
+  const rec = G.picks.find((pk) => pk.year === G.year && pk.round === round && pk.orig === orig);
+  return rec ? rec.owner : orig;
+}
+function draftPlayer(G, pid) {
+  // draftPick counts picks made overall; the class shrinks as it goes, so the
+  // two must never be compared against each other.
+  if (!G.draftClass.length || G.draftPick >= G.teams.length * 2) return false;
+  const team = pickOwner(G, G.draftPick);
+  const p = G.players[pid];
+  if (!p || !G.draftClass.includes(pid)) return false;
+  p.teamId = team;
+  p.farm = true;
+  p.contract = { amt: ELC_SALARY, yrs: 3 };
+  G.draftClass.splice(G.draftClass.indexOf(pid), 1);
+  G.draftPick++;
+  if (team === G.userTeam) news(G, `Drafted ${fullName(p)} (${p.pos}, ${p.ovr} ovr / ${p.pot} pot).`, "good");
+  return true;
+}
+function autoDraft(G, stopAtUser) {
+  let guard = 0;
+  while (G.draftPick < G.teams.length * 2 && G.draftClass.length && guard++ < 200) {
+    const team = pickOwner(G, G.draftPick);
+    if (stopAtUser && team === G.userTeam) return false;
+    const best = G.draftClass
+      .map((id) => G.players[id])
+      .sort((a, b) => (b.pot * 0.7 + b.ovr * 0.3) - (a.pot * 0.7 + a.ovr * 0.3))[0];
+    draftPlayer(G, best.id);
+  }
+  return true;
+}
+
+/* ------------------------------ free agency ------------------------------- */
+
+function contractOffer(G, p, amt, yrs) {
+  const want = marketValue(G, p) * diff(G).askPrice;
+  const yearBonus = yrs >= 4 ? 0.94 : yrs === 1 ? 1.08 : 1;
+  return amt >= want * yearBonus * (0.92 + rnd(G) * 0.16);
+}
+function signPlayer(G, pid, teamId, amt, yrs) {
+  const p = G.players[pid];
+  if (!p) return { ok: false, why: "no such player" };
+  const R = rules(G);
+  if (R.hardCap && capHit(G, teamId) + amt > R.capAmount) return { ok: false, why: "no cap space" };
+  if (rosterOf(G, teamId, true).length >= ROSTER_MAX + FARM_MAX) return { ok: false, why: "roster full" };
+  p.teamId = teamId; p.farm = rosterOf(G, teamId).length >= ROSTER_MAX;
+  p.contract = { amt: round1(amt), yrs };
+  const i = G.freeAgents.indexOf(pid);
+  if (i >= 0) G.freeAgents.splice(i, 1);
+  G.teams[teamId].lines = null;
+  return { ok: true };
+}
+function aiFreeAgency(G) {
+  const order = G.teams.map((t) => t.id).filter((id) => id !== G.userTeam)
+    .sort((a, b) => capSpace(G, b) - capSpace(G, a));
+  let guard = 0;
+  while (G.freeAgents.length && guard++ < 400) {
+    let signedAny = false;
+    for (const tid of order) {
+      const roster = rosterOf(G, tid);
+      if (roster.length >= ROSTER_MAX) continue;
+      const needG = roster.filter((p) => p.pos === "G").length < 2;
+      const needD = roster.filter((p) => p.pos === "D").length < 6;
+      const cands = G.freeAgents.map((id) => G.players[id]).filter((p) => {
+        if (needG) return p.pos === "G";
+        if (needD) return p.pos === "D";
+        return true;
+      });
+      const best = cands.sort((a, b) => b.ovr - a.ovr)[0];
+      if (!best) continue;
+      const ask = round1(marketValue(G, best) * (0.95 + rnd(G) * 0.2));
+      if (rules(G).hardCap && capHit(G, tid) + ask > rules(G).capAmount) continue;
+      signPlayer(G, best.id, tid, ask, ri(G, 1, 5));
+      signedAny = true;
+    }
+    if (!signedAny) break;
+  }
+  // Anyone left goes on a minimum deal somewhere with room, or stays unsigned.
+  return G;
+}
+
+/* --------------------------------- trades --------------------------------- */
+
+function tradeValue(G, p) {
+  const age = p.age;
+  let v = Math.pow(Math.max(0, p.ovr - 40) / 10, 2.2);
+  v += Math.max(0, p.pot - p.ovr) * (age < 24 ? 0.55 : 0.15);
+  if (age > 31) v *= Math.max(0.35, 1 - (age - 31) * 0.13);
+  // A contract well above market is a liability, not an asset.
+  const mv = marketValue(G, p);
+  v *= clamp(1 + (mv - p.contract.amt) * 0.09, 0.35, 1.6);
+  return Math.max(0.2, v);
+}
+function pickValue(G, pk) {
+  const base = pk.round === 1 ? 9 : 2.5;
+  const yearsOut = pk.year - G.year;
+  return base * Math.pow(0.88, Math.max(0, yearsOut));
+}
+function evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks) {
+  const R = rules(G);
+  const aOut = aPlayers.map((id) => G.players[id]);
+  const bOut = bPlayers.map((id) => G.players[id]);
+  if (aOut.some((p) => !p || p.teamId !== aId) || bOut.some((p) => !p || p.teamId !== bId))
+    return { ok: false, why: "a player isn't on that roster" };
+
+  const aSalOut = aOut.reduce((s, p) => s + p.contract.amt, 0);
+  const bSalOut = bOut.reduce((s, p) => s + p.contract.amt, 0);
+  if (R.hardCap) {
+    if (capHit(G, aId) - aSalOut + bSalOut > R.capAmount) return { ok: false, why: `${G.teams[aId].abbr} would be over the cap` };
+    if (capHit(G, bId) - bSalOut + aSalOut > R.capAmount) return { ok: false, why: `${G.teams[bId].abbr} would be over the cap` };
+  }
+  const aSize = rosterOf(G, aId, true).length - aOut.length + bOut.length;
+  const bSize = rosterOf(G, bId, true).length - bOut.length + aOut.length;
+  if (aSize > ROSTER_MAX + FARM_MAX || bSize > ROSTER_MAX + FARM_MAX) return { ok: false, why: "roster limit" };
+
+  const aVal = aOut.reduce((s, p) => s + tradeValue(G, p), 0) + aPicks.reduce((s, pk) => s + pickValue(G, pk), 0);
+  const bVal = bOut.reduce((s, p) => s + tradeValue(G, p), 0) + bPicks.reduce((s, pk) => s + pickValue(G, pk), 0);
+  // The AI wants a margin, and wants more of one on Cutthroat.
+  const margin = aId === G.userTeam ? diff(G).askPrice : 1;
+  const accepted = aVal >= bVal * margin * 0.97;
+  return { ok: accepted, aVal: round1(aVal), bVal: round1(bVal), why: accepted ? "accepted" : "they want more back" };
+}
+function doTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks) {
+  const ev = evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks);
+  if (!ev.ok) return ev;
+  aPlayers.forEach((id) => { G.players[id].teamId = bId; G.players[id].farm = false; });
+  bPlayers.forEach((id) => { G.players[id].teamId = aId; G.players[id].farm = false; });
+  aPicks.forEach((pk) => { const r = G.picks.find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig); if (r) r.owner = bId; });
+  bPicks.forEach((pk) => { const r = G.picks.find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig); if (r) r.owner = aId; });
+  G.teams[aId].lines = null; G.teams[bId].lines = null;
+  news(G, `Trade with ${G.teams[bId].name}: out ${aPlayers.length} / in ${bPlayers.length}.`, "info");
+  return ev;
+}
+
+/* ------------------------------ the rollover ------------------------------ */
+
+function progress(G, p) {
+  const peak = p.pos === "G" ? 28 : 26;
+  const keys = p.pos === "G" ? GOALIE_KEYS : SKATER_KEYS;
+  let delta;
+  if (p.age < peak) delta = gauss(G, 2.6 + (p.pot - p.ovr) * 0.09, 1.7);
+  else if (p.age < peak + 4) delta = gauss(G, 0.2, 1.4);
+  else delta = gauss(G, -(p.age - peak - 3) * 0.95, 1.5);
+  keys.forEach((k) => {
+    if (p.r[k] == null) return;
+    p.r[k] = Math.round(clamp(p.r[k] + delta + gauss(G, 0, 1.1), 15, 99));
+  });
+  p.ovr = ovrOf(p);
+  p.pot = Math.max(p.ovr, p.pot - (p.age > peak ? 2 : 0));
+}
+function retirementChance(G, p) {
+  if (p.age < 32) return 0;
+  const decline = (p.age - 32) * 0.09 + Math.max(0, (55 - p.ovr)) * 0.012;
+  return clamp(decline, 0, 0.95);
+}
+
+function startNextSeason(G) {
+  applyPendingRules(G);
+  G.year++;
+  // Ageing and contract expiry already happened at the end of the playoffs.
+  // What's left is to fill out the league and rebuild the calendar.
+  aiFreeAgency(G);
+  fillRosters(G);
+  // Reset the league.
+  G.teams.forEach((t) => {
+    t.w = 0; t.l = 0; t.otl = 0; t.pts = 0; t.gf = 0; t.ga = 0; t.gp = 0; t.streak = 0; t.l10 = [];
+    t.lines = null;
+  });
+  G.results = [];
+  G.playoffs = null;
+  G.awards = null;
+  G.phase = "regular";
+  G.offseasonStep = null;
+  seedPicks(G, G.year + 2, 1);
+  G.picks = G.picks.filter((pk) => pk.year >= G.year);
+  buildSchedule(G);
+  G.teams.forEach((t) => ensureLines(G, t.id));
+  return G;
+}
+
+/* -------------------------------- persistence ----------------------------- */
+
+const SAVE_PREFIX = "pgmh:";
+function saveKey(slot) { return `${SAVE_PREFIX}slot${slot}`; }
+function saveGame(G, slot) {
+  try {
+    const json = JSON.stringify(G);
+    localStorage.setItem(saveKey(slot), json);
+    localStorage.setItem(`${SAVE_PREFIX}meta${slot}`, JSON.stringify({
+      team: G.teams[G.userTeam].name, city: G.teams[G.userTeam].city,
+      year: G.year, phase: G.phase, cups: G.teams[G.userTeam].cupWins,
+      record: `${G.teams[G.userTeam].w}-${G.teams[G.userTeam].l}-${G.teams[G.userTeam].otl}`,
+      at: Date.now(),
+    }));
+    return true;
+  } catch (e) { return false; }
+}
+function loadGame(slot) {
+  try {
+    const raw = localStorage.getItem(saveKey(slot));
+    return raw ? migrate(JSON.parse(raw)) : null;
+  } catch (e) { return null; }
+}
+function slotMeta(slot) {
+  try { const m = localStorage.getItem(`${SAVE_PREFIX}meta${slot}`); return m ? JSON.parse(m) : null; }
+  catch (e) { return null; }
+}
+function deleteSlot(slot) {
+  try { localStorage.removeItem(saveKey(slot)); localStorage.removeItem(`${SAVE_PREFIX}meta${slot}`); } catch (e) {}
+}
+
+/* ============================== THE INTERFACE ============================== */
+
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+const card = "bg-[#111c30] border border-[#1e2b45] rounded-xl";
+const btn = "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors";
+const btnPri = `${btn} bg-sky-600 hover:bg-sky-500 text-white`;
+const btnGhost = `${btn} bg-[#18243c] hover:bg-[#22314f] text-slate-200 border border-[#243250]`;
+
+function Stat({ label, value, sub }) {
+  return (
+    <div className={`${card} px-3 py-2`}>
+      <div className="text-[11px] uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="text-xl font-semibold tnum">{value}</div>
+      {sub ? <div className="text-xs text-slate-400">{sub}</div> : null}
+    </div>
+  );
+}
+function Th({ children, className }) {
+  return <th className={`text-left font-medium text-[11px] uppercase tracking-wide text-slate-400 px-2 py-1.5 ${className || ""}`}>{children}</th>;
+}
+function Td({ children, className }) {
+  return <td className={`px-2 py-1.5 text-sm tnum ${className || ""}`}>{children}</td>;
+}
+
+function PosBadge({ pos }) {
+  const c = { C: "bg-emerald-900 text-emerald-200", LW: "bg-sky-900 text-sky-200", RW: "bg-indigo-900 text-indigo-200",
+    D: "bg-amber-900 text-amber-200", G: "bg-rose-900 text-rose-200" }[pos];
+  return <span className={`text-[10px] px-1.5 py-0.5 rounded ${c}`}>{pos}</span>;
+}
+
+/* --------------------------------- splash --------------------------------- */
+
+function Splash({ onStart }) {
+  const [team, setTeam] = useState(0);
+  const [difficulty, setDifficulty] = useState("normal");
+  const [seasonLen, setSeasonLen] = useState(82);
+  const [slots] = useState(() => [0, 1, 2].map((s) => ({ slot: s, meta: slotMeta(s) })));
+  return (
+    <div className="max-w-3xl mx-auto p-6 space-y-5">
+      <div>
+        <h1 className="text-3xl font-bold">Pocket GM <span className="text-sky-400">Hockey</span></h1>
+        <p className="text-slate-400 text-sm mt-1">32 clubs, a hard cap, four lines and a Cup.</p>
+      </div>
+
+      <div className={`${card} p-4 space-y-3`}>
+        <div className="text-sm font-medium text-slate-300">Continue</div>
+        <div className="grid sm:grid-cols-3 gap-2">
+          {slots.map(({ slot, meta }) => (
+            <div key={slot} className="bg-[#0d1728] border border-[#1e2b45] rounded-lg p-3">
+              {meta ? (
+                <>
+                  <div className="font-medium">{meta.city} {meta.team}</div>
+                  <div className="text-xs text-slate-400">{meta.year} · {meta.record} · {meta.cups} cups</div>
+                  <div className="flex gap-2 mt-2">
+                    <button className={btnPri} onClick={() => onStart({ load: slot })}>Continue</button>
+                    <button className={btnGhost} onClick={() => { deleteSlot(slot); location.reload(); }}>Delete</button>
+                  </div>
+                </>
+              ) : <div className="text-sm text-slate-500">Empty slot {slot + 1}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className={`${card} p-4 space-y-4`}>
+        <div className="text-sm font-medium text-slate-300">New career</div>
+        <div>
+          <div className="text-xs text-slate-400 mb-1">Club</div>
+          <select className="w-full bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2"
+            value={team} onChange={(e) => setTeam(+e.target.value)}>
+            {TEAMS.map((t, i) => (
+              <option key={i} value={i}>{t.city} {t.name} — {CONFS[t.conf]} / {DIVS[t.div]}</option>
+            ))}
+          </select>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <div className="text-xs text-slate-400 mb-1">Difficulty</div>
+            <select className="w-full bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2"
+              value={difficulty} onChange={(e) => setDifficulty(e.target.value)}>
+              {Object.entries(DIFFICULTIES).map(([k, d]) => <option key={k} value={k}>{d.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <div className="text-xs text-slate-400 mb-1">Season length</div>
+            <select className="w-full bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2"
+              value={seasonLen} onChange={(e) => setSeasonLen(+e.target.value)}>
+              <option value={82}>82 games</option>
+              <option value={56}>56 games</option>
+              <option value={41}>41 games</option>
+            </select>
+          </div>
+        </div>
+        <button className={`${btnPri} w-full py-2`} onClick={() => onStart({ team, difficulty, rules: { seasonLen } })}>
+          Start career
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------- roster tab ------------------------------- */
+
+function RosterTab({ G, setG }) {
+  const [showFarm, setShowFarm] = useState(false);
+  const roster = rosterOf(G, G.userTeam, true)
+    .filter((p) => (showFarm ? p.farm : !p.farm))
+    .sort((a, b) => POS.indexOf(a.pos) - POS.indexOf(b.pos) || b.ovr - a.ovr);
+  const hit = capHit(G, G.userTeam), space = capSpace(G, G.userTeam);
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Cap hit" value={`$${hit}M`} sub={`of $${rules(G).capAmount}M`} />
+        <Stat label="Cap space" value={`$${space}M`} sub={space < 0 ? "over the cap" : "available"} />
+        <Stat label="Roster" value={rosterOf(G, G.userTeam).length} sub={`max ${ROSTER_MAX}`} />
+        <Stat label="Team rating" value={teamStrength(G, G.userTeam)} sub="top 18 average" />
+      </div>
+      <div className="flex gap-2">
+        <button className={showFarm ? btnGhost : btnPri} onClick={() => setShowFarm(false)}>NHL roster</button>
+        <button className={showFarm ? btnPri : btnGhost} onClick={() => setShowFarm(true)}>Farm</button>
+      </div>
+      <div className={`${card} overflow-x-auto`}>
+        <table className="w-full min-w-[720px]">
+          <thead><tr className="border-b border-[#1e2b45]">
+            <Th>Player</Th><Th>Pos</Th><Th>Age</Th><Th>Ovr</Th><Th>Pot</Th>
+            <Th>GP</Th><Th>G</Th><Th>A</Th><Th>P</Th><Th>+/-</Th><Th>Cap</Th><Th>Yrs</Th><Th></Th>
+          </tr></thead>
+          <tbody>
+            {roster.map((p) => (
+              <tr key={p.id} className="border-b border-[#16223a] hover:bg-[#16223a]">
+                <Td className="whitespace-nowrap">
+                  {fullName(p)}
+                  {p.inj > 0 ? <span className="ml-2 text-[10px] text-rose-400">INJ {p.inj}</span> : null}
+                </Td>
+                <Td><PosBadge pos={p.pos} /></Td>
+                <Td>{p.age}</Td>
+                <Td className="font-semibold">{p.ovr}</Td>
+                <Td className="text-slate-400">{p.pot}</Td>
+                {p.pos === "G" ? (
+                  <>
+                    <Td>{p.season.gp}</Td>
+                    <Td colSpan={3} className="text-slate-400">
+                      {p.season.gp ? `${(svPct(p.season) * 100).toFixed(1)} SV% · ${gaa(p.season).toFixed(2)} GAA` : "—"}
+                    </Td>
+                    <Td>—</Td>
+                  </>
+                ) : (
+                  <>
+                    <Td>{p.season.gp}</Td><Td>{p.season.g}</Td><Td>{p.season.a}</Td>
+                    <Td className="font-semibold">{pts(p.season)}</Td>
+                    <Td className={p.season.pm > 0 ? "text-emerald-400" : p.season.pm < 0 ? "text-rose-400" : ""}>
+                      {p.season.pm > 0 ? "+" : ""}{p.season.pm}
+                    </Td>
+                  </>
+                )}
+                <Td>${p.contract.amt}M</Td>
+                <Td>{p.contract.yrs}</Td>
+                <Td>
+                  <button className="text-xs text-sky-400 hover:underline" onClick={() => {
+                    const g2 = { ...G };
+                    g2.players = { ...G.players };
+                    const q = { ...p, farm: !p.farm };
+                    g2.players[p.id] = q;
+                    g2.teams = G.teams.map((t) => (t.id === G.userTeam ? { ...t, lines: null } : t));
+                    setG(g2);
+                  }}>{p.farm ? "Recall" : "Send down"}</button>
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------- lines tab -------------------------------- */
+
+function LinesTab({ G, setG }) {
+  const lines = ensureLines(G, G.userTeam);
+  const bench = activeRoster(G, G.userTeam);
+  const used = new Set([].concat(...lines.F, ...lines.D, lines.G).filter(Boolean));
+  const scratches = bench.filter((p) => !used.has(p.id));
+  const nameFor = (id) => (G.players[id] ? shortName(G.players[id]) : "—");
+  const ovrFor = (id) => (G.players[id] ? G.players[id].ovr : "");
+
+  function swap(kind, li, si, newId) {
+    const g2 = { ...G, teams: G.teams.slice() };
+    const t = { ...g2.teams[G.userTeam] };
+    const L = JSON.parse(JSON.stringify(t.lines || lines));
+    const old = kind === "F" ? L.F[li][si] : kind === "D" ? L.D[li][si] : L.G[si];
+    // If the incoming player is already in the lineup, swap the two slots.
+    const findSlot = (id) => {
+      for (let i = 0; i < L.F.length; i++) for (let j = 0; j < 3; j++) if (L.F[i][j] === id) return ["F", i, j];
+      for (let i = 0; i < L.D.length; i++) for (let j = 0; j < 2; j++) if (L.D[i][j] === id) return ["D", i, j];
+      for (let j = 0; j < L.G.length; j++) if (L.G[j] === id) return ["G", 0, j];
+      return null;
+    };
+    const at = findSlot(newId);
+    if (at) {
+      const [k2, i2, j2] = at;
+      if (k2 === "F") L.F[i2][j2] = old; else if (k2 === "D") L.D[i2][j2] = old; else L.G[j2] = old;
+    }
+    if (kind === "F") L.F[li][si] = newId; else if (kind === "D") L.D[li][si] = newId; else L.G[si] = newId;
+    t.lines = L;
+    g2.teams[G.userTeam] = t;
+    setG(g2);
+  }
+
+  const Slot = ({ kind, li, si, id, filter }) => (
+    <select className="bg-[#0d1728] border border-[#243250] rounded px-2 py-1 text-sm w-full"
+      value={id || ""} onChange={(e) => swap(kind, li, si, +e.target.value)}>
+      {bench.filter(filter).map((p) => (
+        <option key={p.id} value={p.id}>{shortName(p)} ({p.ovr})</option>
+      ))}
+    </select>
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        <button className={btnGhost} onClick={() => {
+          const g2 = { ...G, teams: G.teams.slice() };
+          g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], lines: autoLines(G, G.userTeam) };
+          setG(g2);
+        }}>Auto lines</button>
+        <div className="text-xs text-slate-400 self-center">
+          Line 1 gets {Math.round(LINE_TOI[0] * 100)}% of even-strength ice; at home your top line sees soft matchups more often.
+        </div>
+      </div>
+
+      <div className={`${card} p-3 space-y-2`}>
+        <div className="text-sm font-medium text-slate-300">Forwards</div>
+        {lines.F.map((ln, i) => (
+          <div key={i} className="grid grid-cols-[2.5rem_1fr_1fr_1fr] gap-2 items-center">
+            <div className="text-xs text-slate-500">L{i + 1}</div>
+            {[0, 1, 2].map((si) => (
+              <Slot key={si} kind="F" li={i} si={si} id={ln[si]} filter={(p) => p.pos !== "G" && p.pos !== "D"} />
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <div className={`${card} p-3 space-y-2`}>
+        <div className="text-sm font-medium text-slate-300">Defence</div>
+        {lines.D.map((pr, i) => (
+          <div key={i} className="grid grid-cols-[2.5rem_1fr_1fr] gap-2 items-center">
+            <div className="text-xs text-slate-500">D{i + 1}</div>
+            {[0, 1].map((si) => (
+              <Slot key={si} kind="D" li={i} si={si} id={pr[si]} filter={(p) => p.pos === "D"} />
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <div className={`${card} p-3 space-y-2`}>
+        <div className="text-sm font-medium text-slate-300">Goaltenders</div>
+        <div className="grid grid-cols-[2.5rem_1fr_1fr] gap-2 items-center">
+          <div className="text-xs text-slate-500">G</div>
+          {[0, 1].map((si) => <Slot key={si} kind="G" li={0} si={si} id={lines.G[si]} filter={(p) => p.pos === "G"} />)}
+        </div>
+      </div>
+
+      {scratches.length ? (
+        <div className={`${card} p-3`}>
+          <div className="text-sm font-medium text-slate-300 mb-1">Healthy scratches</div>
+          <div className="text-sm text-slate-400">{scratches.map((p) => `${shortName(p)} (${p.ovr})`).join(" · ")}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ------------------------------ standings tab ------------------------------ */
+
+function StandingsTab({ G }) {
+  const [mode, setMode] = useState("div");
+  const rows = (list) => list.map((t, i) => (
+    <tr key={t.id} className={`border-b border-[#16223a] ${t.id === G.userTeam ? "bg-sky-950/40" : ""}`}>
+      <Td className="text-slate-500">{i + 1}</Td>
+      <Td className="whitespace-nowrap font-medium">{t.city} {t.name}</Td>
+      <Td>{t.gp}</Td><Td>{t.w}</Td><Td>{t.l}</Td><Td>{t.otl}</Td>
+      <Td className="font-semibold">{t.pts}</Td>
+      <Td>{t.gf}</Td><Td>{t.ga}</Td>
+      <Td className={t.gf - t.ga > 0 ? "text-emerald-400" : "text-rose-400"}>{t.gf - t.ga > 0 ? "+" : ""}{t.gf - t.ga}</Td>
+      <Td className="text-xs text-slate-400">{t.l10.join("")}</Td>
+    </tr>
+  ));
+  const Table = ({ title, list }) => (
+    <div className={`${card} overflow-x-auto`}>
+      <div className="px-3 py-2 text-sm font-medium text-slate-300 border-b border-[#1e2b45]">{title}</div>
+      <table className="w-full min-w-[620px]">
+        <thead><tr className="border-b border-[#1e2b45]">
+          <Th></Th><Th>Team</Th><Th>GP</Th><Th>W</Th><Th>L</Th><Th>OTL</Th><Th>PTS</Th><Th>GF</Th><Th>GA</Th><Th>Diff</Th><Th>L10</Th>
+        </tr></thead>
+        <tbody>{rows(list)}</tbody>
+      </table>
+    </div>
+  );
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        {[["div", "Division"], ["conf", "Conference"], ["league", "League"]].map(([k, l]) => (
+          <button key={k} className={mode === k ? btnPri : btnGhost} onClick={() => setMode(k)}>{l}</button>
+        ))}
+      </div>
+      {mode === "div" && DIVS.map((d, i) => <Table key={i} title={`${CONFS[DIV_CONF[i]]} · ${d}`} list={divStandings(G, i)} />)}
+      {mode === "conf" && CONFS.map((c, i) => <Table key={i} title={c} list={confStandings(G, i)} />)}
+      {mode === "league" && <Table title="League" list={standings(G)} />}
+    </div>
+  );
+}
+
+/* -------------------------------- stats tab -------------------------------- */
+
+function StatsTab({ G }) {
+  const [mode, setMode] = useState("skaters");
+  const skaters = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 0)
+    .sort((a, b) => pts(b.season) - pts(a.season) || b.season.g - a.season.g).slice(0, 60);
+  const goalies = playersOf(G).filter((p) => p.pos === "G" && p.season.gp >= 5)
+    .sort((a, b) => svPct(b.season) - svPct(a.season)).slice(0, 30);
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2">
+        <button className={mode === "skaters" ? btnPri : btnGhost} onClick={() => setMode("skaters")}>Skaters</button>
+        <button className={mode === "goalies" ? btnPri : btnGhost} onClick={() => setMode("goalies")}>Goalies</button>
+      </div>
+      <div className={`${card} overflow-x-auto`}>
+        {mode === "skaters" ? (
+          <table className="w-full min-w-[700px]">
+            <thead><tr className="border-b border-[#1e2b45]">
+              <Th></Th><Th>Player</Th><Th>Team</Th><Th>Pos</Th><Th>GP</Th><Th>G</Th><Th>A</Th><Th>P</Th><Th>+/-</Th><Th>PIM</Th><Th>SOG</Th>
+            </tr></thead>
+            <tbody>{skaters.map((p, i) => (
+              <tr key={p.id} className={`border-b border-[#16223a] ${p.teamId === G.userTeam ? "bg-sky-950/30" : ""}`}>
+                <Td className="text-slate-500">{i + 1}</Td>
+                <Td className="whitespace-nowrap">{fullName(p)}</Td>
+                <Td className="text-slate-400">{p.teamId != null ? G.teams[p.teamId].abbr : "FA"}</Td>
+                <Td><PosBadge pos={p.pos} /></Td>
+                <Td>{p.season.gp}</Td><Td>{p.season.g}</Td><Td>{p.season.a}</Td>
+                <Td className="font-semibold">{pts(p.season)}</Td>
+                <Td>{p.season.pm > 0 ? "+" : ""}{p.season.pm}</Td>
+                <Td>{p.season.pim}</Td><Td>{p.season.sog}</Td>
+              </tr>
+            ))}</tbody>
+          </table>
+        ) : (
+          <table className="w-full min-w-[620px]">
+            <thead><tr className="border-b border-[#1e2b45]">
+              <Th></Th><Th>Goalie</Th><Th>Team</Th><Th>GP</Th><Th>W</Th><Th>L</Th><Th>OTL</Th><Th>SV%</Th><Th>GAA</Th><Th>SO</Th>
+            </tr></thead>
+            <tbody>{goalies.map((p, i) => (
+              <tr key={p.id} className={`border-b border-[#16223a] ${p.teamId === G.userTeam ? "bg-sky-950/30" : ""}`}>
+                <Td className="text-slate-500">{i + 1}</Td>
+                <Td className="whitespace-nowrap">{fullName(p)}</Td>
+                <Td className="text-slate-400">{p.teamId != null ? G.teams[p.teamId].abbr : "FA"}</Td>
+                <Td>{p.season.gp}</Td><Td>{p.season.w}</Td><Td>{p.season.l}</Td><Td>{p.season.otl}</Td>
+                <Td className="font-semibold">{(svPct(p.season) * 100).toFixed(1)}</Td>
+                <Td>{gaa(p.season).toFixed(2)}</Td><Td>{p.season.so}</Td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------- trade tab -------------------------------- */
+
+function TradeTab({ G, setG }) {
+  const [other, setOther] = useState(G.userTeam === 0 ? 1 : 0);
+  const [mine, setMine] = useState([]);
+  const [theirs, setTheirs] = useState([]);
+  const [msg, setMsg] = useState(null);
+  const myRoster = rosterOf(G, G.userTeam, true).sort((a, b) => b.ovr - a.ovr);
+  const theirRoster = rosterOf(G, other, true).sort((a, b) => b.ovr - a.ovr);
+  const toggle = (list, set, id) => set(list.includes(id) ? list.filter((x) => x !== id) : list.concat(id));
+
+  const ev = useMemo(() => evalTrade(G, G.userTeam, mine, [], other, theirs, []),
+    [G, mine, theirs, other]);
+
+  const Side = ({ roster, sel, set, label }) => (
+    <div className={`${card} p-3 space-y-1 max-h-[26rem] overflow-y-auto`}>
+      <div className="text-sm font-medium text-slate-300 sticky top-0 bg-[#111c30] pb-1">{label}</div>
+      {roster.map((p) => (
+        <label key={p.id} className={`flex items-center gap-2 px-2 py-1 rounded cursor-pointer text-sm
+          ${sel.includes(p.id) ? "bg-sky-900/50" : "hover:bg-[#16223a]"}`}>
+          <input type="checkbox" checked={sel.includes(p.id)} onChange={() => toggle(sel, set, p.id)} />
+          <PosBadge pos={p.pos} />
+          <span className="flex-1">{shortName(p)}</span>
+          <span className="text-slate-400 tnum">{p.ovr}</span>
+          <span className="text-slate-500 tnum text-xs">${p.contract.amt}M</span>
+        </label>
+      ))}
+    </div>
+  );
+
+  return (
+    <div className="space-y-3">
+      <select className="bg-[#0d1728] border border-[#243250] rounded-lg px-3 py-2"
+        value={other} onChange={(e) => { setOther(+e.target.value); setTheirs([]); setMsg(null); }}>
+        {G.teams.filter((t) => t.id !== G.userTeam).map((t) => (
+          <option key={t.id} value={t.id}>{t.city} {t.name} — ${capSpace(G, t.id)}M space</option>
+        ))}
+      </select>
+      <div className="grid md:grid-cols-2 gap-3">
+        <Side roster={myRoster} sel={mine} set={setMine} label={`You send (${G.teams[G.userTeam].abbr})`} />
+        <Side roster={theirRoster} sel={theirs} set={setTheirs} label={`You get (${G.teams[other].abbr})`} />
+      </div>
+      <div className={`${card} p-3 flex flex-wrap items-center gap-3`}>
+        <div className="text-sm">
+          <span className="text-slate-400">Their read: </span>
+          {mine.length || theirs.length
+            ? <span className={ev.ok ? "text-emerald-400" : "text-amber-400"}>{ev.why}</span>
+            : <span className="text-slate-500">pick some players</span>}
+        </div>
+        <button className={btnPri} disabled={!ev.ok} onClick={() => {
+          const g2 = migrate(JSON.parse(JSON.stringify(G)));
+          const r = doTrade(g2, g2.userTeam, mine, [], other, theirs, []);
+          if (r.ok) { setG(g2); setMine([]); setTheirs([]); setMsg("Trade completed."); }
+          else setMsg(r.why);
+        }}>Propose</button>
+        {msg ? <div className="text-sm text-slate-400">{msg}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- free agency tab ----------------------------- */
+
+function FreeAgencyTab({ G, setG }) {
+  const [msg, setMsg] = useState(null);
+  const fas = G.freeAgents.map((id) => G.players[id]).filter(Boolean).sort((a, b) => b.ovr - a.ovr);
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-3 gap-2">
+        <Stat label="Cap space" value={`$${capSpace(G, G.userTeam)}M`} />
+        <Stat label="Roster" value={rosterOf(G, G.userTeam).length} sub={`max ${ROSTER_MAX}`} />
+        <Stat label="Available" value={fas.length} />
+      </div>
+      {msg ? <div className="text-sm text-slate-400">{msg}</div> : null}
+      <div className={`${card} overflow-x-auto`}>
+        <table className="w-full min-w-[640px]">
+          <thead><tr className="border-b border-[#1e2b45]">
+            <Th>Player</Th><Th>Pos</Th><Th>Age</Th><Th>Ovr</Th><Th>Pot</Th><Th>Asking</Th><Th></Th>
+          </tr></thead>
+          <tbody>{fas.slice(0, 60).map((p) => {
+            const ask = marketValue(G, p);
+            return (
+              <tr key={p.id} className="border-b border-[#16223a] hover:bg-[#16223a]">
+                <Td className="whitespace-nowrap">{fullName(p)}</Td>
+                <Td><PosBadge pos={p.pos} /></Td>
+                <Td>{p.age}</Td><Td className="font-semibold">{p.ovr}</Td><Td className="text-slate-400">{p.pot}</Td>
+                <Td>${ask}M</Td>
+                <Td>
+                  <button className="text-xs text-sky-400 hover:underline" onClick={() => {
+                    const g2 = migrate(JSON.parse(JSON.stringify(G)));
+                    const offer = round1(ask * 1.05);
+                    if (!contractOffer(g2, g2.players[p.id], offer, 3)) { setMsg(`${fullName(p)} turned it down.`); return; }
+                    const r = signPlayer(g2, p.id, g2.userTeam, offer, 3);
+                    if (!r.ok) { setMsg(r.why); return; }
+                    setMsg(`Signed ${fullName(p)} — $${offer}M × 3.`);
+                    setG(g2);
+                  }}>Offer ${round1(ask * 1.05)}M × 3</button>
+                </Td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ playoffs tab ------------------------------- */
+
+function PlayoffsTab({ G, setG }) {
+  if (!G.playoffs) return <div className="text-slate-400 text-sm">The playoffs haven't started.</div>;
+  const P = G.playoffs;
+  const roundName = (i, n) => {
+    const total = P.rounds.length;
+    if (n === 1) return "Cup Final";
+    if (n === 2) return "Conference Finals";
+    if (n === 4) return "Second Round";
+    return "First Round";
+  };
+  return (
+    <div className="space-y-3">
+      {P.champion != null ? (
+        <div className={`${card} p-4 text-center`}>
+          <div className="text-xs uppercase tracking-wide text-slate-400">Champions</div>
+          <div className="text-2xl font-bold text-sky-400">{G.teams[P.champion].city} {G.teams[P.champion].name}</div>
+        </div>
+      ) : null}
+      {P.rounds.map((rd, i) => (
+        <div key={i} className={`${card} p-3 space-y-2`}>
+          <div className="text-sm font-medium text-slate-300">{roundName(i, rd.length)}</div>
+          {rd.map((s, j) => (
+            <div key={j} className={`flex items-center gap-3 text-sm px-2 py-1.5 rounded
+              ${s.hi === G.userTeam || s.lo === G.userTeam ? "bg-sky-950/40" : ""}`}>
+              <div className="flex-1">{G.teams[s.hi].city} {G.teams[s.hi].name}</div>
+              <div className="tnum font-semibold">{s.w[0]}–{s.w[1]}</div>
+              <div className="flex-1 text-right">{G.teams[s.lo].city} {G.teams[s.lo].name}</div>
+            </div>
+          ))}
+        </div>
+      ))}
+      {P.champion == null ? (
+        <button className={btnPri} onClick={() => {
+          const g2 = migrate(JSON.parse(JSON.stringify(G)));
+          simPlayoffRound(g2);
+          setG(g2);
+        }}>Play next round</button>
+      ) : null}
+    </div>
+  );
+}
+
+/* ------------------------------ offseason tab ------------------------------ */
+
+function OffseasonTab({ G, setG }) {
+  const step = G.offseasonStep || "review";
+  const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); fn(g2); setG(g2); };
+  const A = G.awards;
+  const nm = (id) => (id != null && G.players[id] ? fullName(G.players[id]) : "—");
+  const onClock = G.draftPick != null && G.draftClass.length ? pickOwner(G, G.draftPick) : null;
+
+  return (
+    <div className="space-y-3">
+      <div className={`${card} p-3`}>
+        <div className="text-sm font-medium text-slate-300 mb-2">{G.year} awards</div>
+        {A ? (
+          <div className="grid sm:grid-cols-3 gap-2 text-sm">
+            <div><span className="text-slate-400">MVP </span>{nm(A.mvp)}</div>
+            <div><span className="text-slate-400">Scoring </span>{nm(A.scoring)}</div>
+            <div><span className="text-slate-400">Goals </span>{nm(A.goals)}</div>
+            <div><span className="text-slate-400">Best D </span>{nm(A.defence)}</div>
+            <div><span className="text-slate-400">Goaltender </span>{nm(A.goalie)}</div>
+            <div><span className="text-slate-400">Rookie </span>{nm(A.rookie)}</div>
+          </div>
+        ) : <div className="text-slate-500 text-sm">—</div>}
+      </div>
+
+      {step === "review" ? (
+        <button className={btnPri} onClick={() => upd((g) => { g.offseasonStep = "draft"; })}>Go to the draft</button>
+      ) : null}
+
+      {step === "draft" ? (
+        <div className={`${card} p-3 space-y-2`}>
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-medium text-slate-300">
+              Draft — pick {G.draftPick + 1}
+              {onClock != null ? <span className="text-slate-400"> · {G.teams[onClock].abbr} on the clock</span> : null}
+            </div>
+            <div className="flex gap-2">
+              <button className={btnGhost} onClick={() => upd((g) => autoDraft(g, true))}>Sim to my pick</button>
+              <button className={btnGhost} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>Auto-draft the rest</button>
+            </div>
+          </div>
+          {onClock === G.userTeam ? (
+            <div className="max-h-80 overflow-y-auto space-y-1">
+              {G.draftClass.map((id) => G.players[id]).sort((a, b) => b.pot - a.pot).slice(0, 25).map((p) => (
+                <div key={p.id} className="flex items-center gap-2 text-sm px-2 py-1 rounded hover:bg-[#16223a]">
+                  <PosBadge pos={p.pos} />
+                  <span className="flex-1">{fullName(p)}</span>
+                  <span className="text-slate-400 tnum">{p.ovr} / {p.pot}</span>
+                  <button className="text-xs text-sky-400 hover:underline" onClick={() => upd((g) => draftPlayer(g, p.id))}>Draft</button>
+                </div>
+              ))}
+            </div>
+          ) : <div className="text-sm text-slate-500">Not your pick.</div>}
+          <button className={btnPri} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>Finish draft</button>
+        </div>
+      ) : null}
+
+      {step === "fa" ? (
+        <div className="space-y-3">
+          <FreeAgencyTab G={G} setG={setG} />
+          <button className={btnPri} onClick={() => upd((g) => { aiFreeAgency(g); startNextSeason(g); })}>
+            Start the {G.year + 1} season
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* -------------------------------- rules modal ------------------------------ */
+
+function RulesModal({ G, setG, onClose }) {
+  const upd = (k, v) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); setRule(g2, k, v); setG(g2); };
+  const Row = ({ label, hint, children }) => (
+    <div className="flex items-start justify-between gap-3 py-2 border-b border-[#1e2b45]">
+      <div><div className="text-sm">{label}</div><div className="text-xs text-slate-500">{hint}</div></div>
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+  const Sel = ({ k, opts }) => (
+    <select className="bg-[#0d1728] border border-[#243250] rounded px-2 py-1 text-sm"
+      value={ruleValue(G, k)} onChange={(e) => {
+        const v = e.target.value;
+        upd(k, v === "true" ? true : v === "false" ? false : isNaN(+v) || v === "" ? v : +v);
+      }}>
+      {opts.map(([v, l]) => <option key={String(v)} value={String(v)}>{l}</option>)}
+    </select>
+  );
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={onClose}>
+      <div className={`${card} p-4 w-full max-w-lg max-h-[80vh] overflow-y-auto`} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-2">
+          <div className="font-semibold">League rules</div>
+          <button className={btnGhost} onClick={onClose}>Close</button>
+        </div>
+        <Row label="Season length" hint="takes effect next season"><Sel k="seasonLen" opts={[[82, "82"], [56, "56"], [41, "41"]]} /></Row>
+        <Row label="Loser point" hint="a point for losing past regulation"><Sel k="otLoserPoint" opts={[[true, "On"], [false, "Off"]]} /></Row>
+        <Row label="Overtime" hint="3-on-3, 5-on-5, or let it be a tie"><Sel k="otFormat" opts={[["3on3", "3-on-3"], ["5on5", "5-on-5"], ["none", "Ties"]]} /></Row>
+        <Row label="Shootout" hint="decides games OT doesn't"><Sel k="shootout" opts={[[true, "On"], [false, "Off"]]} /></Row>
+        <Row label="Playoff format" hint="takes effect next season"><Sel k="playoffFormat" opts={[["divisional", "Divisional + wildcards"], ["seeded", "Seeded 1–8"]]} /></Row>
+        <Row label="Series length" hint="takes effect next season"><Sel k="seriesLen" opts={[[7, "Best of 7"], [5, "Best of 5"]]} /></Row>
+        <Row label="Hard cap" hint="off means the cap is advisory"><Sel k="hardCap" opts={[[true, "On"], [false, "Off"]]} /></Row>
+        <Row label="Cap amount" hint="$M per club"><Sel k="capAmount" opts={[[75, "$75M"], [88, "$88M"], [105, "$105M"]]} /></Row>
+        <Row label="Injuries" hint="how often bodies break"><Sel k="injuries" opts={[["low", "Low"], ["normal", "Normal"], ["high", "High"]]} /></Row>
+        {G.pendingRules && Object.keys(G.pendingRules).length ? (
+          <div className="mt-3 text-xs text-amber-400">
+            Staged for next season: {Object.keys(G.pendingRules).join(", ")}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- home ---------------------------------- */
+
+function HomeTab({ G, setG }) {
+  const t = G.teams[G.userTeam];
+  const today = G.schedule[G.day] || [];
+  const mine = today.find((f) => f.home === G.userTeam || f.away === G.userTeam);
+  const recent = G.results.slice(-6).reverse();
+  const leaders = rosterOf(G, G.userTeam).filter((p) => p.pos !== "G")
+    .sort((a, b) => pts(b.season) - pts(a.season)).slice(0, 5);
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Record" value={`${t.w}-${t.l}-${t.otl}`} sub={`${t.pts} pts`} />
+        <Stat label="Goals" value={`${t.gf}–${t.ga}`} sub={`${t.gf - t.ga > 0 ? "+" : ""}${t.gf - t.ga} diff`} />
+        <Stat label="Cap space" value={`$${capSpace(G, G.userTeam)}M`} />
+        <Stat label="Board" value={Math.round(G.boardConfidence)} sub="confidence" />
+      </div>
+
+      <div className={`${card} p-3`}>
+        <div className="text-sm font-medium text-slate-300 mb-1">
+          {G.phase === "regular" ? `Game ${G.day + 1} of ${G.schedule.length}` : G.phase === "playoffs" ? "Playoffs" : "Offseason"}
+        </div>
+        {mine ? (
+          <div className="text-sm text-slate-300">
+            {mine.home === G.userTeam
+              ? <>vs {G.teams[mine.away].city} {G.teams[mine.away].name}</>
+              : <>at {G.teams[mine.home].city} {G.teams[mine.home].name}</>}
+          </div>
+        ) : <div className="text-sm text-slate-500">No game today.</div>}
+      </div>
+
+      {G.news.length ? (
+        <div className={`${card} p-3 space-y-1`}>
+          <div className="text-sm font-medium text-slate-300 mb-1">Wire</div>
+          {G.news.slice(0, 6).map((n, i) => (
+            <div key={i} className={`text-sm ${n.kind === "bad" ? "text-rose-300" : n.kind === "good" ? "text-emerald-300" : "text-slate-300"}`}>{n.text}</div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="grid md:grid-cols-2 gap-3">
+        <div className={`${card} p-3`}>
+          <div className="text-sm font-medium text-slate-300 mb-2">Recent results</div>
+          {recent.length ? recent.map((r, i) => (
+            <div key={i} className="text-sm flex justify-between py-0.5">
+              <span>{G.teams[r.away].abbr} @ {G.teams[r.home].abbr}</span>
+              <span className="tnum">{r.ag}–{r.hg}{r.so ? " SO" : r.ot ? " OT" : ""}</span>
+            </div>
+          )) : <div className="text-sm text-slate-500">Nothing yet.</div>}
+        </div>
+        <div className={`${card} p-3`}>
+          <div className="text-sm font-medium text-slate-300 mb-2">Team scoring</div>
+          {leaders.map((p) => (
+            <div key={p.id} className="text-sm flex justify-between py-0.5">
+              <span>{shortName(p)}</span>
+              <span className="tnum text-slate-400">{p.season.g}G {p.season.a}A · {pts(p.season)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* --------------------------------- history --------------------------------- */
+
+function HistoryTab({ G }) {
+  return (
+    <div className={`${card} overflow-x-auto`}>
+      <table className="w-full min-w-[520px]">
+        <thead><tr className="border-b border-[#1e2b45]">
+          <Th>Year</Th><Th>Champion</Th><Th>Your record</Th><Th>MVP</Th>
+        </tr></thead>
+        <tbody>
+          {G.history.slice().reverse().map((h) => (
+            <tr key={h.year} className="border-b border-[#16223a]">
+              <Td>{h.year}</Td>
+              <Td>{h.champion != null ? `${G.teams[h.champion].city} ${G.teams[h.champion].name}` : "—"}</Td>
+              <Td>{h.userRecord.w}-{h.userRecord.l}-{h.userRecord.otl}</Td>
+              <Td>{h.awards && h.awards.mvp != null && G.players[h.awards.mvp] ? fullName(G.players[h.awards.mvp]) : "—"}</Td>
+            </tr>
+          ))}
+          {!G.history.length ? <tr><Td className="text-slate-500">No completed seasons yet.</Td></tr> : null}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* ----------------------------------- app ---------------------------------- */
+
+const TABS = [
+  ["home", "Home"], ["roster", "Roster"], ["lines", "Lines"], ["standings", "Standings"],
+  ["stats", "Stats"], ["trade", "Trade"], ["fa", "Free agents"], ["playoffs", "Playoffs"],
+  ["offseason", "Offseason"], ["history", "History"],
+];
+
+function App() {
+  const [G, setG] = useState(null);
+  const [tab, setTab] = useState("home");
+  const [slot, setSlot] = useState(0);
+  const [showRules, setShowRules] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { if (G) saveGame(G, slot); }, [G, slot]);
+
+  const start = (opts) => {
+    if (opts.load != null) { const g = loadGame(opts.load); if (g) { setSlot(opts.load); setG(g); } return; }
+    const g = newGame(opts.team, { difficulty: opts.difficulty, rules: opts.rules });
+    const free = [0, 1, 2].find((s) => !slotMeta(s));
+    setSlot(free != null ? free : 0);
+    setG(g);
+  };
+
+  const advance = (n) => {
+    if (!G || busy) return;
+    setBusy(true);
+    const g2 = migrate(JSON.parse(JSON.stringify(G)));
+    if (g2.phase === "regular") simDays(g2, n);
+    else if (g2.phase === "playoffs") simPlayoffRound(g2);
+    setG(g2);
+    setBusy(false);
+    if (g2.phase === "playoffs" && G.phase === "regular") setTab("playoffs");
+    if (g2.phase === "offseason") setTab("offseason");
+  };
+
+  if (!G) return <Splash onStart={start} />;
+  const t = G.teams[G.userTeam];
+
+  return (
+    <div className="min-h-screen">
+      <div className="sticky top-0 z-40 bg-[#0b1220]/95 backdrop-blur border-b border-[#1e2b45]">
+        <div className="max-w-6xl mx-auto px-3 py-2 flex items-center gap-3 flex-wrap">
+          <div className="font-semibold">{t.city} <span className="text-sky-400">{t.name}</span></div>
+          <div className="text-xs text-slate-400">{G.year} · {t.w}-{t.l}-{t.otl} · {t.pts} pts</div>
+          <div className="flex-1" />
+          {G.phase === "regular" ? (
+            <>
+              <button className={btnGhost} onClick={() => advance(1)} disabled={busy}>Play day</button>
+              <button className={btnGhost} onClick={() => advance(7)} disabled={busy}>Play week</button>
+              <button className={btnPri} onClick={() => advance(G.schedule.length)} disabled={busy}>Sim season</button>
+            </>
+          ) : null}
+          {G.phase === "playoffs" ? <button className={btnPri} onClick={() => advance(1)} disabled={busy}>Play round</button> : null}
+          <button className={btnGhost} onClick={() => setShowRules(true)}>📋 Rules</button>
+        </div>
+        <div className="max-w-6xl mx-auto px-3 pb-2 flex gap-1 overflow-x-auto">
+          {TABS.map(([k, l]) => (
+            <button key={k} onClick={() => setTab(k)}
+              className={`px-3 py-1 rounded-lg text-sm whitespace-nowrap ${tab === k ? "bg-sky-600 text-white" : "text-slate-300 hover:bg-[#18243c]"}`}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="max-w-6xl mx-auto p-3">
+        {tab === "home" && <HomeTab G={G} setG={setG} />}
+        {tab === "roster" && <RosterTab G={G} setG={setG} />}
+        {tab === "lines" && <LinesTab G={G} setG={setG} />}
+        {tab === "standings" && <StandingsTab G={G} />}
+        {tab === "stats" && <StatsTab G={G} />}
+        {tab === "trade" && <TradeTab G={G} setG={setG} />}
+        {tab === "fa" && <FreeAgencyTab G={G} setG={setG} />}
+        {tab === "playoffs" && <PlayoffsTab G={G} setG={setG} />}
+        {tab === "offseason" && <OffseasonTab G={G} setG={setG} />}
+        {tab === "history" && <HistoryTab G={G} />}
+      </div>
+
+      {showRules ? <RulesModal G={G} setG={setG} onClose={() => setShowRules(false)} /> : null}
+    </div>
+  );
+}
+
+if (typeof document !== "undefined" && document.getElementById && document.getElementById("root")) {
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+}
+</script>
+
+<script>
+  // The classic runtime is required — the default preset emits an ESM import
+  // that breaks inside a non-module inline script.
+  (function () {
+    var src = document.getElementById("app-src").textContent;
+    var out = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
+    (0, eval)(out);
+  })();
+</script>
+</body>
+</html>

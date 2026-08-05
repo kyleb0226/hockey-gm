@@ -1,0 +1,527 @@
+#!/usr/bin/env node
+/*
+ * Headless sim harness for Pocket GM — Hockey.
+ *
+ * The whole game is one <script type="text/babel-src"> block inside index.html.
+ * This pulls that block out, transpiles it with the vendored Babel, and runs it
+ * in a Node vm with just enough browser shim (localStorage / document / React)
+ * that the module-level code can execute. No component is ever rendered — the
+ * checks reach in and call the simulation functions directly.
+ *
+ * This is the gate the daily autopilot must pass. A change that breaks a check
+ * here never reaches main.
+ *
+ *   node tools/simtest.js            # every check
+ *   node tools/simtest.js season     # one check
+ */
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const ROOT = path.join(__dirname, "..");
+
+// Top-level const/let don't become vm globals, so the epilogue publishes these.
+const EXPORTS = [
+  "newGame", "migrate", "simDay", "simDays", "simGame", "applyGame",
+  "buildSchedule", "endRegularSeason", "buildBracket", "simPlayoffRound", "finishSeason",
+  "startNextSeason", "buildDraftClass", "autoDraft", "draftPlayer", "pickOwner", "inPlayoffs",
+  "rules", "setRule", "ruleValue", "applyPendingRules", "RULES_DEFAULT", "STRUCTURAL_RULES",
+  "standings", "divStandings", "confStandings", "playoffField",
+  "capHit", "capSpace", "capFloor", "marketValue", "teamStrength",
+  "rosterOf", "activeRoster", "playersOf", "autoLines", "ensureLines",
+  "evalTrade", "doTrade", "signPlayer", "aiFreeAgency", "computeAwards",
+  "pts", "svPct", "gaa", "ovrOf", "TEAMS", "DIVS", "CONFS", "ROSTER_MAX", "POS",
+  "DIFFICULTIES", "LINE_TOI",
+];
+
+/* ------------------------------- load the app ---------------------------- */
+function loadGame() {
+  const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+  const m = html.match(/<script type="text\/babel-src" id="app-src">([\s\S]*?)<\/script>/);
+  if (!m) throw new Error("couldn't find the app-src block in index.html");
+
+  const babelSandbox = { window: {}, self: {}, console, process, setTimeout, clearTimeout };
+  babelSandbox.global = babelSandbox;
+  vm.createContext(babelSandbox);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "vendor/babel.min.js"), "utf8"), babelSandbox);
+  const Babel = babelSandbox.Babel || babelSandbox.window.Babel;
+  if (!Babel) throw new Error("vendored Babel didn't expose a Babel global");
+
+  let code = Babel.transform(m[1], { presets: [["react", { runtime: "classic" }]] }).code;
+  code += `\n;globalThis.__APP__ = {${EXPORTS.map((n) => `${n}: typeof ${n} !== "undefined" ? ${n} : undefined`).join(", ")}};`;
+
+  const noop = () => {};
+  const store = new Map();
+  const sandbox = {
+    console, setTimeout, clearTimeout, setInterval, clearInterval, Math, Date, JSON,
+    localStorage: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+      key: (i) => Array.from(store.keys())[i] ?? null,
+      get length() { return store.size; },
+    },
+    document: { getElementById: () => null, addEventListener: noop, removeEventListener: noop },
+    navigator: { userAgent: "node" },
+    location: { reload: noop },
+    React: {
+      createElement: (...a) => ({ _el: a }),
+      useState: (v) => [typeof v === "function" ? v() : v, noop],
+      useEffect: noop, useRef: (v) => ({ current: v }), useMemo: (f) => f(),
+      useCallback: (f) => f, useContext: () => noop,
+      createContext: () => ({ Provider: noop, Consumer: noop }),
+      Fragment: "fragment",
+    },
+    ReactDOM: { createRoot: () => ({ render: noop }) },
+  };
+  sandbox.window = sandbox;
+  sandbox.self = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox, { filename: "app-src.js" });
+
+  const A = sandbox.__APP__;
+  const missing = EXPORTS.filter((n) => A[n] === undefined);
+  if (missing.length) console.log(`  \x1b[33m! not exported: ${missing.join(", ")}\x1b[0m`);
+  return A;
+}
+
+/* --------------------------------- helpers ------------------------------- */
+let failures = 0, checksRun = 0;
+function ok(cond, label, detail) {
+  checksRun++;
+  if (cond) console.log(`  \x1b[32m✓\x1b[0m ${label}`);
+  else { failures++; console.log(`  \x1b[31m✗ ${label}\x1b[0m${detail ? `\n      ${detail}` : ""}`); }
+}
+function section(name) { console.log(`\n\x1b[1m${name}\x1b[0m`); }
+
+function simSeason(A, G) {
+  let guard = 0;
+  while (G.phase === "regular" && guard++ < 400) A.simDay(G);
+  return G;
+}
+function simPlayoffs(A, G) {
+  let guard = 0;
+  while (G.phase === "playoffs" && guard++ < 12) A.simPlayoffRound(G);
+  return G;
+}
+
+/* --------------------------------- checks -------------------------------- */
+const CHECKS = {
+  // World generation: 32 clubs, legal rosters, everyone under the cap.
+  world(A) {
+    section("World generation");
+    const G = A.newGame(0, { seed: 11 });
+    ok(G.teams.length === 32, `32 clubs (got ${G.teams.length})`);
+    ok(A.DIVS.length === 4, "four divisions");
+    const perDiv = A.DIVS.map((_, d) => G.teams.filter((t) => t.div === d).length);
+    ok(perDiv.every((n) => n === 8), `eight clubs per division (${perDiv.join("/")})`);
+
+    const thin = G.teams.filter((t) => A.rosterOf(G, t.id).length < 18);
+    ok(thin.length === 0, "every club dresses a full roster",
+      thin.length ? `${thin.length} clubs under 18` : "");
+    const noG = G.teams.filter((t) => A.rosterOf(G, t.id).filter((p) => p.pos === "G").length < 2);
+    ok(noG.length === 0, "every club carries two goaltenders", noG.length ? `${noG.length} short` : "");
+    const noD = G.teams.filter((t) => A.rosterOf(G, t.id).filter((p) => p.pos === "D").length < 6);
+    ok(noD.length === 0, "every club carries six defencemen", noD.length ? `${noD.length} short` : "");
+
+    const over = G.teams.filter((t) => A.capHit(G, t.id) > A.rules(G).capAmount);
+    ok(over.length === 0, "no club starts over the cap",
+      over.length ? over.map((t) => `${t.abbr} $${A.capHit(G, t.id)}M`).join(", ") : "");
+
+    const ovrs = A.playersOf(G).map((p) => p.ovr);
+    const avg = ovrs.reduce((a, b) => a + b, 0) / ovrs.length;
+    ok(avg > 40 && avg < 75, `ratings sit in a sane band (avg ${avg.toFixed(1)})`);
+    ok(Math.max(...ovrs) >= 80, `the league has stars (best ${Math.max(...ovrs)})`);
+  },
+
+  // The schedule must give every club exactly the season length, home and away.
+  schedule(A) {
+    section("Schedule");
+    [82, 56, 41].forEach((len) => {
+      const G = A.newGame(0, { seed: 5, rules: { seasonLen: len } });
+      ok(G.schedule.length === len, `seasonLen=${len} → ${len} matchdays (got ${G.schedule.length})`);
+      const count = new Array(32).fill(0), home = new Array(32).fill(0);
+      G.schedule.forEach((day) => day.forEach((f) => {
+        count[f.home]++; count[f.away]++; home[f.home]++;
+      }));
+      ok(count.every((c) => c === len), `every club plays ${len}`,
+        `min ${Math.min(...count)} max ${Math.max(...count)}`);
+      const worstSplit = Math.max(...home.map((h) => Math.abs(h - len / 2)));
+      ok(worstSplit <= len * 0.12, `home/away stays balanced (worst off by ${worstSplit})`);
+      const dup = G.schedule.some((day) => {
+        const seen = new Set();
+        return day.some((f) => {
+          if (seen.has(f.home) || seen.has(f.away)) return true;
+          seen.add(f.home); seen.add(f.away); return false;
+        });
+      });
+      ok(!dup, "no club is booked twice on one day");
+    });
+  },
+
+  // A full season, then the arithmetic has to close.
+  season(A) {
+    section("Full-season invariants (41-game season)");
+    const G = A.newGame(0, { seed: 21, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    ok(G.phase === "playoffs", `the season ended and the playoffs began (phase=${G.phase})`);
+
+    const badGp = G.teams.filter((t) => t.gp !== 41);
+    ok(badGp.length === 0, "every club played all 41",
+      badGp.length ? `${badGp[0].abbr} played ${badGp[0].gp}` : "");
+    const badRec = G.teams.filter((t) => t.w + t.l + t.otl !== t.gp);
+    ok(badRec.length === 0, "W + L + OTL reconciles with games played");
+    const badPts = G.teams.filter((t) => t.pts !== t.w * 2 + t.otl);
+    ok(badPts.length === 0, "points = 2×W + OTL");
+
+    const totalGf = G.teams.reduce((s, t) => s + t.gf, 0);
+    const totalGa = G.teams.reduce((s, t) => s + t.ga, 0);
+    ok(totalGf === totalGa, `league goals for equals goals against (${totalGf} vs ${totalGa})`);
+
+    const gpg = totalGf / (G.teams.reduce((s, t) => s + t.gp, 0));
+    ok(gpg > 2.2 && gpg < 4.2, `goals per team-game is believable (${gpg.toFixed(2)})`);
+
+    // Player goals must add back up to team goals, once the shootout winner —
+    // which no skater is credited with, exactly as in real bookkeeping — is
+    // accounted for.
+    const soWins = new Array(32).fill(0);
+    G.results.forEach((r) => { if (r.so) soWins[r.hg > r.ag ? r.home : r.away]++; });
+    const byTeam = new Array(32).fill(0);
+    A.playersOf(G).forEach((p) => { if (p.teamId != null && p.pos !== "G") byTeam[p.teamId] += p.season.g; });
+    const mismatch = G.teams.filter((t) => byTeam[t.id] + soWins[t.id] !== t.gf);
+    ok(mismatch.length === 0, "player goals + shootout winners reconcile with team goals",
+      mismatch.length ? `${mismatch[0].abbr}: skaters ${byTeam[mismatch[0].id]} + ${soWins[mismatch[0].id]} SO vs team ${mismatch[0].gf}` : "");
+
+    // Goalie shots faced should track the shots the other side actually took.
+    const totalSa = A.playersOf(G).filter((p) => p.pos === "G").reduce((s, p) => s + p.season.sa, 0);
+    const totalSog = A.playersOf(G).filter((p) => p.pos !== "G").reduce((s, p) => s + p.season.sog, 0);
+    ok(totalSa === totalSog, `every shot on goal was faced by a goalie (${totalSog} vs ${totalSa})`);
+    const totalGaG = A.playersOf(G).filter((p) => p.pos === "G").reduce((s, p) => s + p.season.ga, 0);
+    const totalSo = soWins.reduce((a, b) => a + b, 0);
+    ok(totalGaG + totalSo === totalGf,
+      `goals against charged to goalies matches league goals (${totalGaG} + ${totalSo} SO vs ${totalGf})`);
+
+    // Nobody should be credited with a game they didn't dress for.
+    const ghosts = A.playersOf(G).filter((p) => p.season.gp > 0 && p.season.toi <= 0);
+    ok(ghosts.length === 0, "no player is credited with a game they never played",
+      ghosts.length ? `${ghosts.length} players` : "");
+    const overplayed = A.playersOf(G).filter((p) => p.season.gp > 41);
+    ok(overplayed.length === 0, "nobody played more games than the schedule allows",
+      overplayed.length ? `${overplayed[0].ln} ${overplayed[0].season.gp}` : "");
+
+    const leader = A.playersOf(G).filter((p) => p.pos !== "G")
+      .sort((a, b) => A.pts(b.season) - A.pts(a.season))[0];
+    const ppg = A.pts(leader.season) / leader.season.gp;
+    ok(ppg > 0.7 && ppg < 2.6, `the scoring leader is human (${A.pts(leader.season)} in ${leader.season.gp}, ${ppg.toFixed(2)}/g)`);
+
+    const gs = A.playersOf(G).filter((p) => p.pos === "G" && p.season.sa > 200);
+    const sv = gs.reduce((s, p) => s + A.svPct(p.season), 0) / Math.max(1, gs.length);
+    ok(sv > 0.885 && sv < 0.935, `league save percentage is believable (${sv.toFixed(3)})`);
+
+    // Better clubs should finish higher than worse ones, on average.
+    const rated = G.teams.map((t) => ({ s: A.teamStrength(G, t.id), p: t.pts }));
+    const half = rated.slice().sort((a, b) => b.s - a.s);
+    const topAvg = half.slice(0, 8).reduce((s, x) => s + x.p, 0) / 8;
+    const botAvg = half.slice(-8).reduce((s, x) => s + x.p, 0) / 8;
+    ok(topAvg > botAvg + 6, `roster quality shows up in the table (${topAvg.toFixed(0)} vs ${botAvg.toFixed(0)} pts)`);
+  },
+
+  // The loser point is the defining standings knob — it must actually change things.
+  points(A) {
+    section("Points system");
+    [true, false].forEach((lp) => {
+      const G = A.newGame(0, { seed: 33, rules: { seasonLen: 41, otLoserPoint: lp } });
+      simSeason(A, G);
+      const bad = G.teams.filter((t) => t.pts !== t.w * 2 + (lp ? t.otl : 0));
+      ok(bad.length === 0, `otLoserPoint=${lp} → points math holds`,
+        bad.length ? `${bad[0].abbr} ${bad[0].pts} pts on ${bad[0].w}W/${bad[0].otl}OTL` : "");
+      if (!lp) {
+        const otl = G.teams.reduce((s, t) => s + t.otl, 0);
+        ok(otl === 0, "with no loser point, nothing lands in the OTL column", `got ${otl}`);
+      }
+    });
+    // Ties: with overtime off, games are allowed to end level.
+    const G = A.newGame(0, { seed: 34, rules: { seasonLen: 41, otFormat: "none" } });
+    simSeason(A, G);
+    const ties = G.results.filter((r) => r.hg === r.ag).length;
+    ok(ties > 0, `otFormat=none produces real ties (${ties})`);
+  },
+
+  // Both playoff formats must produce a legal bracket and exactly one champion.
+  playoffs(A) {
+    section("Playoffs");
+    ["divisional", "seeded"].forEach((fmt) => {
+      const G = A.newGame(0, { seed: 44, rules: { seasonLen: 41, playoffFormat: fmt } });
+      simSeason(A, G);
+      const r1 = G.playoffs.rounds[0];
+      ok(r1.length === 8, `${fmt} → eight first-round series (got ${r1.length})`);
+      const teams = r1.flatMap((s) => [s.hi, s.lo]);
+      ok(new Set(teams).size === 16, `${fmt} → sixteen distinct clubs qualify`);
+      const perConf = [0, 1].map((c) => teams.filter((id) => G.teams[id].conf === c).length);
+      ok(perConf[0] === 8 && perConf[1] === 8, `${fmt} → eight per conference (${perConf.join("/")})`);
+
+      simPlayoffs(A, G);
+      ok(G.playoffs.champion != null, `${fmt} → a champion emerged`);
+      ok(G.phase === "offseason", `${fmt} → the season closed out (phase=${G.phase})`);
+      const need = Math.ceil(A.ruleValue(G, "seriesLen") / 2);
+      const badSeries = G.playoffs.rounds.flat().filter((s) => s.done && Math.max(...s.w) !== need);
+      ok(badSeries.length === 0, `${fmt} → every series ended at ${need} wins`);
+      ok(G.teams[G.playoffs.champion].cupWins === 1, `${fmt} → the Cup was recorded`);
+    });
+
+    // Best of five ends sooner than best of seven.
+    const G5 = A.newGame(0, { seed: 45, rules: { seasonLen: 41, seriesLen: 5 } });
+    simSeason(A, G5); simPlayoffs(A, G5);
+    const longest = Math.max(...G5.playoffs.rounds.flat().map((s) => s.games.length));
+    ok(longest <= 5, `best-of-5 never runs past five games (longest ${longest})`);
+  },
+
+  // The hard cap is the whole GM constraint — it has to hold through trades and FA.
+  cap(A) {
+    section("Salary cap");
+    const G = A.newGame(3, { seed: 55 });
+    const cap = A.rules(G).capAmount;
+    ok(A.capHit(G, 3) <= cap, `user club fits under the cap ($${A.capHit(G, 3)}M of $${cap}M)`);
+
+    // A trade that would break the cap must be refused.
+    const rich = A.rosterOf(G, 3).sort((a, b) => b.contract.amt - a.contract.amt)[0];
+    const other = 4;
+    const theirBest = A.rosterOf(G, other).sort((a, b) => b.contract.amt - a.contract.amt);
+    const load = [];
+    let sum = 0;
+    for (const p of theirBest) { load.push(p.id); sum += p.contract.amt; if (sum > A.capSpace(G, 3) + rich.contract.amt + 5) break; }
+    const ev = A.evalTrade(G, 3, [rich.id], [], other, load, []);
+    ok(!ev.ok, `a cap-busting trade is refused (${ev.why})`);
+
+    // A one-for-one of similar value should be legal, whatever the AI thinks of it.
+    const mine = A.rosterOf(G, 3).sort((a, b) => b.ovr - a.ovr)[6];
+    const theirs = A.rosterOf(G, other).sort((a, b) => b.ovr - a.ovr)[6];
+    const ev2 = A.evalTrade(G, 3, [mine.id], [], other, [theirs.id], []);
+    ok(ev2.why !== "roster limit" && !/over the cap/.test(ev2.why || ""),
+      `a like-for-like swap isn't blocked by the cap (${ev2.why})`);
+
+    // Signing beyond the cap is refused outright.
+    const fa = G.freeAgents.map((id) => G.players[id]).sort((a, b) => b.ovr - a.ovr)[0];
+    const r = A.signPlayer(G, fa.id, 3, cap, 3);
+    ok(!r.ok, `an over-cap signing is rejected (${r.why})`);
+  },
+
+  // Trades have to actually move players and picks, and stay symmetrical.
+  trade(A) {
+    section("Trades");
+    const G = A.newGame(0, { seed: 66 });
+    const a = A.rosterOf(G, 0).sort((x, y) => y.ovr - x.ovr)[4];
+    const b = A.rosterOf(G, 1).sort((x, y) => y.ovr - x.ovr)[4];
+    const beforeA = A.rosterOf(G, 0, true).length, beforeB = A.rosterOf(G, 1, true).length;
+    const res = A.doTrade(G, 0, [a.id], [], 1, [b.id], []);
+    if (res.ok) {
+      ok(G.players[a.id].teamId === 1, "the outgoing player changed hands");
+      ok(G.players[b.id].teamId === 0, "the incoming player changed hands");
+      ok(A.rosterOf(G, 0, true).length === beforeA && A.rosterOf(G, 1, true).length === beforeB,
+        "roster sizes stayed level in a one-for-one");
+    } else {
+      ok(true, `the AI declined a one-for-one, which is allowed (${res.why})`);
+    }
+    // A player who isn't on the roster can never be traded.
+    const bogus = A.rosterOf(G, 7)[0];
+    const bad = A.evalTrade(G, 0, [bogus.id], [], 1, [], []);
+    ok(!bad.ok, `you can't trade another club's player (${bad.why})`);
+    // The lineup rebuilds after a trade rather than pointing at a departed player.
+    const lines = A.ensureLines(G, 0);
+    const ids = new Set(A.activeRoster(G, 0).map((p) => p.id));
+    const dangling = lines.F.flat().concat(lines.D.flat(), lines.G).filter((id) => id != null && !ids.has(id));
+    ok(dangling.length === 0, "no line slot points at a player who left");
+  },
+
+  // The rollover: ageing, contracts, the draft, and a league that can play again.
+  rollover(A) {
+    section("Season rollover");
+    const G = A.newGame(0, { seed: 77, rules: { seasonLen: 41 } });
+    simSeason(A, G); simPlayoffs(A, G);
+
+    ok(G.draftClass.length === 64, `a draft class was generated (${G.draftClass.length})`);
+    ok(G.draftOrder.length === 32, "every club has a draft slot");
+    const nonPlayoff = G.teams.filter((t) => !A.inPlayoffs(G, t.id)).length;
+    ok(nonPlayoff === 16, `sixteen clubs missed the playoffs (${nonPlayoff})`);
+    const firstTen = G.draftOrder.slice(0, 10);
+    ok(firstTen.every((id) => !A.inPlayoffs(G, id)), "the lottery only draws from non-playoff clubs");
+
+    A.autoDraft(G, false);
+    ok(G.draftClass.length <= 0 || G.draftPick === 64, `the draft completed (${G.draftPick} picks made)`);
+    const drafted = A.playersOf(G).filter((p) => p.rookie && p.teamId != null);
+    ok(drafted.length >= 60, `prospects landed on clubs (${drafted.length})`);
+    ok(drafted.every((p) => p.farm), "draftees start on the farm");
+
+    const oldAges = A.playersOf(G).filter((p) => p.teamId != null).map((p) => p.age);
+    const beforeYear = G.year;
+    A.aiFreeAgency(G);
+    A.startNextSeason(G);
+
+    ok(G.year === beforeYear + 1, `the calendar advanced (${beforeYear} → ${G.year})`);
+    ok(G.phase === "regular", `back to a regular season (phase=${G.phase})`);
+    ok(G.teams.every((t) => t.gp === 0 && t.pts === 0), "the table was wiped");
+    ok(G.results.length === 0, "last season's results were cleared");
+    ok(G.schedule.length === 41, `a new schedule was built (${G.schedule.length})`);
+    const newAges = A.playersOf(G).filter((p) => p.teamId != null).map((p) => p.age);
+    ok(Math.min(...newAges) >= Math.min(...oldAges), "everyone got a year older");
+    ok(A.playersOf(G).some((p) => p.career.length > 0), "last season became career history");
+    ok(G.teams.every((t) => A.rosterOf(G, t.id).length >= 18),
+      "every club can still dress a roster after the rollover",
+      G.teams.filter((t) => A.rosterOf(G, t.id).length < 18).map((t) => `${t.abbr}:${A.rosterOf(G, t.id).length}`).join(" "));
+    ok(G.teams.every((t) => A.rosterOf(G, t.id).filter((p) => p.pos === "G").length >= 2),
+      "every club still has two goaltenders");
+
+    // And the new season must actually be playable.
+    simSeason(A, G);
+    ok(G.teams.every((t) => t.gp === 41), "the second season plays to completion");
+  },
+
+  // Structural knobs stage for the rollover; the rest apply immediately.
+  ruleStaging(A) {
+    section("Rule staging");
+    const G = A.newGame(0, { seed: 88, rules: { seasonLen: 41 } });
+    A.setRule(G, "injuries", "high");
+    ok(A.rules(G).injuries === "high", "a non-structural knob applies at once");
+    A.setRule(G, "seasonLen", 56);
+    ok(A.rules(G).seasonLen === 41, "a structural knob does NOT change the season in progress");
+    ok(A.ruleValue(G, "seasonLen") === 56, "but the UI reads the staged value");
+    ok(G.schedule.length === 41, "the live schedule is untouched");
+    simSeason(A, G); simPlayoffs(A, G);
+    A.autoDraft(G, false); A.aiFreeAgency(G); A.startNextSeason(G);
+    ok(A.rules(G).seasonLen === 56, "the staged knob promoted at the rollover");
+    ok(G.schedule.length === 56, `the new schedule uses it (${G.schedule.length})`);
+    ok(!G.pendingRules || !Object.keys(G.pendingRules).length, "nothing is left staged");
+  },
+
+  // Lines drive the engine, so a broken lineup is a broken game.
+  lines(A) {
+    section("Lines and matchups");
+    const G = A.newGame(0, { seed: 99 });
+    const L = A.ensureLines(G, 0);
+    ok(L.F.length === 4 && L.F.every((l) => l.length === 3), "four forward lines of three");
+    ok(L.D.length === 3 && L.D.every((p) => p.length === 2), "three defence pairs");
+    ok(L.G.length === 2 && L.G[0] != null, "a starter and a backup");
+    const all = L.F.flat().concat(L.D.flat(), L.G).filter((x) => x != null);
+    ok(new Set(all).size === all.length, "nobody is double-shifted into two slots");
+    ok(L.D.flat().every((id) => G.players[id].pos === "D"), "only defencemen play defence");
+    ok(L.G.every((id) => id == null || G.players[id].pos === "G"), "only goalies play goal");
+
+    // Ice time should follow the depth chart.
+    A.simDays(G, 20);
+    const toiOf = (id) => (G.players[id] ? G.players[id].season.toi : 0);
+    const l1 = L.F[0].reduce((s, id) => s + toiOf(id), 0) / 3;
+    const l4 = L.F[3].reduce((s, id) => s + toiOf(id), 0) / 3;
+    ok(l1 > l4, `the first line outplays the fourth (${(l1 / 20).toFixed(1)} vs ${(l4 / 20).toFixed(1)} min/g)`);
+
+    // An injury must not leave a hole in the lineup.
+    const victim = G.players[L.F[0][1]];
+    victim.inj = 10;
+    G.teams[0].lines = null;
+    const L2 = A.ensureLines(G, 0);
+    const stillIn = L2.F.flat().includes(victim.id);
+    ok(!stillIn, "an injured player is pulled out of the lineup");
+    A.simDays(G, 3);
+    ok(true, "the club keeps playing a man down");
+  },
+
+  // Special teams have to show up in the box score.
+  specialTeams(A) {
+    section("Special teams");
+    const G = A.newGame(0, { seed: 101, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const totalPim = A.playersOf(G).reduce((s, p) => s + (p.season.pim || 0), 0);
+    ok(totalPim > 0, `penalties were taken (${totalPim} PIM)`);
+    const ppg = A.playersOf(G).reduce((s, p) => s + (p.season.ppg || 0), 0);
+    const total = G.teams.reduce((s, t) => s + t.gf, 0);
+    const share = ppg / total;
+    ok(share > 0.1 && share < 0.4, `power-play goals are a believable share (${(share * 100).toFixed(0)}%)`);
+    const fow = A.playersOf(G).reduce((s, p) => s + (p.season.fow || 0), 0);
+    const fol = A.playersOf(G).reduce((s, p) => s + (p.season.fol || 0), 0);
+    ok(fow > 0 && fol > 0, `faceoffs were taken (${fow} won / ${fol} lost)`);
+  },
+
+  // Injuries should bite without emptying the league.
+  injuries(A) {
+    section("Injuries");
+    const counts = {};
+    ["low", "normal", "high"].forEach((level) => {
+      const G = A.newGame(0, { seed: 111, rules: { seasonLen: 41, injuries: level } });
+      let injured = 0;
+      const seen = new Set();
+      for (let i = 0; i < 41; i++) {
+        A.simDay(G);
+        A.playersOf(G).forEach((p) => { if (p.inj > 0 && !seen.has(p.id)) { seen.add(p.id); injured++; } });
+      }
+      counts[level] = injured;
+      ok(injured > 0, `${level}: players got hurt (${injured} over the season)`);
+      const wiped = G.teams.filter((t) => A.activeRoster(G, t.id).length < 14);
+      ok(wiped.length === 0, `${level}: no club was wiped out`, wiped.length ? `${wiped.length} clubs` : "");
+    });
+    ok(counts.high > counts.low, `the setting matters (low ${counts.low} → high ${counts.high})`);
+  },
+
+  // Awards should go to players who earned them.
+  awards(A) {
+    section("Awards");
+    const G = A.newGame(0, { seed: 121, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const AW = G.awards;
+    ok(AW && AW.mvp != null, "an MVP was named");
+    const top = A.playersOf(G).filter((p) => p.pos !== "G")
+      .sort((a, b) => A.pts(b.season) - A.pts(a.season))[0];
+    ok(AW.scoring === top.id, "the scoring trophy went to the points leader");
+    const topG = A.playersOf(G).filter((p) => p.pos === "G" && p.season.gp > 15)
+      .sort((a, b) => A.svPct(b.season) - A.svPct(a.season))[0];
+    ok(AW.goalie === topG.id, "the goaltending trophy went to the best save percentage");
+    ok(G.players[AW.mvp].trophies.length > 0, "the trophy was recorded on the player");
+  },
+
+  // A save has to round-trip, because that's the whole persistence story.
+  save(A) {
+    section("Save integrity");
+    const G = A.newGame(2, { seed: 131, rules: { seasonLen: 41 } });
+    A.simDays(G, 25);
+    let json;
+    try { json = JSON.stringify(G); } catch (e) { json = null; }
+    ok(json != null, "the game serializes");
+    const size = json ? json.length / 1024 / 1024 : 99;
+    ok(size < 4, `a save fits in localStorage (${size.toFixed(2)} MB)`);
+    const G2 = A.migrate(JSON.parse(json));
+    ok(G2.teams.length === 32 && Object.keys(G2.players).length === Object.keys(G.players).length,
+      "a reloaded save has the same league");
+    simSeason(A, G2);
+    ok(G2.teams.every((t) => t.gp === 41), "a reloaded save plays out the season");
+
+    // migrate() must survive a save missing newer fields.
+    const stripped = JSON.parse(json);
+    delete stripped.news; delete stripped.picks; delete stripped.history;
+    const G3 = A.migrate(stripped);
+    ok(Array.isArray(G3.news) && Array.isArray(G3.picks), "migrate backfills missing fields");
+    A.simDay(G3);
+    ok(true, "and the migrated save still simulates");
+  },
+
+  // The same seed must produce the same season, or nothing above is reproducible.
+  determinism(A) {
+    section("Determinism");
+    const run = () => {
+      const G = A.newGame(0, { seed: 4242, rules: { seasonLen: 41 } });
+      simSeason(A, G);
+      return G.teams.map((t) => `${t.abbr}:${t.pts}:${t.gf}`).join("|");
+    };
+    ok(run() === run(), "the same seed replays the same season");
+  },
+};
+
+/* ---------------------------------- main --------------------------------- */
+const want = process.argv[2];
+const app = loadGame();
+console.log(`Pocket GM — Hockey · headless checks${want ? ` (${want})` : ""}`);
+const names = want ? [want] : Object.keys(CHECKS);
+for (const n of names) {
+  if (!CHECKS[n]) { console.error(`unknown check "${n}" — have: ${Object.keys(CHECKS).join(", ")}`); process.exit(2); }
+  CHECKS[n](app);
+}
+console.log(`\n${failures ? "\x1b[31m" : "\x1b[32m"}${checksRun - failures}/${checksRun} passed\x1b[0m`);
+process.exit(failures ? 1 : 0);
