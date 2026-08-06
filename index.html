@@ -183,8 +183,12 @@ function genPlayer(G, pos, tier, age) {
     contract: { amt: MIN_SALARY, yrs: 1 },
     stats: blankStats(pos), season: blankStats(pos), career: [],
     inj: 0, injDesc: "", fatigue: 0,
+    shoots: "L",
     trophies: [],
   };
+  // The league is roughly 62% left-shooting, and that mix is the stated reason
+  // goalies concede more glove side.
+  p.shoots = rnd(G) < 0.62 ? "L" : "R";
   const keys = pos === "G" ? GOALIE_KEYS : SKATER_KEYS;
   keys.forEach((k) => { p.r[k] = Math.round(clamp(gauss(G, base, 8), 20, 99)); });
   if (pos !== "C") p.r.fo = Math.round(clamp(p.r.fo * 0.6, 15, 70));
@@ -209,16 +213,24 @@ function blankZones(pos) {
    same shape as a penalty-placement chart: the corners are the hard ones to
    stop, centre mass is the easy one, and the five-hole is its own answer.
    `save` is added to the goalie's save percentage for a shot placed there. */
+/* Calibrated against public NHL shot-target work rather than invented. Two facts
+   drive the whole table, and they pull in opposite directions:
+     - most SHOTS are low — along the ice, the 3/4/5 holes;
+     - most GOALS are high — about 67% of 5v5 goals go in above the pads, with
+       top glove alone worth ~21% and high blocker ~15%, five-hole ~14%.
+   So `w` (how often it's aimed at) is low-heavy while `save` (how stoppable it
+   is once it gets there) makes the top corners lethal. Goalies genuinely concede
+   more glove side, which is why GH is the softest cell in the net. */
 const NET_CELLS = [
-  { key: "GH", col: 0, row: 0, label: "glove high",   corner: true,  save: -0.050 },
-  { key: "MH", col: 1, row: 0, label: "top shelf",    corner: false, save: -0.010 },
-  { key: "BH", col: 2, row: 0, label: "blocker high", corner: true,  save: -0.050 },
-  { key: "GM", col: 0, row: 1, label: "glove side",   corner: false, save: +0.020 },
-  { key: "MM", col: 1, row: 1, label: "centre mass",  corner: false, save: +0.115 },
-  { key: "BM", col: 2, row: 1, label: "blocker side", corner: false, save: +0.020 },
-  { key: "GL", col: 0, row: 2, label: "glove low",    corner: true,  save: -0.022 },
-  { key: "FH", col: 1, row: 2, label: "five-hole",    corner: false, save: -0.010 },
-  { key: "BL", col: 2, row: 2, label: "blocker low",  corner: true,  save: -0.022 },
+  { key: "GH", col: 0, row: 0, label: "glove high",   corner: true,  w: 0.06, save: -0.205 },
+  { key: "MH", col: 1, row: 0, label: "top shelf",    corner: false, w: 0.06, save: -0.030 },
+  { key: "BH", col: 2, row: 0, label: "blocker high", corner: true,  w: 0.06, save: -0.140 },
+  { key: "GM", col: 0, row: 1, label: "glove side",   corner: false, w: 0.08, save: -0.010 },
+  { key: "MM", col: 1, row: 1, label: "centre mass",  corner: false, w: 0.14, save: +0.066 },
+  { key: "BM", col: 2, row: 1, label: "blocker side", corner: false, w: 0.08, save: -0.005 },
+  { key: "GL", col: 0, row: 2, label: "glove low",    corner: true,  w: 0.15, save: +0.036 },
+  { key: "FH", col: 1, row: 2, label: "five-hole",    corner: false, w: 0.22, save: +0.038 },
+  { key: "BL", col: 2, row: 2, label: "blocker low",  corner: true,  w: 0.15, save: +0.042 },
 ];
 const NET_KEYS = NET_CELLS.map((c) => c.key);
 function blankNet(pos) {
@@ -229,12 +241,31 @@ function blankNet(pos) {
 // Every goalie has one spot he doesn't cover as well, fixed for his career so a
 // scouting report on him means something.
 function goalieHole(p) { return NET_CELLS[(p.id * 7919) % NET_CELLS.length]; }
-// A shooter who can pick a corner does; one who can't puts it into the chest.
+// Every shooter has a spot he goes back to, fixed for his career — it's what
+// makes one winger's chart look different from another's.
+function shooterSpot(p) { return NET_CELLS[(p.id * 6151) % NET_CELLS.length]; }
+
+/* Where he's trying to put it. The league-wide base is `w`; a player bends it
+   three ways — hands (can he elevate at all?), handedness (a left shot coming
+   off the right wing opens up the glove side, which is the stated cause of the
+   real glove-side bias), and his own favourite corner. */
 function pickCell(G, shooter) {
   const acc = clamp((shooter.r.hnd * 0.6 + shooter.r.sht * 0.4 - 38) / 55, 0, 1);
-  const w = NET_CELLS.map((c) => (c.corner ? 0.42 + acc * 1.5
-    : c.key === "MM" ? 1.7 - acc * 1.1
-    : c.key === "FH" ? 0.7 + acc * 0.3 : 0.85));
+  const fav = shooterSpot(shooter);
+  const lefty = shooter.shoots !== "R";
+  const w = NET_CELLS.map((c) => {
+    let x = c.w;
+    // Hands decide whether the puck gets up at all: a sniper lifts it, a
+    // grinder puts it into the chest and the pads.
+    if (c.row === 0) x *= 0.45 + acc * 1.25;
+    else if (c.key === "MM") x *= 1.55 - acc * 0.95;
+    else if (c.row === 2 && !c.corner) x *= 1.2 - acc * 0.35;
+    // Off-wing angle.
+    if (c.col === 0) x *= lefty ? 1.12 : 0.94;
+    if (c.col === 2) x *= lefty ? 0.94 : 1.12;
+    if (c.key === fav.key) x *= 1.55;
+    return x;
+  });
   const tot = w.reduce((a, b) => a + b, 0);
   let x = rnd(G) * tot;
   for (let i = 0; i < NET_CELLS.length; i++) { x -= w[i]; if (x <= 0) return NET_CELLS[i]; }
@@ -596,6 +627,7 @@ function migrate(G) {
     if (!p.career) p.career = [];
     if (!p.trophies) p.trophies = [];
     if (p.fatigue == null) p.fatigue = 0;
+    if (!p.shoots) p.shoots = (p.id % 100) < 62 ? "L" : "R";
     const kind = p.pos === "G" ? "G" : "S";
     [p.stats, p.season].forEach((s) => {
       if (!s) return;
@@ -698,7 +730,7 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
   // actually looks like.
   const gp = G.players[gid];
   const tired = gp ? clamp(gp.fatigue, 0, 100) / 100 : 0;
-  let base = 0.9 + (gq - 55) * 0.0016 - tired * 0.015;
+  let base = 0.9032 + (gq - 55) * 0.0016 - tired * 0.015;
   if (strength === "pp") base -= 0.028;
   const gBox = ctx.gBox, sBox = ctx.sBox;
   if (!gBox.players[gid]) return;   // no dressed goaltender — nothing to resolve against
@@ -740,7 +772,7 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     const cell = pickCell(G, shooter);
     const exposed = hole && cell.key === hole.key ? 0.032 : 0;
     const quality = (shooter.r.sht - 55) * 0.0013 + (rnd(G) - 0.5) * 0.02;
-    const saveP = clamp(base + zone.save + cell.save - exposed - quality, 0.845, 0.985);
+    const saveP = clamp(base + zone.save + cell.save - exposed - quality, 0.55, 0.99);
     sBox.sog++; sh.sog++;
     gBox.players[gid].sa++;
     sh.z[zone.key].s++;
@@ -890,7 +922,7 @@ function simGame(G, homeId, awayId, opts) {
         const off = lineOff(G, fLine) * (1 + chem[li] * LINE_CHEM_PER_GAME);
         const def = unitDef(G, oppF, pair);
         // ~30 shots per 60 at even strength for an average team.
-        const rate = (28 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId];
+        const rate = (30.5 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId];
         const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)) * 0.9)));
         resolveShots(G,
           { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },

@@ -74,13 +74,24 @@ which is what makes line construction and last change matter.
   attempts) and `blk` (blocks made) reconcile league-wide. A block is only counted when there's a
   defenceman modelled on the ice to credit, otherwise the two totals drift apart. The invariant is
   `sog + miss + blkd === att`.
-- **Net placement (`NET_CELLS`, `pickCell`, `goalieHole`).** Every shot on goal is placed in one of
-  nine cells, the same shape as a penalty placement chart. A shooter with hands picks corners; a
-  weak one hits centre mass. Each cell carries a `save` offset — corners are hard, centre mass is
-  the easiest save in hockey — and **every goalie has one permanent hole** derived from his id, so
-  scouting him means something. Placement is chosen *before* the save roll and genuinely affects
-  it. Empty-net goals get no placement (an empty net has no corners), so the invariant is
-  `sum(net[k].a) === sog - eng`.
+- **Net placement (`NET_CELLS`, `pickCell`, `goalieHole`, `shooterSpot`).** Every shot on goal is
+  placed in one of nine cells, the shape of a penalty placement chart. **The table is calibrated
+  against public NHL shot-target work, not invented**, and the point is that shots and goals pull
+  in opposite directions: most shots are aimed LOW (the 3/4/5 holes), but about **67% of goals go
+  in above the pads**, with top glove ~21%, high blocker ~15% and the five-hole ~14%. So each
+  cell has a `w` (how often it's aimed at — low-heavy) and a `save` offset (how stoppable it is —
+  top corners lethal). The engine reproduces this to within a point or two; the harness pins the
+  shares, so **do not "simplify" the table without re-checking them**.
+  A shooter bends the base distribution three ways: hands (can he elevate?), handedness
+  (`p.shoots`, ~62% left league-wide — the real cause of the glove-side bias, since left shots come
+  off the right wing), and `shooterSpot`, a favourite corner fixed by his id so no two charts look
+  alike. **Every goalie has one permanent hole** from `goalieHole`. Placement is chosen *before*
+  the save roll and genuinely affects it, which is why the save clamp runs to 0.55 — a top-corner
+  shot has to be allowed to be nearly unstoppable. Empty-net goals get no placement, so the
+  invariant is `sum(net[k].a) === sog - eng`.
+- **League rates are calibrated and pinned:** ~.903 save percentage, ~9.6% shooting, ~30.5 shots
+  on goal per team-game, ~3.1 goals. The harness asserts all four against real NHL bands, so a
+  change to shot rates that quietly inflates scoring will fail rather than drift.
 - `resolveShots` turns shots into goals against a goalie's save percentage
   (`0.9 + (quality - 55) * 0.0016 - tired * 0.015`, plus the zone offset, clamped to .845–.975),
   and assigns 0–2 assists weighted by `pss`. Even-strength goals move `+/-` on both sides. Per-zone

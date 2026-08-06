@@ -62,3 +62,13 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   index order, which stacked every goal in the top-left of its cell and left the edges bare.
   Replaced the RNG-hostage milestone check with one that drives `checkMilestones` directly, after
   it broke for the second time on an unrelated change. Harness grew from 231 to 251 assertions.
+- 2026-08-05 · M · Calibrated net placement against real NHL shot-target data instead of my
+  guesses, which had it backwards. Shots are aimed LOW (52% low, 18% high) but goals go in HIGH —
+  66% above the pads against a real 67%, top glove 19-21% (real 21%), high blocker 15-16% (real
+  15%), five-hole 14% (real 14%), and top glove is the single most-scored-on cell exactly as it is
+  in the NHL. Each cell now carries its own aim weight and save offset. Added handedness
+  (`p.shoots`, 62% left) as the real cause of the glove-side bias, and `shooterSpot` so every
+  shooter has a favourite corner and no two charts look alike. Retuned the save baseline and
+  even-strength shot rate together: the league now runs .902-.904 sv%, 9.7% shooting, 30.0 shots
+  and ~3.0 goals per team-game against real NHL figures of .903 / 9.6% / 30.5 / 3.1. All four are
+  pinned in the harness against NHL bands. Harness grew from 251 to 262 assertions.

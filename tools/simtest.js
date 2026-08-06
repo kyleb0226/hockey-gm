@@ -39,7 +39,7 @@ const EXPORTS = [
   "askingPrice", "negotiate", "isProspect", "prospectReady", "simFarmDay",
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
-  "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
+  "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES",
 ];
 
@@ -205,7 +205,14 @@ const CHECKS = {
     ok(totalGf === totalGa, `league goals for equals goals against (${totalGf} vs ${totalGa})`);
 
     const gpg = totalGf / (G.teams.reduce((s, t) => s + t.gp, 0));
-    ok(gpg > 2.2 && gpg < 4.2, `goals per team-game is believable (${gpg.toFixed(2)})`);
+    // Bands are the real NHL numbers now that the engine is calibrated against
+    // them, so a drift in shot rates or save percentage trips here.
+    ok(gpg > 2.5 && gpg < 3.6, `goals per team-game matches the NHL (${gpg.toFixed(2)}, real ~3.1)`);
+    const sogpg = A.playersOf(G).filter((p) => p.pos !== "G").reduce((s, p) => s + p.season.sog, 0)
+      / G.teams.reduce((s, t) => s + t.gp, 0);
+    ok(sogpg > 26 && sogpg < 35, `shots on goal per team-game matches the NHL (${sogpg.toFixed(1)}, real ~30.5)`);
+    const shPct = totalGf / A.playersOf(G).filter((p) => p.pos !== "G").reduce((s, p) => s + p.season.sog, 0);
+    ok(shPct > 0.085 && shPct < 0.112, `and so does shooting percentage (${(shPct * 100).toFixed(1)}%, real ~9.6%)`);
 
     // Player goals must add back up to team goals, once the shootout winner —
     // which no skater is credited with, exactly as in real bookkeeping — is
@@ -256,7 +263,7 @@ const CHECKS = {
 
     const gs = A.playersOf(G).filter((p) => p.pos === "G" && p.season.sa > 200);
     const sv = gs.reduce((s, p) => s + A.svPct(p.season), 0) / Math.max(1, gs.length);
-    ok(sv > 0.885 && sv < 0.935, `league save percentage is believable (${sv.toFixed(3)})`);
+    ok(sv > 0.893 && sv < 0.915, `league save percentage matches the NHL (${sv.toFixed(3)}, real ~.903)`);
 
     // Better clubs should finish higher than worse ones, on average.
     const rated = G.teams.map((t) => ({ s: A.teamStrength(G, t.id), p: t.pts }));
@@ -649,6 +656,37 @@ const CHECKS = {
     ok(badGa.length === 0, "a goalie's placements equal the shots he faced");
     const badGg = goalies.filter((p) => K.reduce((s, k) => s + p.season.net[k].ga, 0) !== p.season.ga);
     ok(badGg.length === 0, "and the goals he allowed");
+
+    /* Calibrated against public NHL shot-target work. The whole point is that
+       shots and goals pull in opposite directions: most shots are low, most
+       goals are high. If a change to shot rates drags these out of band the
+       chart stops meaning anything, so they're pinned here. */
+    const netShare = (keys, field) => {
+      const tot = K.reduce((s, k) => s + skaters.reduce((a, p) => a + p.season.net[k][field], 0), 0);
+      const part = keys.reduce((s, k) => s + skaters.reduce((a, p) => a + p.season.net[k][field], 0), 0);
+      return tot ? part / tot : 0;
+    };
+    const HIGH = ["GH", "MH", "BH"], MID = ["GM", "MM", "BM"], LOW = ["GL", "FH", "BL"];
+    const abovePads = netShare(HIGH, "g") + netShare(MID, "g");
+    ok(abovePads > 0.60 && abovePads < 0.74,
+      `about two thirds of goals go in above the pads (${(abovePads * 100).toFixed(0)}%, NHL ~67%)`);
+    ok(netShare(LOW, "a") > netShare(HIGH, "a") * 1.8,
+      `but most shots are aimed low (${(netShare(LOW, "a") * 100).toFixed(0)}% low vs ${(netShare(HIGH, "a") * 100).toFixed(0)}% high)`);
+    const gh = netShare(["GH"], "g"), bh = netShare(["BH"], "g"), fh = netShare(["FH"], "g");
+    ok(gh > 0.16 && gh < 0.26, `top glove is the biggest single source of goals (${(gh * 100).toFixed(0)}%, NHL ~21%)`);
+    ok(bh > 0.11 && bh < 0.19, `high blocker sits behind it (${(bh * 100).toFixed(0)}%, NHL ~15%)`);
+    ok(gh > bh, "and goalies concede more glove side than blocker side, as they really do");
+    ok(fh > 0.10 && fh < 0.19, `the five-hole is worth about a seventh of goals (${(fh * 100).toFixed(0)}%, NHL ~14%)`);
+    const best = K.slice().sort((a, b) =>
+      skaters.reduce((s, p) => s + p.season.net[b].g, 0) - skaters.reduce((s, p) => s + p.season.net[a].g, 0))[0];
+    ok(best === "GH", `top glove is the single most-scored-on cell (got ${best})`);
+
+    // Individuality: two wingers should not have the same chart.
+    const spots = new Set(A.playersOf(G).filter((p) => p.pos !== "G").slice(0, 60).map((p) => A.shooterSpot(p).key));
+    ok(spots.size >= 6, `shooters favour different corners (${spots.size} distinct)`);
+    const lefties = A.playersOf(G).filter((p) => p.pos !== "G");
+    const lShare = lefties.filter((p) => p.shoots === "L").length / lefties.length;
+    ok(lShare > 0.5 && lShare < 0.75, `the league shoots mostly left-handed (${(lShare * 100).toFixed(0)}%, NHL ~62%)`);
 
     // Corners beat centre mass — that's the whole point of the chart.
     const cellRate = (k) => {
