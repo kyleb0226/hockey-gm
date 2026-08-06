@@ -629,9 +629,12 @@ const CHECKS = {
     const share = on / att;
     ok(share > 0.44 && share < 0.66, `about half of attempts reach the net (${(share * 100).toFixed(0)}%)`);
     const blocked = skaters.reduce((s, p) => s + p.season.blkd, 0);
-    const blocks = skaters.reduce((s, p) => s + p.season.blk, 0);
+    // Over EVERY skater, not just the ones who shot — a stay-at-home defenceman
+    // blocks plenty and may not have taken an attempt all year.
+    const allSkaters = A.playersOf(G).filter((p) => p.pos !== "G");
+    const blocks = allSkaters.reduce((s, p) => s + p.season.blk, 0);
     ok(blocked === blocks, `every blocked shot was blocked by somebody (${blocked} vs ${blocks})`);
-    const dBlocks = skaters.filter((p) => p.pos === "D").reduce((s, p) => s + p.season.blk, 0);
+    const dBlocks = allSkaters.filter((p) => p.pos === "D").reduce((s, p) => s + p.season.blk, 0);
     ok(dBlocks / blocks > 0.9, `defencemen do the blocking (${(dBlocks / blocks * 100).toFixed(0)}%)`);
 
     // Placement has to reconcile with shots on goal, less empty-netters.
@@ -666,6 +669,60 @@ const CHECKS = {
     ok(A.goalieHole(g0).key === A.goalieHole(g0).key, "a goalie's hole is stable");
     const holes = new Set(goalies.slice(0, 40).map((p) => A.goalieHole(p).key));
     ok(holes.size >= 5, `goalies don't all share the same weakness (${holes.size} distinct)`);
+
+    // The per-shot log: real records, the user's club only, and it has to agree
+    // with the season totals it was built alongside.
+    section("Shot and game logs");
+    const mine = A.rosterOf(G, G.userTeam).filter((p) => p.pos !== "G" && p.season.att > 0);
+    ok(mine.length > 0, "the user's skaters have attempts");
+    const logged = mine.filter((p) => (G.shotLog[p.id] || []).length > 0);
+    ok(logged.length === mine.length, `every one of them has a shot log (${logged.length}/${mine.length})`);
+    const other = A.rosterOf(G, (G.userTeam + 1) % 32).filter((p) => p.pos !== "G");
+    ok(other.every((p) => !(G.shotLog[p.id] || []).length),
+      "and nobody outside the club is logged — that's what keeps the save small");
+
+    const sample = logged.sort((a, b) => b.season.att - a.season.att)[0];
+    const log = G.shotLog[sample.id];
+    const capped = sample.season.att > 1400;
+    ok(capped || log.length === sample.season.att,
+      `the log holds every attempt (${log.length} vs ${sample.season.att})`);
+    const byR = { g: 0, s: 0, m: 0, b: 0, e: 0 };
+    log.forEach((r) => { byR[r.r]++; });
+    if (!capped) {
+      ok(byR.e === (sample.season.eng || 0), `logged empty-netters match (${byR.e})`);
+      ok(byR.g === sample.season.g - (sample.season.eng || 0), `logged goals match (${byR.g})`);
+      ok(byR.m === sample.season.miss, `logged misses match (${byR.m})`);
+      ok(byR.b === sample.season.blkd, `logged blocks match (${byR.b})`);
+      ok(byR.g + byR.s === sample.season.sog - (sample.season.eng || 0), "logged on-goal shots match");
+    } else ok(true, "log was capped, totals not compared");
+    ok(log.every((r) => r.d >= 0 && r.t >= 0 && r.t < 70), "every record carries a day and a clock time");
+    ok(log.every((r) => r.o != null && r.o !== G.userTeam), "and an opponent that isn't us");
+    ok(log.every((r) => (r.r === "g" || r.r === "s") ? !!r.c : r.c == null),
+      "shots that reached the net have a placement; the others don't");
+
+    // A goalie's log is the shots he faced.
+    const gk = A.rosterOf(G, G.userTeam).filter((p) => p.pos === "G" && p.season.sa > 0)
+      .sort((a, b) => b.season.sa - a.season.sa)[0];
+    const glog = G.shotLog[gk.id] || [];
+    ok(glog.length > 0, `the goalie has a log too (${glog.length})`);
+    ok(glog.every((r) => r.c), "and it only holds shots that got to him");
+    if (glog.length < 1400) {
+      ok(glog.filter((r) => r.r === "g").length === gk.season.ga, "the goals in it match his goals against");
+    } else ok(true, "goalie log capped");
+
+    // The game log.
+    const gl = G.gameLog[sample.id] || [];
+    ok(gl.length === sample.season.gp || gl.length === 220,
+      `the game log has a row per game (${gl.length} vs ${sample.season.gp})`);
+    ok(gl.reduce((s, r) => s + r.g, 0) === sample.season.g || gl.length === 220,
+      "and its goals add up to his season");
+    ok(gl.every((r) => r.o != null && r.toi >= 0), "every row names an opponent and an ice time");
+
+    // Neither log may survive the rollover.
+    simPlayoffs(A, G);
+    A.autoDraft(G, false); A.startNextSeason(G);
+    ok(Object.keys(G.shotLog).length === 0 && Object.keys(G.gameLog).length === 0,
+      "both logs are cleared at the rollover");
   },
 
   // Shot zones and fighting: flavour that has to show up in the numbers.
@@ -843,8 +900,17 @@ const CHECKS = {
     ok(evGoals === boxGoals, `every goal in the game is in the log (${evGoals} vs ${boxGoals})`);
     const sorted = G.lastGame.events.every((e, i, a) => i === 0 || a[i - 1].t <= e.t);
     ok(sorted, "the log runs in clock order");
-    ok(A.playersOf(G).some((p) => p.marks && Object.keys(p.marks).length),
-      "season milestones fired for the user's players");
+    // Drive the machinery directly rather than hoping a random season lands a
+    // scorer past a mark — that made this check hostage to the RNG, and it has
+    // already broken twice on unrelated changes to shot rates.
+    const marked = A.rosterOf(G, G.userTeam).filter((p) => p.pos !== "G")[0];
+    marked.marks = null;
+    marked.season.g = 60; marked.season.a = 60;
+    A.checkMilestones(G);
+    ok(marked.marks && Object.keys(marked.marks).length > 0, "milestones fire once a mark is passed");
+    const newsBefore = G.news.length;
+    A.checkMilestones(G);
+    ok(G.news.length === newsBefore, "and the same mark never fires twice");
 
     simPlayoffs(A, G);
     ok(G.teams.every((t) => t.seasons && t.seasons.length === 1), "every club archived its season");

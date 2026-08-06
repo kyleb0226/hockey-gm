@@ -53,3 +53,12 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   Positions come from a pure `jitter`/`scatter` pair seeded off the player id, so the cloud is
   stable between renders; one dot stands for several shots once a cell crowds. Toggle sits on both
   the player page and the Shot maps tab.
+- 2026-08-05 · M · Real per-shot logs, by hand. `G.shotLog` and `G.gameLog` record every attempt
+  and every game for the user's club — day, opponent, clock time, zone, net cell, outcome — so the
+  net dots are now actual logged shots with a tooltip each rather than a density rendering, and
+  player pages gained a form-bar chart and a game-by-game table. Kept to one club and cleared at
+  the rollover, which is what stops it costing a megabyte. Also rewrote `scatter` to place dots at
+  random points with a small spill across cell boundaries: the old jittered grid laid dots out in
+  index order, which stacked every goal in the top-left of its cell and left the edges bare.
+  Replaced the RNG-hostage milestone check with one that drives `checkMilestones` directly, after
+  it broke for the second time on an unrelated change. Harness grew from 231 to 251 assertions.

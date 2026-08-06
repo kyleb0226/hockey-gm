@@ -116,6 +116,15 @@ which is what makes line construction and last change matter.
   how sharply the board reacts. Pressure on the manager only — the AI never gets better
   information.
 
+## The logs
+`G.shotLog` and `G.gameLog` are keyed by player id and kept **only for the user's club** — doing
+it league-wide would add well over a megabyte to a save for data nobody opens. `recordLogs` files
+them in `applyGame`: one record per shot attempt (day, opponent, clock time, zone, net cell,
+outcome `g`/`s`/`m`/`b`/`e`, strength) and one row per game. A goalie's shot log holds only the
+attempts that actually reached him. Both are capped (`SHOT_LOG_MAX`, `GAME_LOG_MAX`) and both are
+**cleared at the rollover** — they're a this-season view. As with the play-by-play, the game and
+the outcome are real; the clock time within the game is generated.
+
 ## The GM layer
 - **Retained salary** (`G.retained`, `effectiveCap`, `retainedBy`): a club keeps up to
   `RETAIN_MAX_PCT` of a contract it trades away, for the contract's full remaining term, capped at
@@ -154,10 +163,14 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
   blocked). Each takes `mode="S"` for a shooter's view or `mode="G"` for a goalie's, and `NetGrid`
   takes an optional `hole` to outline a goalie's weak spot. `NetGrid` has two views: `pct` shades
   each cell and prints a rate, `dots` plots **one dot per shot** — red for goals, blue for saves,
-  hollow around the frame for off target, amber in a band below for blocked. The dots are a
-  density rendering of the same per-cell counts, laid out by a pure `jitter`/`scatter` pair seeded
-  off the player id so they don't move between renders; there is no per-shot event log to draw
-  from, and one dot stands for `perDot` shots once a cell gets crowded. The **Shot maps** tab
+  hollow around the frame for off target, amber in a band below for blocked, purple in the middle
+  for empty-netters. When `G.shotLog` has records for that player the dots are **real** — one per
+  logged shot, each with a `<title>` giving the opponent, day, clock time, zone, placement and
+  outcome — and it falls back to a density rendering of the per-cell counts for anyone outside
+  your club. Positions come from `jitter`/`scatter`, which places dots at genuinely random points
+  with a small `spill` so a shot can straddle a gridline: the cell is how the shot was counted,
+  not a wall. Placement must NOT be laid out in index order — records arrive grouped by outcome,
+  so a grid layout put every goal in the top-left of its cell. The **Shot maps** tab
   (`AnalyticsTab` / `teamShotProfile`) aggregates the same data by club, for and against.
 - Career rows deliberately **drop `z` and `net`** when archived in `finishSeason`. Carrying nine
   net cells and three ice zones per player per season is what pushed a long save past the storage

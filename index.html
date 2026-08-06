@@ -500,6 +500,8 @@ function newGame(userTeam, opts) {
     news: [],
     retained: [],
     waivers: [],
+    shotLog: {},
+    gameLog: {},
     records: null,
   };
 
@@ -586,6 +588,8 @@ function migrate(G) {
   if (!G.lastPlayed) G.lastPlayed = new Array((G.teams || []).length || TEAMS.length).fill(-9);
   if (!G.retained) G.retained = [];
   if (!G.waivers) G.waivers = [];
+  if (!G.shotLog) G.shotLog = {};
+  if (!G.gameLog) G.gameLog = {};
   playersOf(G).forEach((p) => {
     if (!p.stats) p.stats = blankStats(p.pos);
     if (!p.season) p.season = blankStats(p.pos);
@@ -709,6 +713,16 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     // Around every shot that reaches the net there are attempts that don't:
     // one gets in front of a defenceman, another sails wide. Roughly 55% of
     // attempts end up on goal, which is about right.
+    // A record per attempt, kept only when somebody is going to look at it (the
+    // user's club). The clock time is invented the same way the play-by-play's
+    // is; the game, the opponent and the outcome are real.
+    const log = ctx.shots;
+    const rec = (r, cell) => {
+      if (!log) return;
+      log.push({ p: shooter.id, g: gid, off: sBox.teamId, def: gBox.teamId,
+        t: rnd(G) * 60, z: zone.key, c: cell, r, st: strength });
+    };
+
     sh.att++;
     // Only counted when there's a defenceman modelled on the ice to credit it
     // to — otherwise the shooter's blocked total and the league's block total
@@ -718,9 +732,10 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
       if (ctx.oppBox.players[b.id]) {
         sh.att++; sh.blkd++;
         ctx.oppBox.players[b.id].blk++;
+        rec("b", null);
       }
     }
-    if (rnd(G) < 0.36) { sh.att++; sh.miss++; }
+    if (rnd(G) < 0.36) { sh.att++; sh.miss++; rec("m", null); }
 
     const cell = pickCell(G, shooter);
     const exposed = hole && cell.key === hole.key ? 0.032 : 0;
@@ -733,6 +748,7 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     gBox.players[gid].z[zone.key].sa++;
     gBox.players[gid].net[cell.key].sa++;
     if (rnd(G) > saveP) {
+      rec("g", cell.key);
       sh.z[zone.key].g++;
       sh.net[cell.key].g++;
       gBox.players[gid].net[cell.key].ga++;
@@ -749,6 +765,7 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
         defIds.forEach((id) => { if (ctx.oppBox.players[id]) ctx.oppBox.players[id].pm--; });
       }
     } else {
+      rec("s", cell.key);
       gBox.players[gid].sv++;
       gBox.players[gid].z[zone.key].sv++;
       // Only the dangerous ones are worth narrating.
@@ -817,6 +834,8 @@ function simGame(G, homeId, awayId, opts) {
   // in aggregate per matchup, so each event gets a clock time and the whole log
   // is sorted at the end — the ordering is invented, the events are not.
   const ev = opts.events ? [] : null;
+  // A per-shot record, kept only for the user's club so the log stays bounded.
+  const shotLog = opts.log ? [] : null;
 
   const sides = [
     { box: home, opp: away, lines: hl, gid: hG, oppGid: aG, oppLines: al, isHome: true },
@@ -874,7 +893,7 @@ function simGame(G, homeId, awayId, opts) {
         const rate = (28 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId];
         const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)) * 0.9)));
         resolveShots(G,
-          { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev },
+          { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },
           shots, unit, pair.concat(oppF), side.oppGid, "es");
         // Everyone on the ice is on the ice for the whole shift — the minutes
         // are not split between linemates.
@@ -900,13 +919,13 @@ function simGame(G, homeId, awayId, opts) {
     const m = drawn * PP_MIN_PER;
     const rate = (52 / 60) * (lineOff(G, unit) / unitDef(G, pkUnit, side.oppLines.D[0]));
     const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)))));
-    resolveShots(G, { off: 1, ppOff: 1, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev },
+    resolveShots(G, { off: 1, ppOff: 1, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },
       shots, unit, pkUnit, side.oppGid, "pp");
     unit.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m; });
     pkUnit.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m; });
     // Shorthanded chances are rare but real.
     if (rnd(G) < 0.16 * drawn) {
-      resolveShots(G, { off: 1, ppOff: 1, sBox: side.opp, gBox: side.box, oppBox: side.box, events: ev },
+      resolveShots(G, { off: 1, ppOff: 1, sBox: side.opp, gBox: side.box, oppBox: side.box, events: ev, shots: shotLog },
         1, pkUnit, unit, side.gid, "sh");
     }
   });
@@ -949,7 +968,7 @@ function simGame(G, homeId, awayId, opts) {
     const roll = rnd(G);
     if (roll < 0.17) {
       const unit = tLines.PP[0].length ? tLines.PP[0] : tLines.F[0];
-      resolveShots(G, { sBox: trailing, gBox: leading, oppBox: leading, events: ev },
+      resolveShots(G, { sBox: trailing, gBox: leading, oppBox: leading, events: ev, shots: shotLog },
         1, unit, [], leading.goalie, "en6");
     } else if (roll < 0.45) {
       const sc = shooterFrom(G, lLines.F[0], 0.3);
@@ -963,6 +982,9 @@ function simGame(G, homeId, awayId, opts) {
         leading.scorers.push({ id: sc.id, a: helpers, strength: "en" });
         leading.eng = (leading.eng || 0) + 1;
         if (ev) ev.push({ t: 58 + rnd(G) * 2, kind: "goal", team: leading.teamId, pid: sc.id, zone: "empty", strength: "en" });
+        // Its own outcome code: a real attempt, but at a net nobody was in.
+        if (shotLog) shotLog.push({ p: sc.id, g: null, off: leading.teamId, def: trailing.teamId,
+          t: 58 + rnd(G) * 2, z: "empty", c: null, r: "e", st: "en" });
       }
     }
   }
@@ -986,7 +1008,7 @@ function simGame(G, homeId, awayId, opts) {
         let guard = 0;
         const otEv = ev ? [] : null;
         while (winner.g <= loser.g && guard++ < 60) {
-          resolveShots(G, { off: 1, ppOff: 1, sBox: winner, gBox: loser, oppBox: loser, events: otEv },
+          resolveShots(G, { off: 1, ppOff: 1, sBox: winner, gBox: loser, oppBox: loser, events: otEv, shots: shotLog },
             1, lines.F[0], [], homeWins ? aG : hG, "es");
         }
         // Whatever it took to end it, only the winner is on the clock in OT.
@@ -1011,6 +1033,7 @@ function simGame(G, homeId, awayId, opts) {
     home: homeId, away: awayId, hg: home.g, ag: away.g, ot, so,
     boxes: { [homeId]: home, [awayId]: away },
     events: ev ? ev.sort((a, b) => a.t - b.t) : null,
+    shots: shotLog,
   };
   return res;
 }
@@ -1075,6 +1098,7 @@ function applyGame(G, res, opts) {
   });
 
   rollInjuries(G, res);
+  recordLogs(G, res, opts);
   G.results.push({
     day: G.day, home: res.home, away: res.away, hg: res.hg, ag: res.ag,
     ot: res.ot, so: res.so, playoff: !!opts.playoff,
@@ -1083,6 +1107,52 @@ function applyGame(G, res, opts) {
   });
   if (G.results.length > 1400) G.results.splice(0, 400);
   return res;
+}
+
+/* --------------------------------- the logs -------------------------------
+ * A record of every shot and every game — but only for the user's club, which
+ * is the only one anybody inspects. Doing it league-wide would add roughly a
+ * megabyte and a half to a save for data nobody opens.
+ * ------------------------------------------------------------------------- */
+
+const SHOT_LOG_MAX = 1400;
+const GAME_LOG_MAX = 220;
+
+function recordLogs(G, res, opts) {
+  G.shotLog = G.shotLog || {};
+  G.gameLog = G.gameLog || {};
+  const day = G.day, po = !!(opts && opts.playoff);
+
+  (res.shots || []).forEach((s) => {
+    const shooter = G.players[s.p], keeper = G.players[s.g];
+    const push = (pid, role, opp) => {
+      const arr = (G.shotLog[pid] = G.shotLog[pid] || []);
+      arr.push({ d: day, o: opp, t: Math.round(s.t * 10) / 10, z: s.z, c: s.c, r: s.r, st: s.st, role, po });
+      if (arr.length > SHOT_LOG_MAX) arr.splice(0, arr.length - SHOT_LOG_MAX);
+    };
+    if (shooter && shooter.teamId === G.userTeam) push(s.p, "s", s.def);
+    // A goalie only ever faced the ones that got to him.
+    if (s.c && keeper && keeper.teamId === G.userTeam) push(s.g, "g", s.off);
+  });
+
+  [res.home, res.away].forEach((tid) => {
+    if (tid !== G.userTeam) return;
+    const box = res.boxes[tid];
+    const opp = tid === res.home ? res.away : res.home;
+    const gf = tid === res.home ? res.hg : res.ag;
+    const ga = tid === res.home ? res.ag : res.hg;
+    Object.entries(box.players).forEach(([pid, s]) => {
+      if (s.toi <= 0) return;
+      const p = G.players[pid];
+      if (!p) return;
+      const arr = (G.gameLog[pid] = G.gameLog[pid] || []);
+      arr.push(p.pos === "G"
+        ? { d: day, o: opp, gf, ga, sa: s.sa, sv: s.sv, toi: Math.round(s.toi), po }
+        : { d: day, o: opp, gf, ga, g: s.g, a: s.a, sog: s.sog, pm: s.pm, toi: Math.round(s.toi * 10) / 10, po });
+      if (arr.length > GAME_LOG_MAX) arr.splice(0, arr.length - GAME_LOG_MAX);
+    });
+  });
+  return G;
 }
 
 const INJURIES = [
@@ -1124,7 +1194,7 @@ function simDay(G) {
     if (fx.played) return;
     const mine = fx.home === G.userTeam || fx.away === G.userTeam;
     const res = simGame(G, fx.home, fx.away, {
-      homeRest: restFor(G, fx.home), awayRest: restFor(G, fx.away), events: mine,
+      homeRest: restFor(G, fx.home), awayRest: restFor(G, fx.away), events: mine, log: mine,
     });
     applyGame(G, res);
     fx.played = true; fx.hg = res.hg; fx.ag = res.ag; fx.ot = res.ot; fx.so = res.so;
@@ -1972,6 +2042,9 @@ function startNextSeason(G) {
   G.awards = null;
   G.allStar = null;
   G.lastGame = null;
+  // The logs are a this-season view; a career's worth would dwarf the save.
+  G.shotLog = {};
+  G.gameLog = {};
   G.phase = "regular";
   G.offseasonStep = null;
   playersOf(G).forEach((p) => { p.marks = null; });
@@ -2307,25 +2380,33 @@ function jitter(seed) {
   t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
 }
-// Lay n dots out inside a box: a jittered grid, so they read as a cloud rather
-// than a lattice but still don't pile up on each other.
-function scatter(n, x0, y0, w, h, seed) {
+// Place n dots inside a box, at genuinely random positions rather than on a
+// grid. Two reasons: a lattice reads as fake, and laying dots out in index
+// order would put every goal in the top-left corner of its cell, since the
+// records arrive grouped. `spill` lets a shot sit across a gridline — the cell
+// is only how the shot was counted, not a wall the puck can't cross — and
+// `bounds` keeps it inside the net. Overlap is fine and expected.
+function scatter(n, x0, y0, w, h, seed, spill, bounds) {
   const out = [];
   if (n <= 0) return out;
-  const cols = Math.max(1, Math.ceil(Math.sqrt(n * (w / h))));
-  const rows = Math.max(1, Math.ceil(n / cols));
-  const cw = w / cols, ch = h / rows;
+  const o = spill || 0;
   for (let i = 0; i < n; i++) {
-    const c = i % cols, r = Math.floor(i / cols);
-    out.push([
-      x0 + cw * (c + 0.28 + jitter(seed + i * 2) * 0.44),
-      y0 + ch * (r + 0.28 + jitter(seed + i * 2 + 1) * 0.44),
-    ]);
+    let x = x0 - o + jitter(seed + i * 2) * (w + o * 2);
+    let y = y0 - o + jitter(seed + i * 2 + 1) * (h + o * 2);
+    if (bounds) { x = clamp(x, bounds[0], bounds[2]); y = clamp(y, bounds[1], bounds[3]); }
+    out.push([x, y]);
   }
   return out;
 }
+// The net opening, so a spilled dot can straddle a line but not leave the goal.
+const NET_BOUNDS = [42, 32, 218, 148];
 
-function NetGrid({ net, mode, hole, view, extra, seed }) {
+const CELL_LABEL = {};
+NET_CELLS.forEach((c) => { CELL_LABEL[c.key] = c.label; });
+const OUTCOME_LABEL = { g: "goal", s: "saved", m: "off target", b: "blocked", e: "empty net" };
+const DOT_FILL = { g: "#fb7185", s: "#38bdf8", e: "#c084fc", b: "#f59e0b" };
+
+function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
   // Heat is volume: where a skater shoots, or where a goalie gets beaten.
   const vol = NET_CELLS.map((c) => (mode === "G" ? net[c.key].ga : net[c.key].a));
   const total = vol.reduce((a, b) => a + b, 0);
@@ -2347,10 +2428,40 @@ function NetGrid({ net, mode, hole, view, extra, seed }) {
   const miss = (extra && extra.miss) || 0;
   const blkd = (extra && extra.blkd) || 0;
 
-  const Dot = ({ p, fill, stroke, r }) => (
+  // A real per-shot log beats the synthesized cloud whenever we have one.
+  const real = shots && shots.length ? shots : null;
+  const clock = (t) => {
+    const per = Math.min(3, Math.floor(t / 20)), inPer = t - per * 20;
+    const m = Math.floor(inPer), s = Math.round((inPer - m) * 60);
+    return t >= 60 ? `OT ${Math.floor(t - 60)}:${String(s).padStart(2, "0")}`
+      : `P${per + 1} ${m}:${String(s).padStart(2, "0")}`;
+  };
+  const tip = (r) => [
+    teams && r.o != null ? `vs ${teams[r.o].abbr}` : null,
+    `day ${r.d + 1}`, clock(r.t), r.z !== "empty" ? r.z : null,
+    r.c ? CELL_LABEL[r.c] : null,
+    OUTCOME_LABEL[r.r] + (r.st === "pp" ? " (PP)" : r.st === "sh" ? " (SH)" : ""),
+  ].filter(Boolean).join(" · ");
+
+  const Dot = ({ p, fill, stroke, r, title }) => (
     <circle cx={p[0]} cy={p[1]} r={r || 2.6} fill={fill || "none"}
-      stroke={stroke || "none"} strokeWidth="0.9" opacity={fill ? 0.9 : 1} />
+      stroke={stroke || "none"} strokeWidth="0.9" opacity={fill ? 0.82 : 1}>
+      {title ? <title>{title}</title> : null}
+    </circle>
   );
+
+  // Bucket the log so each record lands where it actually went.
+  const buckets = {};
+  const offNet = [], blocked = [], emptied = [];
+  if (real) {
+    NET_KEYS.forEach((k) => { buckets[k] = []; });
+    real.forEach((r) => {
+      if (r.r === "m") offNet.push(r);
+      else if (r.r === "b") blocked.push(r);
+      else if (r.r === "e") emptied.push(r);
+      else if (r.c && buckets[r.c]) buckets[r.c].push(r);
+    });
+  }
 
   return (
     <div className="space-y-2">
@@ -2371,8 +2482,10 @@ function NetGrid({ net, mode, hole, view, extra, seed }) {
           const rate = shots ? (mode === "G" ? (shots - goals) / shots : goals / shots) : null;
           const isHole = hole && hole.key === c.key;
           const x0 = X[c.col], y0 = Y[c.row], w = X[c.col + 1] - x0, h = Y[c.row + 1] - y0;
+          const recs = real ? buckets[c.key] : null;
           const nG = Math.round(goals / perDot), nS = Math.round((shots - goals) / perDot);
-          const pts = dots ? scatter(nG + nS, x0 + 2, y0 + 2, w - 4, h - 4, sd + i * 131) : [];
+          const count = recs ? recs.length : nG + nS;
+          const pts = dots ? scatter(count, x0, y0, w, h, sd + i * 131, 5, NET_BOUNDS) : [];
           return (
             <g key={c.key}>
               <rect x={x0} y={y0} width={w} height={h}
@@ -2380,7 +2493,8 @@ function NetGrid({ net, mode, hole, view, extra, seed }) {
                 stroke={isHole ? "#f59e0b" : "#243250"} strokeWidth={isHole ? 2 : 1} />
               {dots ? pts.map((p, k) => (
                 <Dot key={k} p={p} r={2.4}
-                  fill={k < nG ? "#fb7185" : "#38bdf8"} />
+                  fill={recs ? DOT_FILL[recs[k].r] : (k < nG ? "#fb7185" : "#38bdf8")}
+                  title={recs ? tip(recs[k]) : null} />
               )) : (
                 <>
                   <text x={x0 + w / 2} y={y0 + h / 2 - 1} textAnchor="middle" fontSize="13"
@@ -2397,21 +2511,33 @@ function NetGrid({ net, mode, hole, view, extra, seed }) {
         })}
 
         {/* off target: over the bar and wide of the posts */}
-        {dots && miss ? (() => {
-          const n = Math.round(miss / perDot);
+        {dots && (real ? offNet.length : miss) ? (() => {
+          const n = real ? offNet.length : Math.round(miss / perDot);
           const over = Math.round(n * 0.4), side = n - over;
-          const a = scatter(over, 44, 6, 172, 16, sd + 991);
-          const b = scatter(Math.ceil(side / 2), 6, 32, 26, 116, sd + 992);
-          const c2 = scatter(Math.floor(side / 2), 228, 32, 26, 116, sd + 993);
-          return [...a, ...b, ...c2].map((p, k) => <Dot key={`m${k}`} p={p} r={2.2} stroke="#64748b" />);
+          const a = scatter(over, 44, 5, 172, 16, sd + 991, 3);
+          const b = scatter(Math.ceil(side / 2), 5, 32, 26, 116, sd + 992, 3);
+          const c2 = scatter(Math.floor(side / 2), 228, 32, 26, 116, sd + 993, 3);
+          return [...a, ...b, ...c2].map((p, k) => (
+            <Dot key={`m${k}`} p={p} r={2.2} stroke="#64748b"
+              title={real && offNet[k] ? tip(offNet[k]) : null} />
+          ));
         })() : null}
 
+        {/* empty-netters: no goalie, so no corner to pick */}
+        {dots && real && emptied.length
+          ? scatter(emptied.length, 96, 76, 68, 48, sd + 995, 4, NET_BOUNDS).map((p, k) => (
+            <Dot key={`e${k}`} p={p} r={2.6} fill="#c084fc" title={tip(emptied[k])} />
+          )) : null}
+
         {/* blocked: never got there at all */}
-        {dots && blkd ? (
+        {dots && (real ? blocked.length : blkd) ? (
           <>
             <text x="130" y="176" textAnchor="middle" fontSize="7" className="fill-slate-500">BLOCKED</text>
-            {scatter(Math.round(blkd / perDot), 30, 180, 200, 26, sd + 994)
-              .map((p, k) => <Dot key={`b${k}`} p={p} r={2.2} fill="#f59e0b" />)}
+            {scatter(real ? blocked.length : Math.round(blkd / perDot), 30, 180, 200, 26, sd + 994, 3)
+              .map((p, k) => (
+                <Dot key={`b${k}`} p={p} r={2.2} fill="#f59e0b"
+                  title={real && blocked[k] ? tip(blocked[k]) : null} />
+              ))}
           </>
         ) : null}
 
@@ -2433,12 +2559,17 @@ function NetGrid({ net, mode, hole, view, extra, seed }) {
             <span className="text-slate-300">Off target</span></span> : null}
           {blkd ? <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block" />
             <span className="text-slate-300">Blocked</span></span> : null}
-          {perDot > 1 ? <span className="text-slate-500">1 dot = {perDot} shots</span> : null}
+          {real && emptied.length ? <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-purple-400 inline-block" />
+            <span className="text-slate-300">Empty net</span></span> : null}
+          {real
+            ? <span className="text-slate-500">{real.length} shots · hover for the game</span>
+            : perDot > 1 ? <span className="text-slate-500">1 dot = {perDot} shots</span> : null}
         </div>
       ) : null}
 
       <div className="flex items-center justify-between text-xs text-slate-400 px-1">
-        <span>{dots ? "every shot, placed" : mode === "G" ? "shaded where goals get through" : "shaded by shot volume"}</span>
+        <span>{dots ? (real ? "every shot, as it happened" : "every shot, placed") : mode === "G" ? "shaded where goals get through" : "shaded by shot volume"}</span>
         <span className="tnum">{mode === "G" ? `${scored} allowed on ${faced}` : `${scored} goals on ${faced}`}</span>
       </div>
       {hole ? (
@@ -2473,6 +2604,37 @@ function AttemptBar({ s }) {
         ))}
       </div>
       <div className="text-xs text-slate-500">{total} attempts</div>
+    </div>
+  );
+}
+
+/* A bar per game, so a hot streak and a cold one look different at a glance. */
+function FormBars({ log, mode }) {
+  if (!log || !log.length) return null;
+  const val = (r) => (mode === "G" ? (r.sa ? r.sv / r.sa : 0) : (r.g || 0) + (r.a || 0));
+  const vals = log.map(val);
+  const max = Math.max(...vals, mode === "G" ? 1 : 1);
+  const min = mode === "G" ? Math.min(...vals.filter((v) => v > 0), 0.8) : 0;
+  const recent = log.slice(-40);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-end gap-[2px] h-12">
+        {recent.map((r, i) => {
+          const v = val(r);
+          const h = mode === "G"
+            ? clamp(((v - min) / Math.max(0.001, max - min)) * 100, 6, 100)
+            : clamp((v / Math.max(1, max)) * 100, 4, 100);
+          const win = r.gf > r.ga;
+          return (
+            <div key={i} className="flex-1 rounded-t"
+              style={{ height: `${h}%`, background: win ? "#38bdf8" : "#475569", minWidth: 3 }}
+              title={`day ${r.d + 1} · ${mode === "G" ? `${r.sv}/${r.sa}` : `${r.g}G ${r.a}A`} · ${r.gf}–${r.ga}`} />
+          );
+        })}
+      </div>
+      <div className="text-xs text-slate-500">
+        last {recent.length} games · {mode === "G" ? "save percentage" : "points"} · blue is a win
+      </div>
     </div>
   );
 }
@@ -2551,6 +2713,7 @@ function PlayerModal({ G, pid, onClose, onGo }) {
             <div className="pt-2">
               <NetGrid net={(p.season && p.season.net) || blankNet(isG ? "G" : "S")} mode={isG ? "G" : "S"}
                 hole={isG ? goalieHole(p) : null} view={netView} seed={p.id}
+                shots={(G.shotLog || {})[p.id]} teams={G.teams}
                 extra={isG ? null : { miss: p.season.miss, blkd: p.season.blkd }} />
             </div>
           </Section>
@@ -2586,6 +2749,35 @@ function PlayerModal({ G, pid, onClose, onGo }) {
               </div>
             )}
           </Section>
+          {(G.gameLog || {})[p.id] && G.gameLog[p.id].length ? (
+            <Section title="Form" className="p-3">
+              <div className="pt-1"><FormBars log={G.gameLog[p.id]} mode={isG ? "G" : "S"} /></div>
+            </Section>
+          ) : null}
+          {(G.gameLog || {})[p.id] && G.gameLog[p.id].length ? (
+            <Section title="Game by game">
+              <SortTable min={380} initial="d" rows={G.gameLog[p.id]} rowKey={(r) => r.d}
+                cols={isG ? [
+                  { key: "d", label: "Day", get: (r) => r.d, cell: (r) => r.d + 1 },
+                  { key: "o", label: "Opp", get: (r) => G.teams[r.o].abbr },
+                  { key: "res", label: "Result", get: (r) => r.gf - r.ga,
+                    cell: (r) => <span className={r.gf > r.ga ? "text-emerald-400" : "text-rose-400"}>{r.gf}–{r.ga}</span> },
+                  { key: "sv", label: "SV", get: (r) => r.sv, cell: (r) => `${r.sv}/${r.sa}` },
+                  { key: "svp", label: "SV%", get: (r) => (r.sa ? r.sv / r.sa : 0),
+                    cell: (r) => (r.sa ? ((r.sv / r.sa) * 100).toFixed(1) : "—") },
+                ] : [
+                  { key: "d", label: "Day", get: (r) => r.d, cell: (r) => r.d + 1 },
+                  { key: "o", label: "Opp", get: (r) => G.teams[r.o].abbr },
+                  { key: "res", label: "Result", get: (r) => r.gf - r.ga,
+                    cell: (r) => <span className={r.gf > r.ga ? "text-emerald-400" : "text-rose-400"}>{r.gf}–{r.ga}</span> },
+                  { key: "g", label: "G", get: (r) => r.g },
+                  { key: "a", label: "A", get: (r) => r.a },
+                  { key: "p", label: "P", get: (r) => r.g + r.a, cls: "font-semibold" },
+                  { key: "sog", label: "SOG", get: (r) => r.sog },
+                  { key: "toi", label: "TOI", get: (r) => r.toi, cell: (r) => r.toi.toFixed(1) },
+                ]} />
+            </Section>
+          ) : null}
           {p.farmSeason ? (
             <Section title="On the farm" className="p-3">
               <div className="text-sm pt-1 text-slate-300">
