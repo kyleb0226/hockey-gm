@@ -38,3 +38,12 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   jelled. Along the way, retuned the "season milestones fired" harness check off seed 191, which
   put the user's top scorer exactly on the 20-goal threshold with no margin — any small change to
   shot rates could tip it either way, and this one did. Harness grew from 214 to 218 assertions.
+- 2026-08-05 · M · Shot attempts and net placement, by hand rather than by autopilot. Every shot
+  that reaches the net now has blocked and missed attempts rolled around it, so about 55% of
+  attempts are on goal — and blocks are real, credited to an actual defenceman, so `blkd` and
+  `blk` reconcile league-wide. On-goal shots are placed in one of nine `NET_CELLS`, the shape of a
+  penalty placement chart: hands pick corners, weak shooters hit centre mass, and every goalie
+  carries one permanent hole derived from his id. New `NetGrid` and `AttemptBar` components sit
+  beside `ShotRink` on player pages, and a **Shot maps** tab aggregates all three by club for and
+  against. Career rows now drop the zone and net buckets — carrying them was worth a megabyte over
+  eight seasons. Harness grew from 218 to 231 assertions.

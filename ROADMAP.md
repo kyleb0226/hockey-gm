@@ -53,8 +53,14 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   table and a champion so prospects have something to win.
 - **S** — Player comparison. Two players side by side with their ratings bars and shot rinks
   overlaid; the `ShotRink` component already takes any zone object.
-- **M** — Opponent shot maps. Aggregate the zone data by *club* as well as by player, so you can
-  see which zones your side concedes from and adjust pairs accordingly.
+- **S** — Scout the opposing goalie. `goalieHole` gives every goalie a permanent weak spot and the
+  Shot maps tab already visualises it, but nothing surfaces the *next opponent's* starter before
+  the game — a pre-game note on the Home screen would turn a chart into a decision.
+- **M** — Split the shot maps by situation. `ShotRink` and `NetGrid` aggregate everything
+  together; even strength and the power play are different games, and `resolveShots` already
+  knows the `strength` of every shot.
+- **S** — Split the cycle zone into left and right wall. `SHOT_ZONES` has one `cycle` bucket that
+  `ShotRink` draws as two mirrored boxes showing the same number, which is a small lie.
 
 ## Interface
 

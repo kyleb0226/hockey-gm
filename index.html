@@ -204,21 +204,61 @@ function blankZones(pos) {
   ZONE_KEYS.forEach((k) => { z[k] = pos === "G" ? { sa: 0, sv: 0 } : { s: 0, g: 0 }; });
   return z;
 }
+
+/* Where in the net the puck went. Nine cells seen from the shooter's side, the
+   same shape as a penalty-placement chart: the corners are the hard ones to
+   stop, centre mass is the easy one, and the five-hole is its own answer.
+   `save` is added to the goalie's save percentage for a shot placed there. */
+const NET_CELLS = [
+  { key: "GH", col: 0, row: 0, label: "glove high",   corner: true,  save: -0.050 },
+  { key: "MH", col: 1, row: 0, label: "top shelf",    corner: false, save: -0.010 },
+  { key: "BH", col: 2, row: 0, label: "blocker high", corner: true,  save: -0.050 },
+  { key: "GM", col: 0, row: 1, label: "glove side",   corner: false, save: +0.020 },
+  { key: "MM", col: 1, row: 1, label: "centre mass",  corner: false, save: +0.115 },
+  { key: "BM", col: 2, row: 1, label: "blocker side", corner: false, save: +0.020 },
+  { key: "GL", col: 0, row: 2, label: "glove low",    corner: true,  save: -0.022 },
+  { key: "FH", col: 1, row: 2, label: "five-hole",    corner: false, save: -0.010 },
+  { key: "BL", col: 2, row: 2, label: "blocker low",  corner: true,  save: -0.022 },
+];
+const NET_KEYS = NET_CELLS.map((c) => c.key);
+function blankNet(pos) {
+  const n = {};
+  NET_KEYS.forEach((k) => { n[k] = pos === "G" ? { sa: 0, ga: 0 } : { a: 0, g: 0 }; });
+  return n;
+}
+// Every goalie has one spot he doesn't cover as well, fixed for his career so a
+// scouting report on him means something.
+function goalieHole(p) { return NET_CELLS[(p.id * 7919) % NET_CELLS.length]; }
+// A shooter who can pick a corner does; one who can't puts it into the chest.
+function pickCell(G, shooter) {
+  const acc = clamp((shooter.r.hnd * 0.6 + shooter.r.sht * 0.4 - 38) / 55, 0, 1);
+  const w = NET_CELLS.map((c) => (c.corner ? 0.42 + acc * 1.5
+    : c.key === "MM" ? 1.7 - acc * 1.1
+    : c.key === "FH" ? 0.7 + acc * 0.3 : 0.85));
+  const tot = w.reduce((a, b) => a + b, 0);
+  let x = rnd(G) * tot;
+  for (let i = 0; i < NET_CELLS.length; i++) { x -= w[i]; if (x <= 0) return NET_CELLS[i]; }
+  return NET_CELLS[4];
+}
 function blankStats(pos) {
   return pos === "G"
     ? { gp:0, w:0, l:0, otl:0, sa:0, sv:0, ga:0, so:0, toi:0, sow:0, sol:0, sosa:0, sosv:0, starts:0,
-        z: blankZones("G") }
+        z: blankZones("G"), net: blankNet("G") }
     : { gp:0, g:0, a:0, pim:0, sog:0, hit:0, blk:0, toi:0, pm:0, fow:0, fol:0, ppg:0, shg:0, gwg:0,
-        eng:0, fights:0, sos:0, soa:0, z: blankZones("S") };
+        eng:0, fights:0, sos:0, soa:0, att:0, miss:0, blkd:0,
+        z: blankZones("S"), net: blankNet("S") };
 }
-function addZones(dest, src) {
+// Merge a per-game bucket map (zones or net cells) into a season total.
+function addBuckets(dest, src, field, keys, kind) {
   if (!src) return;
-  if (!dest.z) dest.z = blankZones(dest.sa != null ? "G" : "S");
-  ZONE_KEYS.forEach((k) => {
+  if (!dest[field]) dest[field] = field === "z" ? blankZones(kind) : blankNet(kind);
+  keys.forEach((k) => {
     if (!src[k]) return;
-    Object.keys(src[k]).forEach((f) => { dest.z[k][f] = (dest.z[k][f] || 0) + src[k][f]; });
+    Object.keys(src[k]).forEach((f) => { dest[field][k][f] = (dest[field][k][f] || 0) + src[k][f]; });
   });
 }
+const addZones = (dest, src) => addBuckets(dest, src, "z", ZONE_KEYS, dest.sa != null ? "G" : "S");
+const addNet = (dest, src) => addBuckets(dest, src, "net", NET_KEYS, dest.sa != null ? "G" : "S");
 const pts = (s) => (s.g || 0) + (s.a || 0);
 const svPct = (s) => (s.sa ? s.sv / s.sa : 0);
 const gaa = (s) => (s.toi ? (s.ga * 60) / s.toi : 0);
@@ -553,7 +593,18 @@ function migrate(G) {
     if (!p.trophies) p.trophies = [];
     if (p.fatigue == null) p.fatigue = 0;
     const kind = p.pos === "G" ? "G" : "S";
-    [p.stats, p.season].concat(p.career || []).forEach((s) => { if (s && !s.z) s.z = blankZones(kind); });
+    [p.stats, p.season].forEach((s) => {
+      if (!s) return;
+      if (!s.z) s.z = blankZones(kind);
+      if (!s.net) s.net = blankNet(kind);
+      if (kind === "S") {
+        // Older saves predate attempt tracking; seed it from shots on goal so
+        // the on-goal share doesn't read as zero.
+        if (s.att == null) s.att = s.sog || 0;
+        if (s.miss == null) s.miss = 0;
+        if (s.blkd == null) s.blkd = 0;
+      }
+    });
     p.ovr = ovrOf(p);
   });
   G.teams.forEach((t) => {
@@ -581,9 +632,10 @@ function emptyBox(G, teamId) {
   // players who actually take ice time are credited in applyGame.
   rosterOf(G, teamId, true).forEach((p) => {
     box.players[p.id] = p.pos === "G"
-      ? { sa: 0, sv: 0, ga: 0, toi: 0, sosa: 0, sosv: 0, starts: 0, z: blankZones("G") }
+      ? { sa: 0, sv: 0, ga: 0, toi: 0, sosa: 0, sosv: 0, starts: 0, z: blankZones("G"), net: blankNet("G") }
       : { g: 0, a: 0, sog: 0, pim: 0, hit: 0, blk: 0, toi: 0, pm: 0, fow: 0, fol: 0, ppg: 0, shg: 0,
-          eng: 0, fights: 0, sos: 0, soa: 0, z: blankZones("S") };
+          eng: 0, fights: 0, sos: 0, soa: 0, att: 0, miss: 0, blkd: 0,
+          z: blankZones("S"), net: blankNet("S") };
   });
   return box;
 }
@@ -646,19 +698,45 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
   if (strength === "pp") base -= 0.028;
   const gBox = ctx.gBox, sBox = ctx.sBox;
   if (!gBox.players[gid]) return;   // no dressed goaltender — nothing to resolve against
+  const hole = gp ? goalieHole(gp) : null;
+  const blockers = defIds.map((id) => G.players[id]).filter((p) => p && p.pos === "D");
   for (let s = 0; s < shots; s++) {
     const zone = pickZone(G);
     const shooter = shooterFrom(G, offIds, zone.dBias);
     if (!shooter || !sBox.players[shooter.id]) continue;
+    const sh = sBox.players[shooter.id];
+
+    // Around every shot that reaches the net there are attempts that don't:
+    // one gets in front of a defenceman, another sails wide. Roughly 55% of
+    // attempts end up on goal, which is about right.
+    sh.att++;
+    // Only counted when there's a defenceman modelled on the ice to credit it
+    // to — otherwise the shooter's blocked total and the league's block total
+    // would drift apart.
+    if (blockers.length && rnd(G) < 0.40) {
+      const b = blockers[Math.floor(rnd(G) * blockers.length)];
+      if (ctx.oppBox.players[b.id]) {
+        sh.att++; sh.blkd++;
+        ctx.oppBox.players[b.id].blk++;
+      }
+    }
+    if (rnd(G) < 0.36) { sh.att++; sh.miss++; }
+
+    const cell = pickCell(G, shooter);
+    const exposed = hole && cell.key === hole.key ? 0.032 : 0;
     const quality = (shooter.r.sht - 55) * 0.0013 + (rnd(G) - 0.5) * 0.02;
-    const saveP = clamp(base + zone.save - quality, 0.845, 0.975);
-    sBox.sog++; sBox.players[shooter.id].sog++;
+    const saveP = clamp(base + zone.save + cell.save - exposed - quality, 0.845, 0.985);
+    sBox.sog++; sh.sog++;
     gBox.players[gid].sa++;
-    sBox.players[shooter.id].z[zone.key].s++;
+    sh.z[zone.key].s++;
+    sh.net[cell.key].a++;
     gBox.players[gid].z[zone.key].sa++;
+    gBox.players[gid].net[cell.key].sa++;
     if (rnd(G) > saveP) {
-      sBox.players[shooter.id].z[zone.key].g++;
-      if (ctx.events) ctx.events.push({ t: rnd(G) * 60, kind: "goal", team: sBox.teamId, pid: shooter.id, zone: zone.key, strength });
+      sh.z[zone.key].g++;
+      sh.net[cell.key].g++;
+      gBox.players[gid].net[cell.key].ga++;
+      if (ctx.events) ctx.events.push({ t: rnd(G) * 60, kind: "goal", team: sBox.teamId, pid: shooter.id, zone: zone.key, cell: cell.key, strength });
       sBox.g++; sBox.players[shooter.id].g++;
       gBox.players[gid].ga++; gBox.ga = (gBox.ga || 0) + 1;
       if (strength === "pp") { sBox.ppg++; sBox.players[shooter.id].ppg++; }
@@ -849,11 +927,13 @@ function simGame(G, homeId, awayId, opts) {
       const w = Math.round(share * winP);
       side.box.players[p.id].fow += w; side.box.players[p.id].fol += share - w;
     });
+    // Hits are their own thing. Blocks are NOT generated here — they come out of
+    // real shot attempts in resolveShots, so a shot-blocking defenceman's total
+    // reflects shots that were actually taken at him.
     activeRoster(G, side.box.teamId).filter((p) => p.pos !== "G").forEach((p) => {
       const h = Math.round(Math.max(0, gauss(G, p.r.phy / 34, 1)));
-      const b = Math.round(Math.max(0, gauss(G, p.r.dfn / 45 * (p.pos === "D" ? 1.7 : 0.8), 0.9)));
-      side.box.players[p.id].hit += h; side.box.players[p.id].blk += b;
-      side.box.hits += h; side.box.blk += b;
+      side.box.players[p.id].hit += h;
+      side.box.hits += h;
     });
   });
 
@@ -875,7 +955,9 @@ function simGame(G, homeId, awayId, opts) {
       const sc = shooterFrom(G, lLines.F[0], 0.3);
       if (sc && leading.players[sc.id]) {
         leading.g++; leading.sog++;
-        leading.players[sc.id].g++; leading.players[sc.id].sog++; leading.players[sc.id].eng++;
+        // No goalie, so no placement is recorded — an empty net has no corners.
+        leading.players[sc.id].g++; leading.players[sc.id].sog++;
+        leading.players[sc.id].eng++; leading.players[sc.id].att++;
         const helpers = assistsFrom(G, lLines.F[0], sc.id);
         helpers.forEach((id) => { if (leading.players[id]) leading.players[id].a++; });
         leading.scorers.push({ id: sc.id, a: helpers, strength: "en" });
@@ -981,8 +1063,10 @@ function applyGame(G, res, opts) {
         dest.fow += s.fow; dest.fol += s.fol; dest.ppg += s.ppg; dest.shg += s.shg;
         dest.eng += s.eng || 0; dest.fights += s.fights || 0;
         dest.sos += s.sos || 0; dest.soa += s.soa || 0;
+        dest.att += s.att || 0; dest.miss += s.miss || 0; dest.blkd += s.blkd || 0;
       }
       addZones(dest, s.z);
+      addNet(dest, s.net);
       // A goalie's night costs far more than a skater's shift — that's what
       // eventually forces the backup into the net. For skaters it's minutes
       // above a normal night that wear them down; a fourth-liner recovers.
@@ -1347,7 +1431,13 @@ function finishSeason(G) {
   // rollover, so that the offseason screens show next year's ratings and a real
   // free-agent class instead of last year's leftovers.
   playersOf(G).forEach((p) => {
-    if (p.season.gp) p.career.push({ year: G.year, teamId: p.teamId, ...p.season });
+    if (p.season.gp) {
+      // The shot maps are a this-season view; carrying nine net cells and three
+      // ice zones into every career row for every player is what pushes a long
+      // save past the storage ceiling.
+      const { z, net, ...totals } = p.season;
+      p.career.push({ year: G.year, teamId: p.teamId, ...totals });
+    }
     p.stats = p.season;
     p.season = blankStats(p.pos);
     p.po = null;
@@ -2202,6 +2292,105 @@ function ShotRink({ z, mode }) {
   );
 }
 
+/* ------------------------------ the net grid -------------------------------
+ * The goal seen from the shooter's side, nine cells, the same idea as a penalty
+ * placement chart. For a skater the shading is where he puts the puck and the
+ * number is how often it goes in from there. For a goalie the shading is where
+ * he gets beaten and the number is what he stops.
+ * ------------------------------------------------------------------------- */
+
+function NetGrid({ net, mode, hole }) {
+  // Heat is volume: where a skater shoots, or where a goalie gets beaten.
+  const vol = NET_CELLS.map((c) => (mode === "G" ? net[c.key].ga : net[c.key].a));
+  const total = vol.reduce((a, b) => a + b, 0);
+  // The footer is the outcome, which is a different number from the heat for a
+  // skater — his shots are the volume, his goals are the result.
+  const faced = NET_CELLS.reduce((s, c) => s + (mode === "G" ? net[c.key].sa : net[c.key].a), 0);
+  const scored = NET_CELLS.reduce((s, c) => s + (mode === "G" ? net[c.key].ga : net[c.key].g), 0);
+  if (!faced) return <div className="text-sm text-slate-500 px-1 py-3">Nothing on net yet.</div>;
+
+  const X = [16, 84, 152, 220], Y = [18, 60, 102, 144];
+  const hue = mode === "G" ? 6 : 205;   // beaten = red, scoring = blue
+  return (
+    <div className="space-y-2">
+      <svg viewBox="0 0 236 168" className="w-full max-w-xs mx-auto block">
+        <rect x="0" y="0" width="236" height="168" rx="6" fill="#0d1728" />
+        {/* mesh */}
+        {[...Array(9)].map((_, i) => (
+          <line key={`v${i}`} x1={16 + i * 25.5} y1="18" x2={16 + i * 25.5} y2="144" stroke="#1b2942" strokeWidth="1" />
+        ))}
+        {[...Array(6)].map((_, i) => (
+          <line key={`h${i}`} x1="16" y1={18 + i * 25.2} x2="220" y2={18 + i * 25.2} stroke="#1b2942" strokeWidth="1" />
+        ))}
+        {NET_CELLS.map((c, i) => {
+          const share = total ? vol[i] / total : 0;
+          const shots = mode === "G" ? net[c.key].sa : net[c.key].a;
+          const rate = shots
+            ? (mode === "G" ? (net[c.key].sa - net[c.key].ga) / net[c.key].sa : net[c.key].g / net[c.key].a)
+            : null;
+          const isHole = hole && hole.key === c.key;
+          return (
+            <g key={c.key}>
+              <rect x={X[c.col]} y={Y[c.row]} width={X[c.col + 1] - X[c.col]} height={Y[c.row + 1] - Y[c.row]}
+                fill={`hsla(${hue}, 80%, 55%, ${0.08 + share * 0.75})`}
+                stroke={isHole ? "#f59e0b" : "#243250"} strokeWidth={isHole ? 2 : 1} />
+              <text x={(X[c.col] + X[c.col + 1]) / 2} y={(Y[c.row] + Y[c.row + 1]) / 2 - 1}
+                textAnchor="middle" fontSize="13" fontWeight="700" className="fill-slate-100">
+                {rate == null ? "—" : `${(rate * 100).toFixed(0)}%`}
+              </text>
+              <text x={(X[c.col] + X[c.col + 1]) / 2} y={(Y[c.row] + Y[c.row + 1]) / 2 + 10}
+                textAnchor="middle" fontSize="7" className="fill-slate-400">
+                {mode === "G" ? `${net[c.key].ga} of ${net[c.key].sa}` : `${net[c.key].g} of ${net[c.key].a}`}
+              </text>
+            </g>
+          );
+        })}
+        {/* posts, crossbar and goal line */}
+        <rect x="10" y="12" width="6" height="138" fill="#dc2626" />
+        <rect x="220" y="12" width="6" height="138" fill="#dc2626" />
+        <rect x="10" y="12" width="216" height="6" fill="#dc2626" />
+        <rect x="6" y="150" width="224" height="4" fill="#1e2b45" />
+      </svg>
+      <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+        <span>{mode === "G" ? "shaded where goals get through" : "shaded by shot volume"}</span>
+        <span className="tnum">{mode === "G" ? `${scored} allowed on ${faced}` : `${scored} goals on ${faced}`}</span>
+      </div>
+      {hole ? (
+        <div className="text-xs text-amber-400 px-1">Scouting report: beatable {hole.label}.</div>
+      ) : null}
+    </div>
+  );
+}
+
+/* On goal, wide, or into a shin pad. */
+function AttemptBar({ s }) {
+  const total = s.att || 0;
+  if (!total) return null;
+  const parts = [
+    { label: "On goal", v: s.sog, c: "bg-sky-500" },
+    { label: "Missed", v: s.miss, c: "bg-slate-500" },
+    { label: "Blocked", v: s.blkd, c: "bg-amber-600" },
+  ];
+  return (
+    <div className="space-y-1.5">
+      <div className="flex h-3 rounded overflow-hidden border border-[#1e2b45]">
+        {parts.map((p) => (
+          <div key={p.label} className={p.c} style={{ width: `${(p.v / total) * 100}%` }} title={`${p.label}: ${p.v}`} />
+        ))}
+      </div>
+      <div className="flex justify-between text-xs">
+        {parts.map((p) => (
+          <span key={p.label} className="text-slate-400">
+            {p.label} <span className="text-slate-200 tnum">{p.v}</span>
+            <span className="text-slate-500"> ({total ? Math.round((p.v / total) * 100) : 0}%)</span>
+          </span>
+        ))}
+      </div>
+      <div className="text-xs text-slate-500">{total} attempts</div>
+    </div>
+  );
+}
+
 /* ------------------------------- player page ------------------------------ */
 
 function RatingBar({ label, v }) {
@@ -2260,9 +2449,18 @@ function PlayerModal({ G, pid, onClose, onGo }) {
         </div>
 
         <div className="space-y-3">
-          <Section title={isG ? "Shots faced" : "Where he shoots from"} className="p-3">
+          <Section title={isG ? "Where the shots come from" : "Where he shoots from"} className="p-3">
             <ShotRink z={(p.season && p.season.z) || blankZones(isG ? "G" : "S")} mode={isG ? "G" : "S"} />
           </Section>
+          <Section title={isG ? "Where he gets beaten" : "Where he puts it"} className="p-3">
+            <NetGrid net={(p.season && p.season.net) || blankNet(isG ? "G" : "S")} mode={isG ? "G" : "S"}
+              hole={isG ? goalieHole(p) : null} />
+          </Section>
+          {!isG && p.season.att ? (
+            <Section title="Shot attempts" className="p-3">
+              <div className="pt-1"><AttemptBar s={p.season} /></div>
+            </Section>
+          ) : null}
           <Section title="This season" className="p-3">
             {isG ? (
               <div className="grid grid-cols-3 gap-2 text-sm pt-1">
@@ -2911,6 +3109,97 @@ function StatsTab({ G, openPlayer }) {
   );
 }
 
+/* -------------------------------- analytics --------------------------------
+ * The same two charts as a player page, aggregated for a whole club — what it
+ * generates, and what it gives up. Built from the players currently on the
+ * roster, so a deadline departure takes his shots with him.
+ * ------------------------------------------------------------------------- */
+
+function teamShotProfile(G, teamId) {
+  const forZ = blankZones("S"), forNet = blankNet("S");
+  const agZ = blankZones("G"), agNet = blankNet("G");
+  const tot = { att: 0, sog: 0, miss: 0, blkd: 0, g: 0, sa: 0, ga: 0 };
+  rosterOf(G, teamId, true).forEach((p) => {
+    const s = p.season;
+    if (!s || !s.z || !s.net) return;
+    if (p.pos === "G") {
+      ZONE_KEYS.forEach((k) => { agZ[k].sa += s.z[k].sa; agZ[k].sv += s.z[k].sv; });
+      NET_KEYS.forEach((k) => { agNet[k].sa += s.net[k].sa; agNet[k].ga += s.net[k].ga; });
+      tot.sa += s.sa; tot.ga += s.ga;
+    } else {
+      ZONE_KEYS.forEach((k) => { forZ[k].s += s.z[k].s; forZ[k].g += s.z[k].g; });
+      NET_KEYS.forEach((k) => { forNet[k].a += s.net[k].a; forNet[k].g += s.net[k].g; });
+      tot.att += s.att || 0; tot.sog += s.sog; tot.miss += s.miss || 0;
+      tot.blkd += s.blkd || 0; tot.g += s.g;
+    }
+  });
+  return { forZ, forNet, agZ, agNet, tot };
+}
+
+function AnalyticsTab({ G, openTeam }) {
+  const [teamId, setTeamId] = useState(G.userTeam);
+  const [side, setSide] = useState("for");
+  const prof = useMemo(() => teamShotProfile(G, teamId), [G, teamId]);
+  const { tot } = prof;
+  const shPct = tot.sog ? (tot.g / tot.sog) * 100 : 0;
+  const svP = tot.sa ? ((tot.sa - tot.ga) / tot.sa) * 100 : 0;
+  const onShare = tot.att ? (tot.sog / tot.att) * 100 : 0;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-2 flex-wrap items-center">
+        <select className={inputCls} value={teamId} onChange={(e) => setTeamId(+e.target.value)}>
+          {G.teams.map((t) => <option key={t.id} value={t.id}>{t.city} {t.name}</option>)}
+        </select>
+        <button className={side === "for" ? btnPri : btnGhost} onClick={() => setSide("for")}>Shooting</button>
+        <button className={side === "against" ? btnPri : btnGhost} onClick={() => setSide("against")}>Goaltending</button>
+        <div className="flex-1" />
+        <button className={btnGhost} onClick={() => openTeam(teamId)}>Club page</button>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Attempts" value={tot.att} sub={`${onShare.toFixed(0)}% on goal`} />
+        <Stat label="Shooting" value={`${shPct.toFixed(1)}%`} sub={`${tot.g} goals on ${tot.sog}`} />
+        <Stat label="Save pct" value={`${svP.toFixed(1)}%`} sub={`${tot.ga} allowed on ${tot.sa}`} />
+        <Stat label="Blocked" value={tot.blkd} sub={`${tot.miss} missed the net`} />
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-3">
+        <Section title={side === "for" ? "Where this club shoots from" : "Where it gives up shots"} className="p-3">
+          <ShotRink z={side === "for" ? prof.forZ : prof.agZ} mode={side === "for" ? "S" : "G"} />
+        </Section>
+        <Section title={side === "for" ? "Where it puts the puck" : "Where it gets beaten"} className="p-3">
+          <NetGrid net={side === "for" ? prof.forNet : prof.agNet} mode={side === "for" ? "S" : "G"} />
+        </Section>
+      </div>
+
+      {side === "for" ? (
+        <Section title="Shot attempts" className="p-3">
+          <div className="pt-1"><AttemptBar s={{ att: tot.att, sog: tot.sog, miss: tot.miss, blkd: tot.blkd }} /></div>
+        </Section>
+      ) : null}
+
+      <Section title="League shooting">
+        <SortTable min={620} rowKey={(t) => t.id} onRow={(t) => setTeamId(t.id)}
+          rowCls={(t) => (t.id === teamId ? "bg-sky-950/40" : "")}
+          rows={G.teams.map((t) => ({ ...t, p: teamShotProfile(G, t.id).tot }))} initial="shp"
+          cols={[
+            { key: "team", label: "Club", get: (t) => t.city, cell: (t) => `${t.city} ${t.name}` },
+            { key: "att", label: "Att", get: (t) => t.p.att },
+            { key: "sog", label: "SOG", get: (t) => t.p.sog },
+            { key: "on", label: "On %", get: (t) => (t.p.att ? t.p.sog / t.p.att : 0),
+              cell: (t) => (t.p.att ? ((t.p.sog / t.p.att) * 100).toFixed(0) : "—") },
+            { key: "shp", label: "SH%", get: (t) => (t.p.sog ? t.p.g / t.p.sog : 0), cls: "font-semibold",
+              cell: (t) => (t.p.sog ? ((t.p.g / t.p.sog) * 100).toFixed(1) : "—") },
+            { key: "svp", label: "SV%", get: (t) => (t.p.sa ? (t.p.sa - t.p.ga) / t.p.sa : 0),
+              cell: (t) => (t.p.sa ? (((t.p.sa - t.p.ga) / t.p.sa) * 100).toFixed(1) : "—") },
+            { key: "blk", label: "Blkd", get: (t) => t.p.blkd },
+          ]} />
+      </Section>
+    </div>
+  );
+}
+
 /* ------------------------------ the game viewer --------------------------- */
 
 const clockOf = (t) => {
@@ -2934,7 +3223,12 @@ function GameTab({ G, openPlayer }) {
   }, [0, 0]);
   const nm = (id) => (G.players[id] ? shortName(G.players[id]) : "—");
   const line = (e) => {
-    if (e.kind === "goal") return `${nm(e.pid)} scores${e.strength === "pp" ? " on the power play" : e.strength === "sh" ? " shorthanded" : e.strength === "en" ? " into the empty net" : ""}${e.zone && e.zone !== "empty" ? ` from the ${e.zone}` : ""}.`;
+    if (e.kind === "goal") {
+      const cell = e.cell ? (NET_CELLS.find((c) => c.key === e.cell) || null) : null;
+      return `${nm(e.pid)} scores${e.strength === "pp" ? " on the power play" : e.strength === "sh" ? " shorthanded" : e.strength === "en" ? " into the empty net" : ""}`
+        + `${e.zone && e.zone !== "empty" ? ` from the ${e.zone}` : ""}`
+        + `${cell ? `, ${cell.label}` : ""}.`;
+    }
     if (e.kind === "save") return `${nm(e.pid)} turns aside ${nm(e.shooter)} on the rush.`;
     if (e.kind === "penalty") return `${nm(e.pid)} to the box, two minutes.`;
     if (e.kind === "fight") return `${nm(e.pid)} and ${nm(e.other)} drop the gloves.`;
@@ -3668,6 +3962,7 @@ const TABS = [
   { key: "schedule", label: "Schedule", group: "League" },
   { key: "standings", label: "Standings", group: "League" },
   { key: "stats", label: "Stats", group: "League" },
+  { key: "analytics", label: "Shot maps", group: "League" },
   { key: "playoffs", label: "Playoffs", group: "League" },
   { key: "allstar", label: "All-Star", group: "League" },
   { key: "trade", label: "Trade", group: "Market" },
@@ -3843,6 +4138,7 @@ function App() {
         {tab === "schedule" && <ScheduleTab G={G} openTeam={setClub} />}
         {tab === "standings" && <StandingsTab G={G} openTeam={setClub} />}
         {tab === "stats" && <StatsTab G={G} openPlayer={setPlayer} />}
+        {tab === "analytics" && <AnalyticsTab G={G} openTeam={setClub} />}
         {tab === "playoffs" && <PlayoffsTab G={G} setG={setG} openPlayer={setPlayer} />}
         {tab === "allstar" && <AllStarTab G={G} openPlayer={setPlayer} />}
         {tab === "trade" && <TradeTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}

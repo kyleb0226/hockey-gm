@@ -68,6 +68,19 @@ which is what makes line construction and last change matter.
   zone decides both *who* shoots (`dBias` makes the point a defenceman's shot) and *how
   stoppable* it is (`save` offsets the goalie's percentage). Conversion must stay ordered
   rush > cycle > point; the harness checks it.
+- **Attempts vs shots on goal.** Around every shot that reaches the net, `resolveShots` rolls a
+  blocked attempt and a missed one, so roughly 55% of attempts end up on goal. **Blocks are real**
+  — credited to an actual defenceman from `defIds`, which is why `blkd` (the shooter's blocked
+  attempts) and `blk` (blocks made) reconcile league-wide. A block is only counted when there's a
+  defenceman modelled on the ice to credit, otherwise the two totals drift apart. The invariant is
+  `sog + miss + blkd === att`.
+- **Net placement (`NET_CELLS`, `pickCell`, `goalieHole`).** Every shot on goal is placed in one of
+  nine cells, the same shape as a penalty placement chart. A shooter with hands picks corners; a
+  weak one hits centre mass. Each cell carries a `save` offset — corners are hard, centre mass is
+  the easiest save in hockey — and **every goalie has one permanent hole** derived from his id, so
+  scouting him means something. Placement is chosen *before* the save roll and genuinely affects
+  it. Empty-net goals get no placement (an empty net has no corners), so the invariant is
+  `sum(net[k].a) === sog - eng`.
 - `resolveShots` turns shots into goals against a goalie's save percentage
   (`0.9 + (quality - 55) * 0.0016 - tired * 0.015`, plus the zone offset, clamped to .845–.975),
   and assigns 0–2 assists weighted by `pss`. Even-strength goals move `+/-` on both sides. Per-zone
@@ -136,7 +149,14 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
   strip. `SortTable` is the single sortable table used by every screen — add columns to it rather
   than writing another `<table>`.
 - `PlayerModal` and `ClubModal` open from anywhere; almost every name and row is clickable.
-  `ShotRink` renders the zone breakdown for a skater (`mode="S"`) or a goalie (`mode="G"`).
+- **Three chart components, all driven off the same buckets and reused for players and clubs:**
+  `ShotRink` (where on the ice), `NetGrid` (where in the goal), `AttemptBar` (on goal / missed /
+  blocked). Each takes `mode="S"` for a shooter's view or `mode="G"` for a goalie's, and `NetGrid`
+  takes an optional `hole` to outline a goalie's weak spot. The **Shot maps** tab
+  (`AnalyticsTab` / `teamShotProfile`) aggregates the same data by club, for and against.
+- Career rows deliberately **drop `z` and `net`** when archived in `finishSeason`. Carrying nine
+  net cells and three ice zones per player per season is what pushed a long save past the storage
+  ceiling; the shot maps are a current-season view.
 - `GameTab` replays `G.lastGame`, which holds the **user's most recent game only** — a full
   season of play-by-play would dwarf everything else in the save. Events carry an invented clock
   time and are sorted; the events themselves are real.

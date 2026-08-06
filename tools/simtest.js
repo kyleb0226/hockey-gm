@@ -39,7 +39,7 @@ const EXPORTS = [
   "askingPrice", "negotiate", "isProspect", "prospectReady", "simFarmDay",
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
-  "pruneSave", "ZONE_KEYS", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
+  "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES",
 ];
 
@@ -609,6 +609,63 @@ const CHECKS = {
     });
     ok(pct[0] > pct[1] && pct[1] > pct[2],
       `rush > cycle > point on conversion (${pct.map((x) => (x * 100).toFixed(1)).join(" / ")}%)`);
+  },
+
+  // Where the puck ended up: on goal, wide, or blocked — and whereabouts in the
+  // net when it got there.
+  placement(A) {
+    section("Shot attempts and net placement");
+    const G = A.newGame(0, { seed: 163, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const K = A.NET_KEYS;
+    const skaters = A.playersOf(G).filter((p) => p.pos !== "G" && p.season.att > 0);
+
+    // Every attempt ends up in exactly one of three places.
+    const badAtt = skaters.filter((p) => p.season.sog + p.season.miss + p.season.blkd !== p.season.att);
+    ok(badAtt.length === 0, "attempts split cleanly into on goal, missed and blocked",
+      badAtt.length ? `${badAtt[0].ln}: ${badAtt[0].season.sog}+${badAtt[0].season.miss}+${badAtt[0].season.blkd} vs ${badAtt[0].season.att}` : "");
+    const att = skaters.reduce((s, p) => s + p.season.att, 0);
+    const on = skaters.reduce((s, p) => s + p.season.sog, 0);
+    const share = on / att;
+    ok(share > 0.44 && share < 0.66, `about half of attempts reach the net (${(share * 100).toFixed(0)}%)`);
+    const blocked = skaters.reduce((s, p) => s + p.season.blkd, 0);
+    const blocks = skaters.reduce((s, p) => s + p.season.blk, 0);
+    ok(blocked === blocks, `every blocked shot was blocked by somebody (${blocked} vs ${blocks})`);
+    const dBlocks = skaters.filter((p) => p.pos === "D").reduce((s, p) => s + p.season.blk, 0);
+    ok(dBlocks / blocks > 0.9, `defencemen do the blocking (${(dBlocks / blocks * 100).toFixed(0)}%)`);
+
+    // Placement has to reconcile with shots on goal, less empty-netters.
+    const badNet = skaters.filter((p) => K.reduce((s, k) => s + p.season.net[k].a, 0) !== p.season.sog - (p.season.eng || 0));
+    ok(badNet.length === 0, "a skater's net placements equal his shots on goal, less empty-netters",
+      badNet.length ? `${badNet[0].ln}` : "");
+    const badNetG = skaters.filter((p) => K.reduce((s, k) => s + p.season.net[k].g, 0) !== p.season.g - (p.season.eng || 0));
+    ok(badNetG.length === 0, "and his placed goals equal his goals, less empty-netters");
+
+    const goalies = A.playersOf(G).filter((p) => p.pos === "G" && p.season.sa > 0);
+    const badGa = goalies.filter((p) => K.reduce((s, k) => s + p.season.net[k].sa, 0) !== p.season.sa);
+    ok(badGa.length === 0, "a goalie's placements equal the shots he faced");
+    const badGg = goalies.filter((p) => K.reduce((s, k) => s + p.season.net[k].ga, 0) !== p.season.ga);
+    ok(badGg.length === 0, "and the goals he allowed");
+
+    // Corners beat centre mass — that's the whole point of the chart.
+    const cellRate = (k) => {
+      const a = skaters.reduce((s, p) => s + p.season.net[k].a, 0);
+      const g = skaters.reduce((s, p) => s + p.season.net[k].g, 0);
+      return a ? g / a : 0;
+    };
+    const corners = A.NET_CELLS.filter((c) => c.corner).map((c) => cellRate(c.key));
+    const worstCorner = Math.min(...corners);
+    ok(worstCorner > cellRate("MM"),
+      `every corner beats centre mass (worst corner ${(worstCorner * 100).toFixed(1)}% vs ${(cellRate("MM") * 100).toFixed(1)}%)`);
+    const spread = K.map((k) => skaters.reduce((s, p) => s + p.season.net[k].a, 0));
+    ok(spread.every((n) => n > 0), "every cell in the net gets shot at");
+    ok(Math.max(...spread) / Math.min(...spread) < 12, "and no single cell swallows everything");
+
+    // A goalie's weak spot is fixed for his career, so scouting him means something.
+    const g0 = goalies[0];
+    ok(A.goalieHole(g0).key === A.goalieHole(g0).key, "a goalie's hole is stable");
+    const holes = new Set(goalies.slice(0, 40).map((p) => A.goalieHole(p).key));
+    ok(holes.size >= 5, `goalies don't all share the same weakness (${holes.size} distinct)`);
   },
 
   // Shot zones and fighting: flavour that has to show up in the numbers.
