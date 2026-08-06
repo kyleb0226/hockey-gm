@@ -261,7 +261,10 @@ jobs:
             exit 0
           fi
 
-          SUMMARY=$(grep -m1 "^- $DATE" DAILY-LOG.md | sed "s/^- $DATE · //" || echo "daily update")
+          # The LAST line for today, not the first — more than one entry can share
+          # a date, and the first one is whatever was already there this morning.
+          SUMMARY=$(grep "^- $DATE" DAILY-LOG.md | tail -1 | sed "s/^- $DATE · //" | cut -c1-72)
+          [[ -n "$SUMMARY" ]] || SUMMARY="daily update"
           git add -A
           git commit -m "Autopilot $DATE: $SUMMARY"
           git push
