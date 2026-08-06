@@ -47,3 +47,9 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   beside `ShotRink` on player pages, and a **Shot maps** tab aggregates all three by club for and
   against. Career rows now drop the zone and net buckets — carrying them was worth a megabyte over
   eight seasons. Harness grew from 218 to 231 assertions.
+- 2026-08-05 · S · A shot-by-shot view of the net, by hand. `NetGrid` gained a `dots` mode that
+  plots one dot per shot instead of a percentage — red goals, blue saves, hollow off-target dots
+  scattered over the bar and wide of the posts, amber blocked shots in a band below the goal line.
+  Positions come from a pure `jitter`/`scatter` pair seeded off the player id, so the cloud is
+  stable between renders; one dot stands for several shots once a cell crowds. Toggle sits on both
+  the player page and the Shot maps tab.

@@ -152,7 +152,12 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
 - **Three chart components, all driven off the same buckets and reused for players and clubs:**
   `ShotRink` (where on the ice), `NetGrid` (where in the goal), `AttemptBar` (on goal / missed /
   blocked). Each takes `mode="S"` for a shooter's view or `mode="G"` for a goalie's, and `NetGrid`
-  takes an optional `hole` to outline a goalie's weak spot. The **Shot maps** tab
+  takes an optional `hole` to outline a goalie's weak spot. `NetGrid` has two views: `pct` shades
+  each cell and prints a rate, `dots` plots **one dot per shot** — red for goals, blue for saves,
+  hollow around the frame for off target, amber in a band below for blocked. The dots are a
+  density rendering of the same per-cell counts, laid out by a pure `jitter`/`scatter` pair seeded
+  off the player id so they don't move between renders; there is no per-shot event log to draw
+  from, and one dot stands for `perDot` shots once a cell gets crowded. The **Shot maps** tab
   (`AnalyticsTab` / `teamShotProfile`) aggregates the same data by club, for and against.
 - Career rows deliberately **drop `z` and `net`** when archived in `finishSeason`. Carrying nine
   net cells and three ice zones per player per season is what pushed a long save past the storage

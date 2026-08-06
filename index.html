@@ -2299,7 +2299,33 @@ function ShotRink({ z, mode }) {
  * he gets beaten and the number is what he stops.
  * ------------------------------------------------------------------------- */
 
-function NetGrid({ net, mode, hole }) {
+/* Deterministic scatter so dots don't jump around between renders. Same PRNG as
+   the engine, but pure — it takes a seed instead of mutating one. */
+function jitter(seed) {
+  let t = (seed + 0x6d2b79f5) | 0;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+// Lay n dots out inside a box: a jittered grid, so they read as a cloud rather
+// than a lattice but still don't pile up on each other.
+function scatter(n, x0, y0, w, h, seed) {
+  const out = [];
+  if (n <= 0) return out;
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n * (w / h))));
+  const rows = Math.max(1, Math.ceil(n / cols));
+  const cw = w / cols, ch = h / rows;
+  for (let i = 0; i < n; i++) {
+    const c = i % cols, r = Math.floor(i / cols);
+    out.push([
+      x0 + cw * (c + 0.28 + jitter(seed + i * 2) * 0.44),
+      y0 + ch * (r + 0.28 + jitter(seed + i * 2 + 1) * 0.44),
+    ]);
+  }
+  return out;
+}
+
+function NetGrid({ net, mode, hole, view, extra, seed }) {
   // Heat is volume: where a skater shoots, or where a goalie gets beaten.
   const vol = NET_CELLS.map((c) => (mode === "G" ? net[c.key].ga : net[c.key].a));
   const total = vol.reduce((a, b) => a + b, 0);
@@ -2309,50 +2335,110 @@ function NetGrid({ net, mode, hole }) {
   const scored = NET_CELLS.reduce((s, c) => s + (mode === "G" ? net[c.key].ga : net[c.key].g), 0);
   if (!faced) return <div className="text-sm text-slate-500 px-1 py-3">Nothing on net yet.</div>;
 
-  const X = [16, 84, 152, 220], Y = [18, 60, 102, 144];
+  const dots = view === "dots";
+  // The net sits inside a margin so off-target shots have somewhere to land.
+  const X = [40, 100, 160, 220], Y = [30, 70, 110, 150];
   const hue = mode === "G" ? 6 : 205;   // beaten = red, scoring = blue
+  const sd = (seed || 1) * 977;
+
+  // One dot per shot until a cell gets crowded, then one dot per k.
+  const cellShots = NET_CELLS.map((c) => (mode === "G" ? net[c.key].sa : net[c.key].a));
+  const perDot = Math.max(1, Math.ceil(Math.max(...cellShots) / 42));
+  const miss = (extra && extra.miss) || 0;
+  const blkd = (extra && extra.blkd) || 0;
+
+  const Dot = ({ p, fill, stroke, r }) => (
+    <circle cx={p[0]} cy={p[1]} r={r || 2.6} fill={fill || "none"}
+      stroke={stroke || "none"} strokeWidth="0.9" opacity={fill ? 0.9 : 1} />
+  );
+
   return (
     <div className="space-y-2">
-      <svg viewBox="0 0 236 168" className="w-full max-w-xs mx-auto block">
-        <rect x="0" y="0" width="236" height="168" rx="6" fill="#0d1728" />
-        {/* mesh */}
-        {[...Array(9)].map((_, i) => (
-          <line key={`v${i}`} x1={16 + i * 25.5} y1="18" x2={16 + i * 25.5} y2="144" stroke="#1b2942" strokeWidth="1" />
+      <svg viewBox="0 0 260 214" className="w-full max-w-sm mx-auto block">
+        <rect x="0" y="0" width="260" height="214" rx="6" fill="#0d1728" />
+        {/* mesh inside the opening */}
+        {[...Array(10)].map((_, i) => (
+          <line key={`v${i}`} x1={40 + i * 20} y1="30" x2={40 + i * 20} y2="150" stroke="#1b2942" strokeWidth="1" />
         ))}
-        {[...Array(6)].map((_, i) => (
-          <line key={`h${i}`} x1="16" y1={18 + i * 25.2} x2="220" y2={18 + i * 25.2} stroke="#1b2942" strokeWidth="1" />
+        {[...Array(7)].map((_, i) => (
+          <line key={`h${i}`} x1="40" y1={30 + i * 20} x2="220" y2={30 + i * 20} stroke="#1b2942" strokeWidth="1" />
         ))}
+
         {NET_CELLS.map((c, i) => {
           const share = total ? vol[i] / total : 0;
           const shots = mode === "G" ? net[c.key].sa : net[c.key].a;
-          const rate = shots
-            ? (mode === "G" ? (net[c.key].sa - net[c.key].ga) / net[c.key].sa : net[c.key].g / net[c.key].a)
-            : null;
+          const goals = mode === "G" ? net[c.key].ga : net[c.key].g;
+          const rate = shots ? (mode === "G" ? (shots - goals) / shots : goals / shots) : null;
           const isHole = hole && hole.key === c.key;
+          const x0 = X[c.col], y0 = Y[c.row], w = X[c.col + 1] - x0, h = Y[c.row + 1] - y0;
+          const nG = Math.round(goals / perDot), nS = Math.round((shots - goals) / perDot);
+          const pts = dots ? scatter(nG + nS, x0 + 2, y0 + 2, w - 4, h - 4, sd + i * 131) : [];
           return (
             <g key={c.key}>
-              <rect x={X[c.col]} y={Y[c.row]} width={X[c.col + 1] - X[c.col]} height={Y[c.row + 1] - Y[c.row]}
-                fill={`hsla(${hue}, 80%, 55%, ${0.08 + share * 0.75})`}
+              <rect x={x0} y={y0} width={w} height={h}
+                fill={dots ? "rgba(13,23,40,0.35)" : `hsla(${hue}, 80%, 55%, ${0.08 + share * 0.75})`}
                 stroke={isHole ? "#f59e0b" : "#243250"} strokeWidth={isHole ? 2 : 1} />
-              <text x={(X[c.col] + X[c.col + 1]) / 2} y={(Y[c.row] + Y[c.row + 1]) / 2 - 1}
-                textAnchor="middle" fontSize="13" fontWeight="700" className="fill-slate-100">
-                {rate == null ? "—" : `${(rate * 100).toFixed(0)}%`}
-              </text>
-              <text x={(X[c.col] + X[c.col + 1]) / 2} y={(Y[c.row] + Y[c.row + 1]) / 2 + 10}
-                textAnchor="middle" fontSize="7" className="fill-slate-400">
-                {mode === "G" ? `${net[c.key].ga} of ${net[c.key].sa}` : `${net[c.key].g} of ${net[c.key].a}`}
-              </text>
+              {dots ? pts.map((p, k) => (
+                <Dot key={k} p={p} r={2.4}
+                  fill={k < nG ? "#fb7185" : "#38bdf8"} />
+              )) : (
+                <>
+                  <text x={x0 + w / 2} y={y0 + h / 2 - 1} textAnchor="middle" fontSize="13"
+                    fontWeight="700" className="fill-slate-100">
+                    {rate == null ? "—" : `${(rate * 100).toFixed(0)}%`}
+                  </text>
+                  <text x={x0 + w / 2} y={y0 + h / 2 + 10} textAnchor="middle" fontSize="7" className="fill-slate-400">
+                    {goals} of {shots}
+                  </text>
+                </>
+              )}
             </g>
           );
         })}
+
+        {/* off target: over the bar and wide of the posts */}
+        {dots && miss ? (() => {
+          const n = Math.round(miss / perDot);
+          const over = Math.round(n * 0.4), side = n - over;
+          const a = scatter(over, 44, 6, 172, 16, sd + 991);
+          const b = scatter(Math.ceil(side / 2), 6, 32, 26, 116, sd + 992);
+          const c2 = scatter(Math.floor(side / 2), 228, 32, 26, 116, sd + 993);
+          return [...a, ...b, ...c2].map((p, k) => <Dot key={`m${k}`} p={p} r={2.2} stroke="#64748b" />);
+        })() : null}
+
+        {/* blocked: never got there at all */}
+        {dots && blkd ? (
+          <>
+            <text x="130" y="176" textAnchor="middle" fontSize="7" className="fill-slate-500">BLOCKED</text>
+            {scatter(Math.round(blkd / perDot), 30, 180, 200, 26, sd + 994)
+              .map((p, k) => <Dot key={`b${k}`} p={p} r={2.2} fill="#f59e0b" />)}
+          </>
+        ) : null}
+
         {/* posts, crossbar and goal line */}
-        <rect x="10" y="12" width="6" height="138" fill="#dc2626" />
-        <rect x="220" y="12" width="6" height="138" fill="#dc2626" />
-        <rect x="10" y="12" width="216" height="6" fill="#dc2626" />
-        <rect x="6" y="150" width="224" height="4" fill="#1e2b45" />
+        <rect x="34" y="24" width="6" height="132" fill="#dc2626" />
+        <rect x="220" y="24" width="6" height="132" fill="#dc2626" />
+        <rect x="34" y="24" width="192" height="6" fill="#dc2626" />
+        <rect x="30" y="156" width="200" height="4" fill="#1e2b45" />
       </svg>
+
+      {dots ? (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs px-1">
+          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-rose-400 inline-block" />
+            <span className="text-slate-300">Goal</span></span>
+          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-sky-400 inline-block" />
+            <span className="text-slate-300">Saved</span></span>
+          {miss ? <span className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-full border border-slate-500 inline-block" />
+            <span className="text-slate-300">Off target</span></span> : null}
+          {blkd ? <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block" />
+            <span className="text-slate-300">Blocked</span></span> : null}
+          {perDot > 1 ? <span className="text-slate-500">1 dot = {perDot} shots</span> : null}
+        </div>
+      ) : null}
+
       <div className="flex items-center justify-between text-xs text-slate-400 px-1">
-        <span>{mode === "G" ? "shaded where goals get through" : "shaded by shot volume"}</span>
+        <span>{dots ? "every shot, placed" : mode === "G" ? "shaded where goals get through" : "shaded by shot volume"}</span>
         <span className="tnum">{mode === "G" ? `${scored} allowed on ${faced}` : `${scored} goals on ${faced}`}</span>
       </div>
       {hole ? (
@@ -2406,6 +2492,7 @@ function RatingBar({ label, v }) {
 }
 
 function PlayerModal({ G, pid, onClose, onGo }) {
+  const [netView, setNetView] = useState("dots");
   const p = G.players[pid];
   if (!p) return null;
   const isG = p.pos === "G";
@@ -2452,9 +2539,20 @@ function PlayerModal({ G, pid, onClose, onGo }) {
           <Section title={isG ? "Where the shots come from" : "Where he shoots from"} className="p-3">
             <ShotRink z={(p.season && p.season.z) || blankZones(isG ? "G" : "S")} mode={isG ? "G" : "S"} />
           </Section>
-          <Section title={isG ? "Where he gets beaten" : "Where he puts it"} className="p-3">
-            <NetGrid net={(p.season && p.season.net) || blankNet(isG ? "G" : "S")} mode={isG ? "G" : "S"}
-              hole={isG ? goalieHole(p) : null} />
+          <Section title={isG ? "Where he gets beaten" : "Where he puts it"} className="p-3"
+            right={
+              <div className="flex gap-1">
+                {[["dots", "Shots"], ["pct", "Rates"]].map(([k, l]) => (
+                  <button key={k} onClick={() => setNetView(k)}
+                    className={`px-2 py-0.5 rounded text-xs ${netView === k ? "bg-sky-600 text-white" : "text-slate-400 hover:bg-[#18243c]"}`}>{l}</button>
+                ))}
+              </div>
+            }>
+            <div className="pt-2">
+              <NetGrid net={(p.season && p.season.net) || blankNet(isG ? "G" : "S")} mode={isG ? "G" : "S"}
+                hole={isG ? goalieHole(p) : null} view={netView} seed={p.id}
+                extra={isG ? null : { miss: p.season.miss, blkd: p.season.blkd }} />
+            </div>
           </Section>
           {!isG && p.season.att ? (
             <Section title="Shot attempts" className="p-3">
@@ -3139,6 +3237,7 @@ function teamShotProfile(G, teamId) {
 function AnalyticsTab({ G, openTeam }) {
   const [teamId, setTeamId] = useState(G.userTeam);
   const [side, setSide] = useState("for");
+  const [netView, setNetView] = useState("pct");
   const prof = useMemo(() => teamShotProfile(G, teamId), [G, teamId]);
   const { tot } = prof;
   const shPct = tot.sog ? (tot.g / tot.sog) * 100 : 0;
@@ -3168,8 +3267,20 @@ function AnalyticsTab({ G, openTeam }) {
         <Section title={side === "for" ? "Where this club shoots from" : "Where it gives up shots"} className="p-3">
           <ShotRink z={side === "for" ? prof.forZ : prof.agZ} mode={side === "for" ? "S" : "G"} />
         </Section>
-        <Section title={side === "for" ? "Where it puts the puck" : "Where it gets beaten"} className="p-3">
-          <NetGrid net={side === "for" ? prof.forNet : prof.agNet} mode={side === "for" ? "S" : "G"} />
+        <Section title={side === "for" ? "Where it puts the puck" : "Where it gets beaten"} className="p-3"
+          right={
+            <div className="flex gap-1">
+              {[["dots", "Shots"], ["pct", "Rates"]].map(([k, l]) => (
+                <button key={k} onClick={() => setNetView(k)}
+                  className={`px-2 py-0.5 rounded text-xs ${netView === k ? "bg-sky-600 text-white" : "text-slate-400 hover:bg-[#18243c]"}`}>{l}</button>
+              ))}
+            </div>
+          }>
+          <div className="pt-2">
+            <NetGrid net={side === "for" ? prof.forNet : prof.agNet} mode={side === "for" ? "S" : "G"}
+              view={netView} seed={teamId + 1}
+              extra={side === "for" ? { miss: tot.miss, blkd: tot.blkd } : null} />
+          </div>
         </Section>
       </div>
 
