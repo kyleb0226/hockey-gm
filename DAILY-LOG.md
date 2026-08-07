@@ -72,3 +72,11 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   even-strength shot rate together: the league now runs .902-.904 sv%, 9.7% shooting, 30.0 shots
   and ~3.0 goals per team-game against real NHL figures of .903 / 9.6% / 30.5 / 3.1. All four are
   pinned in the harness against NHL bands. Harness grew from 251 to 262 assertions.
+- 2026-08-05 · S · Fixed the attempt model: one attempt, one outcome. `resolveShots` was
+  generating a shot on goal and then inventing a blocked and a missed attempt around it, so a
+  single chance produced up to three records and a shot chart drew three dots for one shot. It now
+  loops over attempts, each independently blocked / missed / on goal (24/21/55), with the loop
+  count derived so the expected on-goal total is unchanged — league rates held at 3.08 goals and
+  30.4 shots per team-game through the rewrite. Also snapshotted All-Star selections
+  (`G.allStar.at`) so a player traded across conferences at the deadline doesn't retroactively
+  switch benches. Harness grew from 262 to 263 assertions.

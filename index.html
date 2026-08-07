@@ -736,15 +736,25 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
   if (!gBox.players[gid]) return;   // no dressed goaltender — nothing to resolve against
   const hole = gp ? goalieHole(gp) : null;
   const blockers = defIds.map((id) => G.players[id]).filter((p) => p && p.pos === "D");
-  for (let s = 0; s < shots; s++) {
+
+  /* One attempt, one outcome. Each attempt is an independent event that either
+     hits a shin pad, sails wide, or reaches the goalie — it is NOT one shot on
+     goal with a blocked and a missed sibling invented around it, which is what
+     this used to do and which meant a single chance produced up to three
+     records. `shots` is the number expected to REACH the net, so the loop runs
+     over the attempts needed to produce that many. */
+  const canBlock = blockers.length > 0;
+  const pBlock = canBlock ? 0.24 : 0;
+  const pMiss = 0.21;
+  const pOnGoal = 1 - pBlock - pMiss;
+  const attempts = Math.round(shots / pOnGoal);
+
+  for (let s = 0; s < attempts; s++) {
     const zone = pickZone(G);
     const shooter = shooterFrom(G, offIds, zone.dBias);
     if (!shooter || !sBox.players[shooter.id]) continue;
     const sh = sBox.players[shooter.id];
 
-    // Around every shot that reaches the net there are attempts that don't:
-    // one gets in front of a defenceman, another sails wide. Roughly 55% of
-    // attempts end up on goal, which is about right.
     // A record per attempt, kept only when somebody is going to look at it (the
     // user's club). The clock time is invented the same way the play-by-play's
     // is; the game, the opponent and the outcome are real.
@@ -756,18 +766,14 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     };
 
     sh.att++;
-    // Only counted when there's a defenceman modelled on the ice to credit it
-    // to — otherwise the shooter's blocked total and the league's block total
-    // would drift apart.
-    if (blockers.length && rnd(G) < 0.40) {
+    const roll = rnd(G);
+    if (roll < pBlock) {
       const b = blockers[Math.floor(rnd(G) * blockers.length)];
-      if (ctx.oppBox.players[b.id]) {
-        sh.att++; sh.blkd++;
-        ctx.oppBox.players[b.id].blk++;
-        rec("b", null);
-      }
+      if (ctx.oppBox.players[b.id]) { sh.blkd++; ctx.oppBox.players[b.id].blk++; rec("b", null); }
+      else { sh.miss++; rec("m", null); }
+      continue;
     }
-    if (rnd(G) < 0.36) { sh.att++; sh.miss++; rec("m", null); }
+    if (roll < pBlock + pMiss) { sh.miss++; rec("m", null); continue; }
 
     const cell = pickCell(G, shooter);
     const exposed = hole && cell.key === hole.key ? 0.032 : 0;
@@ -1469,9 +1475,14 @@ function runAllStar(G) {
   const westScore = Math.round(6 + gauss(G, (w - e) / 400, 2.2));
   const mvpPool = (eastScore >= westScore ? rosters.east : rosters.west).map((id) => G.players[id]).filter(Boolean);
   const mvp = mvpPool.sort((a, b) => pts(b.season) - pts(a.season))[0];
+  // Snapshot the club each player was picked for. A selection is a fact about
+  // the moment it was made — a deadline trade to the other conference must not
+  // retroactively put him on the wrong bench.
+  const at = {};
+  rosters.east.concat(rosters.west).forEach((id) => { at[id] = G.players[id].teamId; });
   G.allStar = {
     year: G.year, day: G.day, ...rosters,
-    east: rosters.east, west: rosters.west,
+    east: rosters.east, west: rosters.west, at,
     eastScore: Math.max(0, eastScore), westScore: Math.max(0, westScore),
     mvp: mvp ? mvp.id : null,
   };
@@ -3993,7 +4004,10 @@ function AllStarTab({ G, openPlayer }) {
               onClick={() => openPlayer(id)}>
               <PosBadge pos={p.pos} />
               <span className="flex-1">{fullName(p)}</span>
-              <span className="text-slate-500 text-xs">{G.teams[p.teamId] ? G.teams[p.teamId].abbr : ""}</span>
+              <span className="text-slate-500 text-xs">
+                {G.teams[(a.at && a.at[id] != null) ? a.at[id] : p.teamId]
+                  ? G.teams[(a.at && a.at[id] != null) ? a.at[id] : p.teamId].abbr : ""}
+              </span>
               <span className="tnum text-slate-400">{p.pos === "G" ? `${(svPct(p.season) * 100).toFixed(1)}` : pts(p.season)}</span>
             </div>
           );

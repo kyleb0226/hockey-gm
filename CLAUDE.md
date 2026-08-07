@@ -68,12 +68,15 @@ which is what makes line construction and last change matter.
   zone decides both *who* shoots (`dBias` makes the point a defenceman's shot) and *how
   stoppable* it is (`save` offsets the goalie's percentage). Conversion must stay ordered
   rush > cycle > point; the harness checks it.
-- **Attempts vs shots on goal.** Around every shot that reaches the net, `resolveShots` rolls a
-  blocked attempt and a missed one, so roughly 55% of attempts end up on goal. **Blocks are real**
-  — credited to an actual defenceman from `defIds`, which is why `blkd` (the shooter's blocked
-  attempts) and `blk` (blocks made) reconcile league-wide. A block is only counted when there's a
-  defenceman modelled on the ice to credit, otherwise the two totals drift apart. The invariant is
-  `sog + miss + blkd === att`.
+- **Attempts vs shots on goal. One attempt, one outcome.** `resolveShots` loops over ATTEMPTS, not
+  over shots on goal: each attempt independently either hits a shin pad, sails wide, or reaches the
+  goalie (~24% / 21% / 55%). `shots` is the number expected to reach the net, so the loop runs
+  `shots / pOnGoal` times. It must NOT generate an on-goal shot and then invent a blocked and a
+  missed sibling around it — that's what it used to do, and it meant one chance produced up to
+  three records, so a player's shot chart drew three dots for one shot. **Blocks are real**,
+  credited to an actual defenceman from `defIds`, which is why `blkd` and `blk` reconcile
+  league-wide; with no defenceman modelled on the ice the attempt becomes a miss rather than an
+  uncredited block. The invariants are `sog + miss + blkd === att` and one log record per attempt.
 - **Net placement (`NET_CELLS`, `pickCell`, `goalieHole`, `shooterSpot`).** Every shot on goal is
   placed in one of nine cells, the shape of a penalty placement chart. **The table is calibrated
   against public NHL shot-target work, not invented**, and the point is that shots and goals pull
@@ -128,6 +131,9 @@ which is what makes line construction and last change matter.
   information.
 
 ## The logs
+`G.allStar.at` snapshots the club each selection was picked from — a deadline trade to the other
+conference must not retroactively move a player to the other bench.
+
 `G.shotLog` and `G.gameLog` are keyed by player id and kept **only for the user's club** — doing
 it league-wide would add well over a megabyte to a save for data nobody opens. `recordLogs` files
 them in `applyGame`: one record per shot attempt (day, opponent, clock time, zone, net cell,

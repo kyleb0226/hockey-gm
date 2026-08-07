@@ -917,9 +917,14 @@ const CHECKS = {
     ok(G.allStar && G.allStar.year === G.year, "the All-Star game was played");
     ok(G.allStar.east.length === 10 && G.allStar.west.length === 10,
       `each side names ten (${G.allStar.east.length}/${G.allStar.west.length})`);
-    ok(G.allStar.east.every((id) => G.teams[G.players[id].teamId].conf === 0)
-      && G.allStar.west.every((id) => G.teams[G.players[id].teamId].conf === 1),
-      "players are on the right side");
+    // Against the club they were PICKED for — a player traded across
+    // conferences at the deadline doesn't retroactively switch benches.
+    const asAt = (id) => G.teams[G.allStar.at[id]];
+    ok(G.allStar.east.every((id) => asAt(id).conf === 0)
+      && G.allStar.west.every((id) => asAt(id).conf === 1),
+      "players are on the side they were picked for");
+    ok(G.allStar.east.concat(G.allStar.west).every((id) => G.allStar.at[id] != null),
+      "every selection records the club he was picked from");
     ok(G.allStar.east.filter((id) => G.players[id].pos === "G").length === 1, "each side takes a goalie");
     ok(G.allStar.mvp != null, "an All-Star MVP was named");
 
