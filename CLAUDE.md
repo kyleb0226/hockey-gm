@@ -48,7 +48,7 @@ which is what makes line construction and last change matter.
 
 - `simGame(G, home, away, opts)` splits ~47 even-strength minutes across the four forward lines
   (`LINE_TOI`) and, for each, across the three opposing defence pairs (`PAIR_TOI`). Shot rate for
-  a matchup is `(28/60) * lineOff(forwards) / unitDef(oppForwards, oppPair)`, times `momentum`
+  a matchup is `(30.5/60) * lineOff(forwards) / unitDef(oppForwards, oppPair)`, times `momentum`
   (from a fight) and `legs` (from rest).
 - **The unit on the ice is five skaters.** The forward line is joined by one of the side's own
   defence pairs, drawn by ice-time share. Without this, defencemen never shoot — they used to
@@ -96,7 +96,8 @@ which is what makes line construction and last change matter.
   on goal per team-game, ~3.1 goals. The harness asserts all four against real NHL bands, so a
   change to shot rates that quietly inflates scoring will fail rather than drift.
 - `resolveShots` turns shots into goals against a goalie's save percentage
-  (`0.9 + (quality - 55) * 0.0016 - tired * 0.015`, plus the zone offset, clamped to .845–.975),
+  (`0.9032 + (quality - 55) * 0.0016 - tired * 0.015`, plus the zone and net-cell offsets, clamped
+  to .55–.99 — the wide low end is deliberate, so a top-corner shot can be near-unstoppable),
   and assigns 0–2 assists weighted by `pss`. Even-strength goals move `+/-` on both sides. Per-zone
   shots and goals are recorded on both the shooter and the goalie (`s.z` / `blankZones`).
 - **Special teams** run separately: penalties drawn → PP minutes at a much higher shot rate,
