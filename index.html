@@ -249,10 +249,15 @@ function shooterSpot(p) { return NET_CELLS[(p.id * 6151) % NET_CELLS.length]; }
    three ways — hands (can he elevate at all?), handedness (a left shot coming
    off the right wing opens up the glove side, which is the stated cause of the
    real glove-side bias), and his own favourite corner. */
-function pickCell(G, shooter) {
+function pickCell(G, shooter, keeper) {
   const acc = clamp((shooter.r.hnd * 0.6 + shooter.r.sht * 0.4 - 38) / 55, 0, 1);
   const fav = shooterSpot(shooter);
   const lefty = shooter.shoots !== "R";
+  // Shooters scout. A goalie's hole draws shots as well as letting them in, and
+  // a player with hands exploits it harder than a grinder does. Without this the
+  // club a shot is taken AGAINST has no bearing on where it's aimed, so every
+  // club's conceded net map was the league average and they all looked alike.
+  const hole = keeper ? goalieHole(keeper) : null;
   const w = NET_CELLS.map((c) => {
     let x = c.w;
     // Hands decide whether the puck gets up at all: a sniper lifts it, a
@@ -264,6 +269,7 @@ function pickCell(G, shooter) {
     if (c.col === 0) x *= lefty ? 1.12 : 0.94;
     if (c.col === 2) x *= lefty ? 0.94 : 1.12;
     if (c.key === fav.key) x *= 1.55;
+    if (hole && c.key === hole.key) x *= 1.3 + acc * 0.9;
     return x;
   });
   const tot = w.reduce((a, b) => a + b, 0);
@@ -367,9 +373,17 @@ function autoLines(G, teamId) {
   const r = activeRoster(G, teamId).slice().sort((a, b) => b.ovr - a.ovr);
   const byPos = (pos) => r.filter((p) => p.pos === pos);
   const cs = byPos("C"), lws = byPos("LW"), rws = byPos("RW"), ds = byPos("D");
-  // If both goaltenders are hurt, somebody still has to stand in the crease:
-  // recall from the farm, then dress the least-injured body available.
+  // A club needs TWO healthy goaltenders dressed, not one. If the backup is
+  // hurt, the farm gets a call — otherwise the starter has nobody to hand the
+  // net to and ends up playing nearly every night, which no club allows.
   let gs = byPos("G");
+  if (gs.length < 2) {
+    const spare = rosterOf(G, teamId, true)
+      .filter((p) => p.pos === "G" && p.inj <= 0 && !gs.some((x) => x.id === p.id))
+      .sort((a, b) => b.ovr - a.ovr);
+    gs = gs.concat(spare);
+  }
+  // And if every goalie in the organisation is hurt, dress the least broken.
   if (!gs.length) gs = rosterOf(G, teamId, true).filter((p) => p.pos === "G").sort((a, b) => a.inj - b.inj);
   if (!gs.length) gs = r.slice(-1);
   // A short bench borrows from the nearest position rather than icing an empty slot.
@@ -721,13 +735,19 @@ function pickZone(G, offIds, defIds) {
       const fwd = off.filter((p) => p.pos !== "D");
       const dmen = off.filter((p) => p.pos === "D");
       const speed = fwd.length ? avg(fwd, "spd") : 55;
+      const hands = fwd.length ? (avg(fwd, "hnd") + avg(fwd, "pss")) / 2 : 55;
       const dShot = dmen.length ? avg(dmen, "sht") : 45;
       const oppDfn = avg(def, "dfn");
       const oppSpd = avg(def, "spd");
+      const oppPhy = avg(def, "phy");
       // rush: our legs against theirs, and against a unit that's hard to beat
-      w[0] *= clamp(1 + (speed - 55) * 0.013 - (oppSpd - 55) * 0.009 - (oppDfn - 55) * 0.010, 0.45, 1.9);
+      w[0] *= clamp(1 + (speed - 55) * 0.022 - (oppSpd - 55) * 0.015 - (oppDfn - 55) * 0.016, 0.35, 2.4);
+      // cycle: hanging onto it down low. NOT a leftover — if this isn't
+      // modulated it pins the middle of every club's chart to ~50% and the
+      // three zones never change rank, which is what made every map look alike.
+      w[1] *= clamp(1 + (hands - 55) * 0.008 - (oppPhy - 55) * 0.006, 0.55, 1.6);
       // point: our defencemen's shot, and a defence that forces us outside
-      w[2] *= clamp(1 + (dShot - 45) * 0.014 + (oppDfn - 55) * 0.012, 0.45, 1.9);
+      w[2] *= clamp(1 + (dShot - 45) * 0.024 + (oppDfn - 55) * 0.019, 0.35, 2.4);
     }
   }
   const tot = w.reduce((a, b) => a + b, 0);
@@ -820,7 +840,7 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     }
     if (roll < pBlock + pMiss) { sh.miss++; rec("m", null); continue; }
 
-    const cell = pickCell(G, shooter);
+    const cell = pickCell(G, shooter, gp);
     const exposed = hole && cell.key === hole.key ? 0.032 : 0;
     const quality = (shooter.r.sht - 55) * 0.0013 + (rnd(G) - 0.5) * 0.02;
     const saveP = clamp(base + zone.save + cell.save - exposed - quality, 0.55, 0.99);
@@ -1686,14 +1706,20 @@ function finishSeason(G) {
 function fillRosters(G) {
   const need = { G: 2, D: 6, C: 4, LW: 3, RW: 3 };
   G.teams.forEach((t) => {
+    // The minimums are for the DRESSED roster, not the organisation. Counting
+    // the farm here once left clubs with their second goalie stuck in the minors
+    // and nobody to back up the starter.
     Object.entries(need).forEach(([pos, n]) => {
-      let have = rosterOf(G, t.id, true).filter((p) => p.pos === pos).length;
-      while (have < n) {
+      const atPos = () => rosterOf(G, t.id).filter((p) => p.pos === pos).length;
+      // Recall from the farm before signing anyone off the street.
+      rosterOf(G, t.id, true).filter((p) => p.farm && p.pos === pos)
+        .sort((a, b) => b.ovr - a.ovr)
+        .forEach((p) => { if (atPos() < n) p.farm = false; });
+      while (atPos() < n) {
         const p = genPlayer(G, pos, 40, ri(G, 20, 27));
         p.teamId = t.id;
         p.contract = { amt: MIN_SALARY, yrs: ri(G, 1, 2) };
         G.players[p.id] = p;
-        have++;
       }
     });
     // Recall from the farm first, and only then sign bodies off the street.

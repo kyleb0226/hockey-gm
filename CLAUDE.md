@@ -92,6 +92,11 @@ which is what makes line construction and last change matter.
   cell has a `w` (how often it's aimed at — low-heavy) and a `save` offset (how stoppable it is —
   top corners lethal). The engine reproduces this to within a point or two; the harness pins the
   shares, so **do not "simplify" the table without re-checking them**.
+  **Shooters scout the goalie.** `pickCell` takes the keeper and boosts his `goalieHole` cell,
+  harder for a player with hands. This is what makes a club's CONCEDED net map its own: without it
+  placement depended only on the shooter, so every club's against-map was the league average and
+  looked identical to its own. Every club now concedes above-average volume at its starter's hole
+  (median +3 points); the harness pins it.
   A shooter bends the base distribution three ways: hands (can he elevate?), handedness
   (`p.shoots`, ~62% left league-wide — the real cause of the glove-side bias, since left shots come
   off the right wing), and `shooterSpot`, a favourite corner fixed by his id so no two charts look
@@ -229,8 +234,14 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
   scratches being credited with a game. Both halves are load-bearing.
 - `G.draftPick` counts picks made overall; `G.draftClass` shrinks as it goes. Never compare them
   to each other — that bug silently ended the draft at pick 32.
-- `autoLines` falls back to the farm, then to any body, if both goaltenders are hurt. A team with
-  no dressed goalie used to crash `resolveShots`.
+- `autoLines` needs **two** healthy goaltenders dressed and calls the farm up when it only has
+  one — with nobody to hand the net to, `pickStarter` rides the starter and he ends up playing
+  nearly every night. It falls back to the least-injured body if the whole organisation is hurt;
+  a team with no dressed goalie used to crash `resolveShots`.
+- `fillRosters` enforces its position minimums on the **dressed roster**, not the organisation.
+  Counting the farm left clubs with their second goalie in the minors.
+- Read a lineup through `ensureLines`, never `t.lines` — an injury nulls it and it is only
+  rebuilt lazily at the next game.
 - Lines are invalidated by setting `t.lines = null` (on injury, trade, recall). `ensureLines`
   rebuilds lazily — don't call `autoLines` directly from engine code.
 - **Injuries are quoted in games, not days.** They only tick down for clubs that actually played

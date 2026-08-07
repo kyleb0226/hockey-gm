@@ -478,9 +478,12 @@ const CHECKS = {
     ok(t0.lineChem.every((g) => g <= A.LINE_CHEM_MAX_GAMES), "chemistry caps out rather than growing forever");
     A.simDays(G, 60);
     ok(t0.lineChem[0] === A.LINE_CHEM_MAX_GAMES, `a line left alone for a season hits the cap (${t0.lineChem[0]})`);
-    const tmp = t0.lines.F[0][0];
-    t0.lines.F[0][0] = t0.lines.F[1][0];
-    t0.lines.F[1][0] = tmp;
+    // Through ensureLines, never t.lines directly — an injury nulls the lineup
+    // and it's only rebuilt lazily at the next game.
+    const live = A.ensureLines(G, 0);
+    const tmp = live.F[0][0];
+    live.F[0][0] = live.F[1][0];
+    live.F[1][0] = tmp;
     A.simDays(G, 10);
     ok(t0.lineChem[0] < A.LINE_CHEM_MAX_GAMES, `swapping the top line resets its chemistry streak (now ${t0.lineChem[0]})`);
 
@@ -1053,6 +1056,49 @@ const CHECKS = {
     ok(rShot > 0.3, `shooting defencemen produce more point shots (r=${rShot.toFixed(2)})`);
     const rDfn = corr(prof.map((p) => p.dfn), prof.map((p) => p.aRush));
     ok(rDfn < -0.3, `a sound defence concedes less rush (r=${rDfn.toFixed(2)})`);
+
+    /* And the NET map, which is the one that used to be truly identical: where
+       a shot is AIMED only ever depended on the shooter, so every club's
+       conceded placement chart was the league average. Shooters now scout the
+       goalie, so a club's conceded map leans on its own keeper's hole. */
+    section("Net maps differ by club");
+    const K = A.NET_KEYS;
+    const net = G.teams.map((t) => {
+      const f = {}, a = {};
+      K.forEach((k) => { f[k] = 0; a[k] = 0; });
+      A.rosterOf(G, t.id, true).forEach((p) => {
+        if (!p.season.net) return;
+        if (p.pos === "G") K.forEach((k) => { a[k] += p.season.net[k].sa; });
+        else K.forEach((k) => { f[k] += p.season.net[k].a; });
+      });
+      const tf = K.reduce((s, k) => s + f[k], 0), ta = K.reduce((s, k) => s + a[k], 0);
+      const gk = A.rosterOf(G, t.id).filter((p) => p.pos === "G")
+        .sort((x, y) => y.season.gp - x.season.gp)[0];
+      return { t, tf, ta, f: K.map((k) => (tf ? f[k] / tf * 100 : 0)),
+        a: K.map((k) => (ta ? a[k] / ta * 100 : 0)), hole: gk ? A.goalieHole(gk).key : null };
+    }).filter((x) => x.ta > 0 && x.hole);
+    ok(net.length >= 30, `net profiles built for the league (${net.length})`);
+
+    // The headline: a club is shot at more where its own goalie is weak.
+    const leagueAvg = K.map((k, i) => net.reduce((s, p) => s + p.a[i], 0) / net.length);
+    const lifts = net.map((p) => p.a[K.indexOf(p.hole)] - leagueAvg[K.indexOf(p.hole)]);
+    const above = lifts.filter((l) => l > 0).length;
+    ok(above >= net.length - 2,
+      `clubs concede more shots at their goalie's hole (${above} of ${net.length})`);
+    const medLift = lifts.slice().sort((x, y) => x - y)[Math.floor(lifts.length / 2)];
+    ok(medLift > 1.2, `and by a visible margin (median +${medLift.toFixed(1)} points)`);
+
+    // Conceded maps must vary club to club, not sit on the league mean.
+    const aSd = K.map((k, i) => {
+      const xs = net.map((p) => p.a[i]);
+      const mu = xs.reduce((x, y) => x + y, 0) / xs.length;
+      return Math.sqrt(xs.reduce((s, x) => s + (x - mu) ** 2, 0) / xs.length);
+    });
+    ok(Math.max(...aSd) > 1.5, `conceded placement varies across clubs (widest sd ${Math.max(...aSd).toFixed(2)})`);
+    // And a club's own map must not be a copy of what it concedes.
+    const netGap = net.map((p) => K.reduce((s, _, i) => s + Math.abs(p.f[i] - p.a[i]), 0) / K.length);
+    ok(Math.max(...netGap) > 2,
+      `a club's own placement differs from what it concedes (biggest mean gap ${Math.max(...netGap).toFixed(1)} points)`);
   },
 
   // A season split by club, so a traded player's year isn't all credited to

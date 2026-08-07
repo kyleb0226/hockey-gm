@@ -103,3 +103,15 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   points. Pinned with correlation checks — fast forwards → rush (r=0.79), shooting D → point
   (r=0.68), sound defence → less rush conceded (r=-0.85) — so it can't be flattened back out.
   League rates unchanged. Harness grew from 294 to 302 assertions.
+- 2026-08-05 · M · Made the net maps club-specific. Placement depended only on the shooter, so
+  every club's CONCEDED net chart was the league average and sat on top of its own — the thing
+  that looked predetermined. Shooters now scout: `pickCell` boosts the opposing goalie's
+  `goalieHole`, harder for a player with hands, so all 32 clubs concede above-average volume at
+  their starter's weak spot (median +3.4 points) and the conceded chart is genuinely theirs. Ice
+  zones also gained a modulated cycle term, since leaving cycle as the residual pinned the middle
+  of every chart near 50%. Two real bugs fell out: `fillRosters` counted position minimums across
+  the whole organisation, so a club could have its second goalie stuck on the farm; and with only
+  one dressed goalie `pickStarter` had nobody to rotate to, which had one starter at 77 of 82
+  games — `autoLines` now calls a goalie up when it's a man short, and the starter load is back to
+  55. NHL calibration held throughout (67% above the pads, top glove 22%, five-hole 14%, .902
+  save percentage). Harness grew from 294 to 307 assertions.
