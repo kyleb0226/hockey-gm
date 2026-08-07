@@ -2565,18 +2565,24 @@ function jitter(seed) {
 // records arrive grouped. `spill` lets a shot sit across a gridline — the cell
 // is only how the shot was counted, not a wall the puck can't cross — and
 // `bounds` keeps it inside the net. Overlap is fine and expected.
+function spotAt(x0, y0, w, h, seed, spill, bounds) {
+  const o = spill || 0;
+  let x = x0 - o + jitter(seed * 2) * (w + o * 2);
+  let y = y0 - o + jitter(seed * 2 + 1) * (h + o * 2);
+  if (bounds) { x = clamp(x, bounds[0], bounds[2]); y = clamp(y, bounds[1], bounds[3]); }
+  return [x, y];
+}
 function scatter(n, x0, y0, w, h, seed, spill, bounds) {
   const out = [];
-  if (n <= 0) return out;
-  const o = spill || 0;
-  for (let i = 0; i < n; i++) {
-    let x = x0 - o + jitter(seed + i * 2) * (w + o * 2);
-    let y = y0 - o + jitter(seed + i * 2 + 1) * (h + o * 2);
-    if (bounds) { x = clamp(x, bounds[0], bounds[2]); y = clamp(y, bounds[1], bounds[3]); }
-    out.push([x, y]);
-  }
+  for (let i = 0; i < n; i++) out.push(spotAt(x0, y0, w, h, seed + i, spill, bounds));
   return out;
 }
+/* A dot's position belongs to the SHOT, not to its index in a list. Seeding off
+   the record's game day and clock time means two charts can never line up: with
+   an index seed, dot #1 of a club's own map and dot #1 of the map it concedes
+   landed on the same pixel, so the two charts looked like the same shots with
+   different colours and one just ran longer. */
+const shotSeed = (r, k) => Math.abs(r.d * 7919 + Math.round(r.t * 97) * 31 + (r.c ? r.c.charCodeAt(0) * 13 : 0) + k);
 // The net opening, so a spilled dot can straddle a line but not leave the goal.
 const NET_BOUNDS = [42, 32, 218, 148];
 
@@ -2599,7 +2605,12 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
   // The net sits inside a margin so off-target shots have somewhere to land.
   const X = [40, 100, 160, 220], Y = [30, 70, 110, 150];
   const hue = mode === "G" ? 6 : 205;   // beaten = red, scoring = blue
-  const sd = (seed || 1) * 977;
+  /* Every chart gets its own salt. Two NetGrids that shared one produced dots in
+     identical positions — a club's own map and the map it conceded looked like
+     the same shots recoloured, with one simply running longer. The mode is in
+     the salt so "what we shoot" and "what we allow" can never coincide even when
+     they're drawn for the same club from the same aggregate counts. */
+  const sd = (seed || 1) * 977 + (mode === "G" ? 524287 : 0);
 
   // One dot per shot until a cell gets crowded, then one dot per k.
   const cellShots = NET_CELLS.map((c) => (mode === "G" ? net[c.key].sa : net[c.key].a));
@@ -2664,7 +2675,9 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
           const recs = real ? buckets[c.key] : null;
           const nG = Math.round(goals / perDot), nS = Math.round((shots - goals) / perDot);
           const count = recs ? recs.length : nG + nS;
-          const pts = dots ? scatter(count, x0, y0, w, h, sd + i * 131, 5, NET_BOUNDS) : [];
+          const pts = !dots ? []
+            : recs ? recs.map((r, k) => spotAt(x0, y0, w, h, sd + shotSeed(r, k), 5, NET_BOUNDS))
+            : scatter(count, x0, y0, w, h, sd + i * 131, 5, NET_BOUNDS);
           return (
             <g key={c.key}>
               <rect x={x0} y={y0} width={w} height={h}
@@ -2693,30 +2706,38 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
         {dots && (real ? offNet.length : miss) ? (() => {
           const n = real ? offNet.length : Math.round(miss / perDot);
           const over = Math.round(n * 0.4), side = n - over;
-          const a = scatter(over, 44, 5, 172, 16, sd + 991, 3);
-          const b = scatter(Math.ceil(side / 2), 5, 32, 26, 116, sd + 992, 3);
-          const c2 = scatter(Math.floor(side / 2), 228, 32, 26, 116, sd + 993, 3);
-          return [...a, ...b, ...c2].map((p, k) => (
-            <Dot key={`m${k}`} p={p} r={2.2} stroke="#64748b"
-              title={real && offNet[k] ? tip(offNet[k]) : null} />
+          // Three bands, each an independent draw, every dot salted by the chart
+          // and by the shot it belongs to.
+          const bands = [[over, 44, 5, 172, 16, 991], [Math.ceil(side / 2), 5, 32, 26, 116, 992],
+            [Math.floor(side / 2), 228, 32, 26, 116, 993]];
+          let idx = 0;
+          const out = [];
+          bands.forEach(([cnt, x, y, bw, bh, tag]) => {
+            for (let k = 0; k < cnt; k++, idx++) {
+              const r = real ? offNet[idx] : null;
+              out.push({ p: spotAt(x, y, bw, bh, sd + tag + (r ? shotSeed(r, idx) : idx * 137), 3), r });
+            }
+          });
+          return out.map((d, k) => (
+            <Dot key={`m${k}`} p={d.p} r={2.2} stroke="#64748b" title={d.r ? tip(d.r) : null} />
           ));
         })() : null}
 
         {/* empty-netters: no goalie, so no corner to pick */}
         {dots && real && emptied.length
-          ? scatter(emptied.length, 96, 76, 68, 48, sd + 995, 4, NET_BOUNDS).map((p, k) => (
-            <Dot key={`e${k}`} p={p} r={2.6} fill="#c084fc" title={tip(emptied[k])} />
+          ? emptied.map((r, k) => (
+            <Dot key={`e${k}`} r={2.6} fill="#c084fc" title={tip(r)}
+              p={spotAt(96, 76, 68, 48, sd + 995 + shotSeed(r, k), 4, NET_BOUNDS)} />
           )) : null}
 
         {/* blocked: never got there at all */}
         {dots && (real ? blocked.length : blkd) ? (
           <>
             <text x="130" y="176" textAnchor="middle" fontSize="7" className="fill-slate-500">BLOCKED</text>
-            {scatter(real ? blocked.length : Math.round(blkd / perDot), 30, 180, 200, 26, sd + 994, 3)
-              .map((p, k) => (
-                <Dot key={`b${k}`} p={p} r={2.2} fill="#f59e0b"
-                  title={real && blocked[k] ? tip(blocked[k]) : null} />
-              ))}
+            {(real ? blocked : new Array(Math.round(blkd / perDot)).fill(null)).map((r, k) => (
+              <Dot key={`b${k}`} r={2.2} fill="#f59e0b" title={r ? tip(r) : null}
+                p={spotAt(30, 180, 200, 26, sd + 994 + (r ? shotSeed(r, k) : k * 151), 3)} />
+            ))}
           </>
         ) : null}
 
