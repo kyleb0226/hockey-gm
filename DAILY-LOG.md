@@ -87,3 +87,10 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   with a Review → Draft → Free agency breadcrumb and a one-line explanation of what's waiting on
   you. `n` now triggers the header's primary action in any phase. End of playoffs to next season
   is five presses. Harness grew from 263 to 280 assertions.
+- 2026-08-05 · S · Season stats now show which club they were earned with. `p.stints` records a
+  chronological spell per club (`stintFor` in `applyGame`), so a player traded at the deadline
+  reads "61 games with Anchorage, 21 with Tulsa" instead of having the whole year credited to
+  wherever he ended up. Player pages gain a by-club table, the career table gains a Tm column, and
+  the stats table marks traded players with a `*` and the full path on hover. At the rollover a
+  traded year is archived as one career row per club. Spell lines carry no zone or net buckets, so
+  the save cost is small. Harness grew from 280 to 294 assertions.

@@ -40,6 +40,7 @@ const EXPORTS = [
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
   "offseasonStage", "offseasonAction", "doOffseasonStep", "OFFSEASON_STEPS",
+  "stintFor", "stintTotal",
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES",
 ];
@@ -993,6 +994,50 @@ const CHECKS = {
     // And it still plays.
     simSeason(A, G);
     ok(G.teams.every((t) => t.gp === 41), "the ninth season plays to completion");
+  },
+
+  // A season split by club, so a traded player's year isn't all credited to
+  // whoever happened to have him at the end.
+  stints(A) {
+    section("Season splits by club");
+    const G = A.newGame(0, { seed: 221, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const played = A.playersOf(G).filter((p) => p.season.gp > 0);
+    ok(played.every((p) => (p.stints || []).length > 0), "everyone who played has at least one spell");
+
+    // The spells must add up to the season, for everybody.
+    const badGp = played.filter((p) => A.stintTotal(p, "gp") !== p.season.gp);
+    ok(badGp.length === 0, "games in the spells equal games in the season",
+      badGp.length ? `${badGp[0].ln}: ${A.stintTotal(badGp[0], "gp")} vs ${badGp[0].season.gp}` : "");
+    const skaters = played.filter((p) => p.pos !== "G");
+    const badG = skaters.filter((p) => A.stintTotal(p, "g") !== p.season.g);
+    ok(badG.length === 0, "and so do goals");
+    const badA = skaters.filter((p) => A.stintTotal(p, "a") !== p.season.a);
+    ok(badA.length === 0, "and assists");
+
+    // The deadline moves people, so somebody should have two.
+    const moved = played.filter((p) => p.stints.filter((st) => st.s.gp).length > 1);
+    ok(moved.length > 0, `players traded mid-season have more than one spell (${moved.length})`);
+    const m = moved[0];
+    ok(m.stints[0].t !== m.stints[1].t, "consecutive spells are with different clubs");
+    ok(m.stints[m.stints.length - 1].t === m.teamId, "and the last spell is the club he's on now");
+    ok(m.stints.every((st) => st.s.z === undefined), "spell lines carry no zone buckets — that's the save-size guard");
+
+    // At the rollover a traded year becomes one career row per club. The spells
+    // themselves are cleared by finishSeason, so count them first.
+    const spellCount = m.stints.filter((st) => st.s.gp).length;
+    const spellClubs = m.stints.filter((st) => st.s.gp).map((st) => st.t);
+    simPlayoffs(A, G);
+    const rows = (m.career || []).filter((r) => r.year === G.year);
+    ok(rows.length === spellCount, `a traded year is archived as one row per club (${rows.length} vs ${spellCount})`);
+    ok(spellClubs.every((t) => rows.some((r) => r.teamId === t)), "every club he played for is in the record");
+    ok(rows.every((r) => r.teamId != null), "every career row names the club it was earned with");
+    ok(new Set(rows.map((r) => r.teamId)).size === rows.length, "and no club appears twice for one year");
+    const single = A.playersOf(G).find((p) => (p.career || []).filter((r) => r.year === G.year).length === 1
+      && p.career.some((r) => r.year === G.year && r.gp > 0));
+    ok(!!single, "a player who stayed put gets exactly one row");
+    A.autoDraft(G, false); A.startNextSeason(G);
+    ok(A.playersOf(G).every((p) => !p.stints || !p.stints.length), "spells are cleared at the rollover");
   },
 
   // The offseason has to be walkable from one button without hunting.

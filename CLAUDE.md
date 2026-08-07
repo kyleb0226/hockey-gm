@@ -131,6 +131,16 @@ which is what makes line construction and last change matter.
   how sharply the board reacts. Pressure on the manager only — the AI never gets better
   information.
 
+## Seasons split by club
+`p.stints` is a chronological list of spells — one slim stat line per club a player turned out for
+this season, in order, created lazily by `stintFor(p, teamId)` in `applyGame`. It exists because
+`p.season` alone credits a traded player's whole year to whoever happens to have him at the end.
+The spell lines deliberately carry **no `z`/`net` buckets** (that's the save-size guard), and
+`stintTotal(p, field)` must always reconcile with `p.season`.
+At the rollover `finishSeason` archives a traded year as **one career row per club** — the way a
+real record book reads — and a player who stayed put gets exactly one. `p.stints` is then cleared.
+Playoff stats are not split.
+
 ## The logs
 `G.allStar.at` snapshots the club each selection was picked from — a deadline trade to the other
 conference must not retroactively move a player to the other bench.

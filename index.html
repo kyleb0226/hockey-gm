@@ -280,6 +280,25 @@ function blankStats(pos) {
         z: blankZones("S"), net: blankNet("S") };
 }
 // Merge a per-game bucket map (zones or net cells) into a season total.
+/* A season split by club. `p.stints` is a chronological list of spells — one
+   entry per club he played for this year, in the order he played for them, so a
+   mid-season trade reads as two rows rather than one misattributed total. The
+   lines are slim: no zone or net buckets, because those are a whole-season view
+   and carrying nine cells per stint per player is what costs real save size. */
+function stintFor(p, teamId) {
+  p.stints = p.stints || [];
+  const last = p.stints[p.stints.length - 1];
+  if (last && last.t === teamId) return last.s;
+  const s = blankStats(p.pos);
+  delete s.z; delete s.net;
+  p.stints.push({ t: teamId, s });
+  return s;
+}
+// The whole season's totals, rebuilt from the spells — used to check the books.
+function stintTotal(p, field) {
+  return (p.stints || []).reduce((a, st) => a + (st.s[field] || 0), 0);
+}
+
 function addBuckets(dest, src, field, keys, kind) {
   if (!src) return;
   if (!dest[field]) dest[field] = field === "z" ? blankZones(kind) : blankNet(kind);
@@ -1107,25 +1126,32 @@ function applyGame(G, res, opts) {
       // The box carries the whole organisation so lookups can't miss; only the
       // players who took a shift are credited with a game.
       if (s.toi <= 0) return;
+      // Season totals, and — in the regular season — the same line again
+      // against the club he was playing for at the time. That's what lets a
+      // traded player's year read "40 with Hartford, 22 with Albany" instead of
+      // silently crediting the whole thing to wherever he ended up.
       const dest = opts.playoff ? (p.po = p.po || blankStats(p.pos)) : p.season;
-      dest.gp++; dest.toi += s.toi;
-      if (p.pos === "G") {
-        dest.sa += s.sa; dest.sv += s.sv; dest.ga += s.ga; dest.starts++;
-        dest.sosa += s.sosa || 0; dest.sosv += s.sosv || 0;
-        if (s.ga === 0 && s.sa > 0) dest.so++;
-        const won = gf > ga;
-        if (res.so) { if (won) dest.sow++; else dest.sol++; }
-        if (won) dest.w++;
-        else if ((res.ot || res.so) && R.otLoserPoint) dest.otl++;
-        else dest.l++;
-      } else {
-        dest.g += s.g; dest.a += s.a; dest.sog += s.sog; dest.pim += s.pim;
-        dest.hit += s.hit; dest.blk += s.blk; dest.pm += s.pm;
-        dest.fow += s.fow; dest.fol += s.fol; dest.ppg += s.ppg; dest.shg += s.shg;
-        dest.eng += s.eng || 0; dest.fights += s.fights || 0;
-        dest.sos += s.sos || 0; dest.soa += s.soa || 0;
-        dest.att += s.att || 0; dest.miss += s.miss || 0; dest.blkd += s.blkd || 0;
-      }
+      const targets = opts.playoff ? [dest] : [dest, stintFor(p, tid)];
+      targets.forEach((d) => {
+        d.gp++; d.toi += s.toi;
+        if (p.pos === "G") {
+          d.sa += s.sa; d.sv += s.sv; d.ga += s.ga; d.starts++;
+          d.sosa += s.sosa || 0; d.sosv += s.sosv || 0;
+          if (s.ga === 0 && s.sa > 0) d.so++;
+          const won = gf > ga;
+          if (res.so) { if (won) d.sow++; else d.sol++; }
+          if (won) d.w++;
+          else if ((res.ot || res.so) && R.otLoserPoint) d.otl++;
+          else d.l++;
+        } else {
+          d.g += s.g; d.a += s.a; d.sog += s.sog; d.pim += s.pim;
+          d.hit += s.hit; d.blk += s.blk; d.pm += s.pm;
+          d.fow += s.fow; d.fol += s.fol; d.ppg += s.ppg; d.shg += s.shg;
+          d.eng += s.eng || 0; d.fights += s.fights || 0;
+          d.sos += s.sos || 0; d.soa += s.soa || 0;
+          d.att += s.att || 0; d.miss += s.miss || 0; d.blkd += s.blkd || 0;
+        }
+      });
       addZones(dest, s.z);
       addNet(dest, s.net);
       // A goalie's night costs far more than a skater's shift — that's what
@@ -1549,8 +1575,16 @@ function finishSeason(G) {
       // ice zones into every career row for every player is what pushes a long
       // save past the storage ceiling.
       const { z, net, ...totals } = p.season;
-      p.career.push({ year: G.year, teamId: p.teamId, ...totals });
+      const spells = (p.stints || []).filter((st) => st.s.gp);
+      if (spells.length > 1) {
+        // A traded year goes into the record as one row per club, which is how
+        // a real career table reads it.
+        spells.forEach((st) => p.career.push({ year: G.year, teamId: st.t, ...st.s }));
+      } else {
+        p.career.push({ year: G.year, teamId: spells.length ? spells[0].t : p.teamId, ...totals });
+      }
     }
+    p.stints = null;
     p.stats = p.season;
     p.season = blankStats(p.pos);
     p.po = null;
@@ -2815,6 +2849,31 @@ function PlayerModal({ G, pid, onClose, onGo }) {
               <div className="pt-1"><AttemptBar s={p.season} /></div>
             </Section>
           ) : null}
+          {(p.stints || []).filter((st) => st.s.gp).length > 1 ? (
+            <Section title="This season, by club">
+              <SortTable min={360} initial="idx" rowKey={(r) => r.idx}
+                rows={p.stints.filter((st) => st.s.gp).map((st, i) => ({ ...st, idx: i }))}
+                cols={isG ? [
+                  { key: "idx", label: "#", get: (r) => -r.idx, cell: (r) => r.idx + 1 },
+                  { key: "t", label: "Club", get: (r) => G.teams[r.t].city, cell: (r) => `${G.teams[r.t].city} ${G.teams[r.t].name}` },
+                  { key: "gp", label: "GP", get: (r) => r.s.gp },
+                  { key: "w", label: "W", get: (r) => r.s.w },
+                  { key: "sv", label: "SV%", get: (r) => (r.s.sa ? r.s.sv / r.s.sa : 0),
+                    cell: (r) => (r.s.sa ? ((r.s.sv / r.s.sa) * 100).toFixed(1) : "—") },
+                ] : [
+                  { key: "idx", label: "#", get: (r) => -r.idx, cell: (r) => r.idx + 1 },
+                  { key: "t", label: "Club", get: (r) => G.teams[r.t].city, cell: (r) => `${G.teams[r.t].city} ${G.teams[r.t].name}` },
+                  { key: "gp", label: "GP", get: (r) => r.s.gp },
+                  { key: "g", label: "G", get: (r) => r.s.g },
+                  { key: "a", label: "A", get: (r) => r.s.a },
+                  { key: "p", label: "P", get: (r) => r.s.g + r.s.a, cls: "font-semibold" },
+                  { key: "pm", label: "+/-", get: (r) => r.s.pm, cell: (r) => `${r.s.pm > 0 ? "+" : ""}${r.s.pm}` },
+                ]} />
+              <div className="px-3 py-2 text-xs text-slate-400 border-t border-[#1e2b45]">
+                Moved {p.stints.filter((st) => st.s.gp).length - 1 === 1 ? "once" : `${p.stints.filter((st) => st.s.gp).length - 1} times`} this season.
+              </div>
+            </Section>
+          ) : null}
           <Section title="This season" className="p-3">
             {isG ? (
               <div className="grid grid-cols-3 gap-2 text-sm pt-1">
@@ -2886,12 +2945,16 @@ function PlayerModal({ G, pid, onClose, onGo }) {
                 rowKey={(r) => r._i}
                 cols={isG ? [
                   { key: "year", label: "Yr", get: (r) => (r.total ? `${r.year}–${r.to}` : r.year) },
+                  { key: "tm", label: "Tm", get: (r) => (G.teams[r.teamId] ? G.teams[r.teamId].abbr : "—"),
+                    cls: "text-slate-400" },
                   { key: "gp", label: "GP", get: (r) => r.gp || 0 },
                   { key: "w", label: "W", get: (r) => r.w || 0 },
                   { key: "so", label: "SO", get: (r) => r.so || 0 },
                   { key: "sv", label: "SV%", get: (r) => (r.sa ? r.sv / r.sa : 0), cell: (r) => (r.sa ? (r.sv / r.sa * 100).toFixed(1) : "—") },
                 ] : [
                   { key: "year", label: "Yr", get: (r) => (r.total ? `${r.year}–${r.to}` : r.year) },
+                  { key: "tm", label: "Tm", get: (r) => (G.teams[r.teamId] ? G.teams[r.teamId].abbr : "—"),
+                    cls: "text-slate-400" },
                   { key: "gp", label: "GP", get: (r) => r.gp || 0 },
                   { key: "g", label: "G", get: (r) => r.g || 0 },
                   { key: "a", label: "A", get: (r) => r.a || 0 },
@@ -3437,7 +3500,17 @@ function StatsTab({ G, openPlayer }) {
   const pool = (p) => (scope === "mine" ? p.teamId === G.userTeam : true);
   const skaters = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 0 && pool(p));
   const goalies = playersOf(G).filter((p) => p.pos === "G" && p.season.gp >= 3 && pool(p));
-  const teamCell = (p) => <span className="text-slate-400">{p.teamId != null ? G.teams[p.teamId].abbr : "FA"}</span>;
+  // A traded player shows where he is now, with the full path on hover.
+  const teamCell = (p) => {
+    const spells = (p.stints || []).filter((st) => st.s.gp);
+    const path = spells.map((st) => G.teams[st.t].abbr).join(" → ");
+    return (
+      <span className="text-slate-400" title={spells.length > 1 ? path : undefined}>
+        {p.teamId != null ? G.teams[p.teamId].abbr : "FA"}
+        {spells.length > 1 ? <span className="text-amber-400/70">*</span> : null}
+      </span>
+    );
+  };
   const nameCell = (p) => <span className="whitespace-nowrap">{fullName(p)}<HotCold G={G} p={p} /></span>;
 
   const skaterCols = [
