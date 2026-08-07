@@ -125,3 +125,12 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   Seven rounds also broke the population maths — 224 in a year against ~50 retirements pushed the
   save to 4.9 MB over eight seasons — so stalled prospects are released and the free-agent pool is
   hard-capped, which brought it back to 2.7 MB. Harness grew from 339 to 362 assertions.
+- 2026-08-05 · M · Playoffs are now played a game at a time. `simPlayoffDay` plays one game in
+  every live series and ticks the day; `simPlayoffRound` became a fast-forward that loops it, and
+  both share `advancePlayoffRound` so the two paths can't disagree about the bracket. The user's
+  playoff games now get a play-by-play and shot-log entries like his season games — they had
+  neither before, so a whole spring was invisible. Playoff shots are stamped `po` and filtered out
+  of season charts. Also added a continuity check that pins the shot log to reality: every record
+  must fall on a day the club actually played, name the right opponent, add up to the season
+  totals, grow incrementally rather than in one lump, and every logged goal must appear in the
+  scoring record. Harness grew from 362 to 390 assertions.

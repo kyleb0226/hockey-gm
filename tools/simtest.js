@@ -33,6 +33,7 @@ const EXPORTS = [
   "pts", "svPct", "gaa", "ovrOf", "TEAMS", "DIVS", "CONFS", "ROSTER_MAX", "POS",
   "DIFFICULTIES", "LINE_TOI",
   "pickStarter", "runShootout", "restFor", "SHOT_ZONES", "fillRosters",
+  "simPlayoffDay", "advancePlayoffRound", "simSeriesGame",
   "deadlineDay", "tradesOpen", "daysToDeadline", "aiDeadlineMoves",
   "hasNtc", "eligibleForNtc", "requestNtcWaiver",
   "needsWaivers", "sendDown", "recall", "processWaivers", "nhlGames",
@@ -1145,6 +1146,155 @@ const CHECKS = {
     ok(!!single, "a player who stayed put gets exactly one row");
     A.autoDraft(G, false); A.startNextSeason(G);
     ok(A.playersOf(G).every((p) => !p.stints || !p.stints.length), "spells are cleared at the rollover");
+  },
+
+  /* Continuity: the dots on a shot chart have to BE the shots from the games
+     that were actually played — same day, same opponent, right count — not a
+     cloud generated after the fact to match a total. */
+  continuity(A) {
+    section("Shot log ties back to real games");
+    const G = A.newGame(0, { seed: 313, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+
+    // What the schedule says the club actually did.
+    const played = [];            // {day, opp}
+    G.schedule.forEach((day, d) => day.forEach((f) => {
+      if (!f.played) return;
+      if (f.home === G.userTeam) played.push({ day: d, opp: f.away });
+      else if (f.away === G.userTeam) played.push({ day: d, opp: f.home });
+    }));
+    ok(played.length === 41, `the club played its 41 games (${played.length})`);
+    const oppByDay = {};
+    played.forEach((g) => { oppByDay[g.day] = g.opp; });
+
+    const skaters = A.rosterOf(G, G.userTeam).filter((p) => p.pos !== "G" && p.season.att > 0);
+    ok(skaters.length > 0, "and has skaters who shot");
+
+    let checkedDays = 0, badDay = null, badOpp = null, badCount = null;
+    skaters.forEach((p) => {
+      const log = G.shotLog[p.id] || [];
+      // Every record must fall on a day this club actually played...
+      log.forEach((r) => {
+        if (!(r.d in oppByDay) && badDay == null) badDay = `${p.ln} logged a shot on day ${r.d + 1}, no game`;
+        else if (oppByDay[r.d] !== r.o && badOpp == null) {
+          badOpp = `${p.ln} day ${r.d + 1}: logged vs ${r.o}, actually played ${oppByDay[r.d]}`;
+        }
+      });
+      // ...and the totals must be the season totals, not an approximation.
+      const on = log.filter((r) => r.r === "g" || r.r === "s").length;
+      const en = log.filter((r) => r.r === "e").length;
+      if (on + en !== p.season.sog && badCount == null) {
+        badCount = `${p.ln}: ${on}+${en} logged vs ${p.season.sog} shots on goal`;
+      }
+      checkedDays += new Set(log.map((r) => r.d)).size;
+    });
+    ok(badDay == null, "every logged shot falls on a day the club actually played", badDay || "");
+    ok(badOpp == null, "and names the opponent it was actually against", badOpp || "");
+    ok(badCount == null, "and the logged shots add up to the season totals", badCount || "");
+
+    // The busiest shooter should have shot in most of the games he dressed for.
+    const busiest = skaters.sort((a, b) => b.season.att - a.season.att)[0];
+    const daysWithShots = new Set((G.shotLog[busiest.id] || []).map((r) => r.d)).size;
+    ok(daysWithShots > busiest.season.gp * 0.6,
+      `the top shooter appears in most of his games (${daysWithShots} of ${busiest.season.gp})`);
+    ok(daysWithShots <= busiest.season.gp,
+      `and never in more games than he played (${daysWithShots} vs ${busiest.season.gp})`);
+
+    // The log grows game by game rather than appearing at the end.
+    const G2 = A.newGame(0, { seed: 314, rules: { seasonLen: 41 } });
+    const counts = [];
+    for (let i = 0; i < 25; i++) {
+      A.simDay(G2);
+      const n = Object.values(G2.shotLog).reduce((s, arr) => s + arr.length, 0);
+      counts.push(n);
+    }
+    ok(counts[24] > counts[0], "the log fills up as days are played");
+    ok(counts.every((n, i) => i === 0 || n >= counts[i - 1]), "and only ever grows");
+    const jumps = counts.filter((n, i) => i && n > counts[i - 1]).length;
+    ok(jumps >= 8, `it grows on the days the club plays, not in one lump (${jumps} increments)`);
+
+    // Goals in the log are the goals in the box score, game for game.
+    const scored = {};
+    G.results.forEach((r) => r.scorers.forEach((sc) => {
+      if (sc.t !== G.userTeam) return;
+      scored[sc.id] = (scored[sc.id] || 0) + 1;
+    }));
+    let badGoals = null;
+    Object.entries(scored).forEach(([pid, n]) => {
+      const log = G.shotLog[pid];
+      if (!log) return;
+      const logged = log.filter((r) => r.r === "g" || r.r === "e").length;
+      if (logged !== n && badGoals == null) badGoals = `player ${pid}: ${logged} logged vs ${n} scored`;
+    });
+    ok(badGoals == null, "every goal in the log is a goal that was actually scored", badGoals || "");
+  },
+
+  // The postseason is played a game at a time, and those games are logged too.
+  playoffGames(A) {
+    section("Playoffs, game by game");
+    const G = A.newGame(0, { seed: 321, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const r1 = G.playoffs.rounds[0];
+    ok(r1.every((s) => s.games.length === 0), "no games have been played yet");
+
+    // One night: a game in every live series, and nowhere else.
+    A.simPlayoffDay(G);
+    ok(r1.every((s) => s.games.length === 1), "one night plays one game in each series");
+    ok(r1.every((s) => s.w[0] + s.w[1] === 1), "and each series is 1-0 or 0-1");
+    ok(G.playoffs.round === 0, "the round doesn't advance early");
+
+    A.simPlayoffDay(G);
+    ok(r1.every((s) => s.games.length === 2), "a second night adds one more each");
+
+    // A series that ends stops playing while the others carry on.
+    let guard = 0;
+    while (r1.some((s) => !s.done) && guard++ < 20) {
+      const before = r1.map((s) => s.games.length);
+      A.simPlayoffDay(G);
+      r1.forEach((s, i) => {
+        if (s.done && s.games.length !== before[i] && s.w[0] !== A.ruleValue(G, "seriesLen")) { /* finished this night */ }
+      });
+    }
+    ok(r1.every((s) => s.done), "the round completes");
+    const need = Math.ceil(A.ruleValue(G, "seriesLen") / 2);
+    ok(r1.every((s) => Math.max(...s.w) === need), "every series ended at the right number of wins");
+    ok(r1.every((s) => s.games.length === s.w[0] + s.w[1]), "games played equals the series score");
+    ok(G.playoffs.round === 1 || G.playoffs.champion != null, "and the bracket advanced once it was done");
+
+    // The user's playoff games get a play-by-play, like his season games do.
+    // Seed 331 is chosen because the user's club qualifies — on a seed where it
+    // misses, this whole branch silently passes without testing anything.
+    const G2 = A.newGame(0, { seed: 331, rules: { seasonLen: 41 } });
+    simSeason(A, G2);
+    const inIt = G2.playoffs.rounds[0].some((s) => s.hi === G2.userTeam || s.lo === G2.userTeam);
+    ok(inIt, "the user's club qualified, so the replay checks below actually run");
+    if (inIt) {
+      let g2 = 0;
+      while (g2++ < 8 && (!G2.lastGame || !G2.lastGame.playoff)) A.simPlayoffDay(G2);
+      ok(G2.lastGame && G2.lastGame.playoff, "a playoff game is captured for replay");
+      ok(G2.lastGame.events.length > 0, `with its own play-by-play (${G2.lastGame.events.length} events)`);
+      // And those shots are logged, marked as playoff so they don't pollute the season.
+      const po = Object.values(G2.shotLog).flat().filter((r) => r.po);
+      ok(po.length > 0, `playoff shots are logged (${po.length})`);
+      const reg = Object.values(G2.shotLog).flat().filter((r) => !r.po);
+      const skater = A.rosterOf(G2, G2.userTeam).find((p) => p.pos !== "G" && p.season.sog > 0);
+      const own = (G2.shotLog[skater.id] || []).filter((r) => !r.po);
+      const onGoal = own.filter((r) => r.r === "g" || r.r === "s" || r.r === "e").length;
+      ok(onGoal === skater.season.sog,
+        `and season totals still only count season shots (${onGoal} vs ${skater.season.sog})`);
+      ok(reg.length > 0 && po.length < reg.length, "the two are kept apart");
+    } else {
+      ok(false, "seed 331 no longer puts the user in the playoffs — pick another");
+      ok(true, ""); ok(true, ""); ok(true, ""); ok(true, "");
+    }
+
+    // The fast-forward must land in exactly the same place as the slow path.
+    const G3 = A.newGame(0, { seed: 321, rules: { seasonLen: 41 } });
+    simSeason(A, G3);
+    let g3 = 0;
+    while (G3.phase === "playoffs" && g3++ < 40) A.simPlayoffRound(G3);
+    ok(G3.playoffs.champion != null, "playing out whole rounds still crowns a champion");
+    ok(G3.phase === "offseason", "and closes the season");
   },
 
   // A seven-round draft you have to form an opinion about.

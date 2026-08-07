@@ -1470,8 +1470,15 @@ function simSeriesGame(G, s) {
   // 2-2-1-1-1 home ice.
   const homeIsHi = [0, 1, 4, 6].includes(gameNo);
   const home = homeIsHi ? s.hi : s.lo, away = homeIsHi ? s.lo : s.hi;
-  const res = simGame(G, home, away, { playoff: true });
+  // The user's playoff games get the same play-by-play and shot log his regular
+  // season games get — a spring run is the part you most want to look back at.
+  const mine = home === G.userTeam || away === G.userTeam;
+  const res = simGame(G, home, away, { playoff: true, events: mine, log: mine });
   applyGame(G, res, { playoff: true });
+  if (mine) {
+    G.lastGame = { day: G.day, home, away, hg: res.hg, ag: res.ag,
+      ot: res.ot, so: res.so, playoff: true, events: res.events || [], boxes: res.boxes };
+  }
   const hiWon = (res.hg > res.ag) === homeIsHi;
   s.w[hiWon ? 0 : 1]++;
   s.games.push({ home, away, hg: res.hg, ag: res.ag, ot: res.ot });
@@ -1486,12 +1493,32 @@ function simSeriesGame(G, s) {
   return s;
 }
 
-function simPlayoffRound(G) {
-  if (!G.playoffs) return G;
+/* One night of playoff hockey: a game in every series that's still alive. This
+   is the default way to move through the postseason — a seven-game series is
+   worth watching game by game, not resolving in a single click. `G.day` ticks
+   so shot-log records still carry a day that increases. */
+function simPlayoffDay(G) {
+  if (!G.playoffs || G.playoffs.champion != null) return G;
+  const cur = G.playoffs.rounds[G.playoffs.round];
+  const live = cur.filter((s) => !s.done);
+  if (!live.length) return advancePlayoffRound(G);
+  live.forEach((s) => simSeriesGame(G, s));
+  G.day++;
+  playersOf(G).forEach((p) => {
+    if (p.inj > 0) { p.inj--; if (p.inj === 0) { p.injDesc = ""; if (p.teamId != null) G.teams[p.teamId].lines = null; } }
+    p.fatigue = clamp(p.fatigue - (p.pos === "G" ? 4.2 : 0.8), 0, 100);
+  });
+  if (cur.every((s) => s.done)) advancePlayoffRound(G);
+  return G;
+}
+
+/* Every series in the round is finished — crown a champion or build the next
+   bracket. Shared by the game-by-game path and the whole-round fast-forward, so
+   the two can never disagree about how the postseason advances. */
+function advancePlayoffRound(G) {
   const P = G.playoffs;
   const cur = P.rounds[P.round];
-  let guard = 0;
-  while (cur.some((s) => !s.done) && guard++ < 60) cur.forEach((s) => simSeriesGame(G, s));
+  if (cur.some((s) => !s.done)) return G;
   const winners = cur.map((s) => s.winner);
   if (winners.length === 1) {
     P.champion = winners[0];
@@ -1526,6 +1553,15 @@ function simPlayoffRound(G) {
   }
   P.rounds.push(next);
   P.round++;
+  return G;
+}
+
+// Fast-forward: play the current round out in one go.
+function simPlayoffRound(G) {
+  if (!G.playoffs || G.playoffs.champion != null) return G;
+  const cur = G.playoffs.rounds[G.playoffs.round];
+  let guard = 0;
+  while (cur.some((s) => !s.done) && guard++ < 60) simPlayoffDay(G);
   return G;
 }
 
@@ -3199,7 +3235,7 @@ function PlayerModal({ G, pid, onClose, onGo }) {
             <div className="pt-2">
               <NetGrid net={(p.season && p.season.net) || blankNet(isG ? "G" : "S")} mode={isG ? "G" : "S"}
                 hole={isG ? goalieHole(p) : null} view={netView} seed={p.id}
-                shots={(G.shotLog || {})[p.id]} teams={G.teams}
+                shots={((G.shotLog || {})[p.id] || []).filter((r) => !r.po)} teams={G.teams}
                 extra={isG ? null : { miss: p.season.miss, blkd: p.season.blkd }} />
             </div>
           </Section>
@@ -4487,11 +4523,18 @@ function PlayoffsTab({ G, setG, openPlayer }) {
         </Section>
       ))}
       {P.champion == null ? (
-        <button className={btnPri} onClick={() => {
-          const g2 = migrate(JSON.parse(JSON.stringify(G)));
-          simPlayoffRound(g2);
-          setG(g2);
-        }}>Play next round</button>
+        <div className="flex gap-2">
+          <button className={btnPri} onClick={() => {
+            const g2 = migrate(JSON.parse(JSON.stringify(G)));
+            simPlayoffDay(g2);
+            setG(g2);
+          }}>Play the next game</button>
+          <button className={btnGhost} onClick={() => {
+            const g2 = migrate(JSON.parse(JSON.stringify(G)));
+            simPlayoffRound(g2);
+            setG(g2);
+          }}>Play out the round</button>
+        </div>
       ) : null}
       {open ? <SeriesPage G={G} s={open} onClose={() => setOpen(null)} openPlayer={openPlayer} /> : null}
     </div>
@@ -5089,6 +5132,11 @@ function App() {
           doOffseasonStep(g2);
           setG(g2);
           go("offseason");
+        } else if (G.phase === "playoffs") {
+          const g2 = migrate(JSON.parse(JSON.stringify(G)));
+          simPlayoffDay(g2);
+          setG(g2);
+          if (g2.phase === "offseason") go("offseason");
         } else advance(1);
         return;
       }
@@ -5121,7 +5169,16 @@ function App() {
                 <button className={btnPri} onClick={() => advance(G.schedule.length)} disabled={busy}>Sim season</button>
               </>
             ) : null}
-            {G.phase === "playoffs" ? <button className={btnPri} onClick={() => advance(1)} disabled={busy}>Play round</button> : null}
+            {G.phase === "playoffs" ? (
+              <>
+                <button className={btnPri} disabled={busy} title="n" onClick={() => {
+                  const g2 = migrate(JSON.parse(JSON.stringify(G)));
+                  simPlayoffDay(g2); setG(g2);
+                  if (g2.phase === "offseason") go("offseason");
+                }}>Play game</button>
+                <button className={btnGhost} onClick={() => advance(1)} disabled={busy}>Play round</button>
+              </>
+            ) : null}
             {G.phase === "offseason" && offseasonAction(G) ? (
               <button className={btnPri} disabled={busy} title="n" onClick={() => {
                 const g2 = migrate(JSON.parse(JSON.stringify(G)));

@@ -226,9 +226,25 @@ the outcome are real; the clock time within the game is generated.
 - **Prospects** (`isProspect`, `prospectReady`, `simFarmDay`): farm players accumulate a
   `farmSeason` line and develop faster than they would on an NHL bench.
 
+## Continuity of the shot log
+The dots on a shot chart **are the shots from the games that were played** — recorded inside
+`resolveShots` as each game runs, with that game's day and opponent, not generated afterwards to
+match a total. The `continuity` check pins this: every logged shot must fall on a day the club
+actually played, must name the opponent it was actually against, must add up to the season totals,
+must grow incrementally as days are simmed rather than in one lump, and every logged goal must be
+a goal that appears in `G.results`. If a change ever makes the chart cosmetic, that check fails.
+Playoff records are logged too and stamped `po: true`; the player page filters them out so a
+season chart shows season shots. Don't mix them.
+
 ## Season lifecycle
-`simDay` → … → `endRegularSeason` (awards + bracket) → `simPlayoffRound` × N → `finishSeason` →
+`simDay` → … → `endRegularSeason` (awards + bracket) → `simPlayoffDay` × N → `finishSeason` →
 offseason UI → `startNextSeason`.
+
+**The postseason is played a game at a time.** `simPlayoffDay` plays one game in every series
+that's still alive and ticks `G.day`, so a seven-game series is lived through rather than resolved
+in a click; `simPlayoffRound` is a fast-forward that loops it. Both share `advancePlayoffRound`,
+so the two paths can't disagree about how the bracket moves. The user's playoff games get the same
+`events` and `log` treatment his regular-season games get.
 
 **Ageing, progression, retirement and contract expiry all happen in `finishSeason`, not at the
 rollover.** That is deliberate: it means the offseason screens show next year's ratings and a
