@@ -8,6 +8,19 @@ defence pairs and your goaltending, work the hard cap, sim the season, and chase
 picks one item off `ROADMAP.md`, builds it, and commits to `main` — but only if
 `tools/simtest.js` still passes. See "The daily autopilot" at the bottom.
 
+## On a phone
+It's a PWA: `manifest.json`, icons, `sw.js` and the iOS meta tags are all in place, so Add to
+Home Screen gives a standalone app. Two things to know:
+- **`sw.js` uses paths relative to its own scope**, so the same file works at a domain root, under
+  a `/hockey-gm/` subpath, or off a LAN address. soccer-gm hardcodes `/soccer-gm/` and breaks
+  anywhere else — don't copy that.
+- **The Babel output is cached in localStorage under a hash of the app source.** Transpiling ~5,000
+  lines every load is fine on a laptop and painful on a phone (421ms → 165ms on desktop, far more
+  on device). The hash means editing the source invalidates it automatically; there is no version
+  to remember to bump. Older builds are deleted before a new one is written.
+- A service worker needs HTTPS, so offline only works from a real deployment, not from a
+  `http://192.168.x.x` LAN address.
+
 ## Run it
 - One static file: `index.html`. Serve the folder —
   `python3 -m http.server 8142 --directory ~/hockey-gm` → http://localhost:8142 — or open it

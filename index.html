@@ -2,14 +2,28 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
 <title>Pocket GM — Hockey</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<link rel="icon" href="icon-192.png" />
+<meta name="theme-color" content="#0b1220" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Hockey GM" />
 <script src="vendor/tailwind.js"></script>
 <script src="vendor/react.production.min.js"></script>
 <script src="vendor/react-dom.production.min.js"></script>
 <script src="vendor/babel.min.js"></script>
 <style>
   html, body { background:#0b1220; color:#e6edf7; -webkit-text-size-adjust:100%; }
+  /* Standalone on iOS draws under the notch and the home indicator. */
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right)
+                 env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  /* Momentum scrolling inside the wide tables, and no rubber-band on the page. */
+  .overflow-x-auto, .overflow-y-auto { -webkit-overflow-scrolling: touch; }
+  button, select { touch-action: manipulation; }
   ::-webkit-scrollbar { width:10px; height:10px; }
   ::-webkit-scrollbar-thumb { background:#1e2b45; border-radius:6px; }
   .tnum { font-variant-numeric: tabular-nums; }
@@ -5193,12 +5207,38 @@ if (typeof document !== "undefined" && document.getElementById && document.getEl
 </script>
 
 <script>
-  // The classic runtime is required — the default preset emits an ESM import
-  // that breaks inside a non-module inline script.
+  /* The classic runtime is required — the default preset emits an ESM import
+   * that breaks inside a non-module inline script.
+   *
+   * Transpiling ~5,000 lines on every load is fine on a laptop and painful on a
+   * phone, so the compiled output is cached in localStorage under a hash of the
+   * source. Change the source and the hash changes, so it recompiles by itself —
+   * there's nothing to remember to bump.
+   */
   (function () {
     var src = document.getElementById("app-src").textContent;
-    var out = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
+    var h = 5381;
+    for (var i = 0; i < src.length; i++) h = ((h * 33) ^ src.charCodeAt(i)) >>> 0;
+    var key = "pgmh:build:" + h.toString(36) + ":" + src.length;
+    var out = null;
+    try { out = localStorage.getItem(key); } catch (e) {}
+    if (!out) {
+      out = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
+      try {
+        // Drop any older build before writing, so this never accumulates.
+        for (var k = localStorage.length - 1; k >= 0; k--) {
+          var name = localStorage.key(k);
+          if (name && name.indexOf("pgmh:build:") === 0 && name !== key) localStorage.removeItem(name);
+        }
+        localStorage.setItem(key, out);
+      } catch (e) { /* quota — recompiling each load still works */ }
+    }
     (0, eval)(out);
+    if ("serviceWorker" in navigator && location.protocol !== "file:") {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register("sw.js").catch(function () {});
+      });
+    }
   })();
 </script>
 </body>
