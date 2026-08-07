@@ -94,3 +94,12 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   the stats table marks traded players with a `*` and the full path on hover. At the rollover a
   traded year is archived as one career row per club. Spell lines carry no zone or net buckets, so
   the save cost is small. Harness grew from 280 to 294 assertions.
+- 2026-08-05 · S · Made every club's shot map its own. `pickZone` used fixed league-wide
+  probabilities, so the rush/cycle/point mix was identical for all 32 teams and a club's "what we
+  shoot" and "what we concede" maps differed only in volume. The zone mix is now decided by the two
+  units on the ice: forward speed generates rush, a shooting defenceman drags play to the point,
+  and a quick sound defensive unit denies the middle. Rush share now spans 5 points across the
+  league on offence and 9 on defence, with the biggest club gap between its own two maps at 7
+  points. Pinned with correlation checks — fast forwards → rush (r=0.79), shooting D → point
+  (r=0.68), sound defence → less rush conceded (r=-0.85) — so it can't be flattened back out.
+  League rates unchanged. Harness grew from 294 to 302 assertions.

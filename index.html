@@ -703,10 +703,36 @@ const SHOT_ZONES = [
   { key: "cycle", p: 0.52, save:  0.000, dBias: 0.50 },
   { key: "point", p: 0.26, save:  0.055, dBias: 3.40 },
 ];
-function pickZone(G) {
-  const x = rnd(G);
-  let acc = 0;
-  for (const z of SHOT_ZONES) { acc += z.p; if (x <= acc) return z; }
+/* Which zone a chance comes from is NOT a league constant — it's an argument
+   between the two units on the ice, and it's the reason one club's shot map
+   should look different from another's:
+     - speed up front turns pucks into rush chances;
+     - a defenceman who can shoot drags the play out to the point;
+     - a quick, sound defensive unit denies the middle, which pushes the other
+       side out to the point and takes the rush away.
+   Without this every team's map was the same shape and only the volume moved. */
+function pickZone(G, offIds, defIds) {
+  const w = SHOT_ZONES.map((z) => z.p);
+  if (offIds && defIds) {
+    const off = offIds.map((id) => G.players[id]).filter(Boolean);
+    const def = defIds.map((id) => G.players[id]).filter(Boolean);
+    if (off.length && def.length) {
+      const avg = (arr, k) => arr.reduce((s, p) => s + p.r[k], 0) / arr.length;
+      const fwd = off.filter((p) => p.pos !== "D");
+      const dmen = off.filter((p) => p.pos === "D");
+      const speed = fwd.length ? avg(fwd, "spd") : 55;
+      const dShot = dmen.length ? avg(dmen, "sht") : 45;
+      const oppDfn = avg(def, "dfn");
+      const oppSpd = avg(def, "spd");
+      // rush: our legs against theirs, and against a unit that's hard to beat
+      w[0] *= clamp(1 + (speed - 55) * 0.013 - (oppSpd - 55) * 0.009 - (oppDfn - 55) * 0.010, 0.45, 1.9);
+      // point: our defencemen's shot, and a defence that forces us outside
+      w[2] *= clamp(1 + (dShot - 45) * 0.014 + (oppDfn - 55) * 0.012, 0.45, 1.9);
+    }
+  }
+  const tot = w.reduce((a, b) => a + b, 0);
+  let x = rnd(G) * tot;
+  for (let i = 0; i < SHOT_ZONES.length; i++) { x -= w[i]; if (x <= 0) return SHOT_ZONES[i]; }
   return SHOT_ZONES[1];
 }
 
@@ -769,7 +795,7 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
   const attempts = Math.round(shots / pOnGoal);
 
   for (let s = 0; s < attempts; s++) {
-    const zone = pickZone(G);
+    const zone = pickZone(G, offIds, defIds);
     const shooter = shooterFrom(G, offIds, zone.dBias);
     if (!shooter || !sBox.players[shooter.id]) continue;
     const sh = sBox.players[shooter.id];

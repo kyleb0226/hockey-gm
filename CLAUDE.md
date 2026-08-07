@@ -64,10 +64,17 @@ which is what makes line construction and last change matter.
   both reads the current streak and advances it. It feeds a small `lineOff` multiplier
   (`LINE_CHEM_PER_GAME`), so shuffling a line every week costs real offence. Only forwards are
   tracked today — defence pairs get no equivalent bonus.
-- **Shot zones (`SHOT_ZONES`):** every shot picks a zone first — rush, cycle or point — and the
-  zone decides both *who* shoots (`dBias` makes the point a defenceman's shot) and *how
+- **Shot zones (`SHOT_ZONES`, `pickZone`):** every shot picks a zone first — rush, cycle or point
+  — and the zone decides both *who* shoots (`dBias` makes the point a defenceman's shot) and *how
   stoppable* it is (`save` offsets the goalie's percentage). Conversion must stay ordered
   rush > cycle > point; the harness checks it.
+  **The zone mix is NOT a league constant — it's an argument between the two units on the ice.**
+  Speed up front turns pucks into rush chances, a defenceman who can shoot drags play out to the
+  point, and a quick sound defensive unit denies the middle (less rush, more point against). It
+  used to be fixed probabilities, which meant every club's shot map was the same shape and only
+  the volume moved — a team's "for" and "against" maps looked identical. The harness now pins the
+  spread across clubs AND the causal correlations (fast forwards → rush r>0.3, shooting D → point
+  r>0.3, sound defence → less rush conceded r<-0.3), so flattening this back out will fail.
 - **Attempts vs shots on goal. One attempt, one outcome.** `resolveShots` loops over ATTEMPTS, not
   over shots on goal: each attempt independently either hits a shin pad, sails wide, or reaches the
   goalie (~24% / 21% / 55%). `shots` is the number expected to reach the net, so the loop runs

@@ -996,6 +996,65 @@ const CHECKS = {
     ok(G.teams.every((t) => t.gp === 41), "the ninth season plays to completion");
   },
 
+  // A club's shot map has to be ITS shot map. Zone shares used to be league
+  // constants, so every team's chart was the same shape and only the volume
+  // moved — for and against looked identical.
+  teamProfiles(A) {
+    section("Team shot profiles");
+    const G = A.newGame(0, { seed: 501, rules: { seasonLen: 82 } });
+    simSeason(A, G);
+    const Z = A.ZONE_KEYS;
+    const prof = G.teams.map((t) => {
+      const f = { rush: 0, cycle: 0, point: 0 }, a = { rush: 0, cycle: 0, point: 0 };
+      A.rosterOf(G, t.id, true).forEach((p) => {
+        if (!p.season.z) return;
+        if (p.pos === "G") Z.forEach((k) => { a[k] += p.season.z[k].sa; });
+        else Z.forEach((k) => { f[k] += p.season.z[k].s; });
+      });
+      const tf = Z.reduce((s, k) => s + f[k], 0), ta = Z.reduce((s, k) => s + a[k], 0);
+      const r = A.rosterOf(G, t.id);
+      const fwd = r.filter((p) => p.pos !== "D" && p.pos !== "G");
+      const dmen = r.filter((p) => p.pos === "D");
+      return {
+        t, tf, ta,
+        fRush: tf ? f.rush / tf : 0, fPoint: tf ? f.point / tf : 0,
+        aRush: ta ? a.rush / ta : 0, aPoint: ta ? a.point / ta : 0,
+        speed: fwd.reduce((s, p) => s + p.r.spd, 0) / Math.max(1, fwd.length),
+        dShot: dmen.reduce((s, p) => s + p.r.sht, 0) / Math.max(1, dmen.length),
+        dfn: dmen.reduce((s, p) => s + p.r.dfn, 0) / Math.max(1, dmen.length),
+      };
+    }).filter((x) => x.tf > 0 && x.ta > 0);
+    ok(prof.length === 32, "every club has a profile both ways");
+
+    const spread = (xs) => Math.max(...xs) - Math.min(...xs);
+    const fRushSpread = spread(prof.map((p) => p.fRush));
+    ok(fRushSpread > 0.025, `clubs differ in how much rush they generate (${(fRushSpread * 100).toFixed(1)} points apart)`);
+    const fPointSpread = spread(prof.map((p) => p.fPoint));
+    ok(fPointSpread > 0.03, `and in how much they shoot from the point (${(fPointSpread * 100).toFixed(1)} points)`);
+    const aRushSpread = spread(prof.map((p) => p.aRush));
+    ok(aRushSpread > 0.04, `and in how much rush they concede (${(aRushSpread * 100).toFixed(1)} points)`);
+
+    // The two maps must not be the same map. Some clubs should be lopsided.
+    const gaps = prof.map((p) => Math.abs(p.fRush - p.aRush));
+    ok(Math.max(...gaps) > 0.05,
+      `a club's own map differs from what it concedes (biggest gap ${(Math.max(...gaps) * 100).toFixed(1)} points)`);
+
+    // And the differences have to come from the roster, not from noise.
+    const corr = (xs, ys) => {
+      const mx = xs.reduce((a, b) => a + b, 0) / xs.length, my = ys.reduce((a, b) => a + b, 0) / ys.length;
+      const num = xs.reduce((s, x, i) => s + (x - mx) * (ys[i] - my), 0);
+      const dx = Math.sqrt(xs.reduce((s, x) => s + (x - mx) ** 2, 0));
+      const dy = Math.sqrt(ys.reduce((s, y) => s + (y - my) ** 2, 0));
+      return dx && dy ? num / (dx * dy) : 0;
+    };
+    const rSpeed = corr(prof.map((p) => p.speed), prof.map((p) => p.fRush));
+    ok(rSpeed > 0.3, `fast forwards generate more rush chances (r=${rSpeed.toFixed(2)})`);
+    const rShot = corr(prof.map((p) => p.dShot), prof.map((p) => p.fPoint));
+    ok(rShot > 0.3, `shooting defencemen produce more point shots (r=${rShot.toFixed(2)})`);
+    const rDfn = corr(prof.map((p) => p.dfn), prof.map((p) => p.aRush));
+    ok(rDfn < -0.3, `a sound defence concedes less rush (r=${rDfn.toFixed(2)})`);
+  },
+
   // A season split by club, so a traded player's year isn't all credited to
   // whoever happened to have him at the end.
   stints(A) {
