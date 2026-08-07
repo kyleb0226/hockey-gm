@@ -322,6 +322,50 @@ const gaa = (s) => (s.toi ? (s.ga * 60) / s.toi : 0);
 const fullName = (p) => `${p.fn} ${p.ln}`;
 const shortName = (p) => `${p.fn[0]}. ${p.ln}`;
 
+/* ------------------------------ point shares -------------------------------
+ * Hockey's answer to Win Shares, and the closest thing the sport has to WAR
+ * that can be computed from a box score: how many STANDINGS POINTS a player was
+ * worth. Split into offensive, defensive and goaltending, so a shutdown
+ * defenceman and a sniper are on the same scale.
+ *
+ * This is a Point Shares-STYLE estimate, not Hockey Reference's exact formula —
+ * that needs league constants this engine doesn't produce. The constants below
+ * are calibrated so the league's point shares sum to roughly the standings
+ * points actually handed out, which is the property that makes the number mean
+ * something. The harness pins that sum.
+ * ------------------------------------------------------------------------- */
+
+const GOALS_PER_POINT = 4.7;     // solved so the league sums to its standings points
+const REPL_SV = 0.895;           // a replacement goalie's save percentage
+const REPL_GC_PER_MIN = 0.0072;  // goals created a minute by a replacement skater
+const DEF_POINTS_PER_MIN = 0.00135;
+
+function pointShares(G, p, line) {
+  const s = line || p.season;
+  const out = { ops: 0, dps: 0, gps: 0, ps: 0 };
+  if (!s || !s.gp) return out;
+
+  if (p.pos === "G") {
+    // Every save beyond what a replacement would have made is a goal prevented.
+    const expected = (s.sa || 0) * REPL_SV;
+    out.gps = ((s.sv || 0) - expected) / GOALS_PER_POINT;
+    out.ps = out.gps;
+    return out;
+  }
+  // Offence: goals created — his own plus a share of the ones he set up —
+  // measured against what a replacement would manage in the same ice time.
+  const created = (s.g || 0) + 0.5 * (s.a || 0);
+  out.ops = ((created - REPL_GC_PER_MIN * (s.toi || 0)) / GOALS_PER_POINT);
+  // Defence: ice time is the bulk of it, nudged by whether play went the right
+  // way while he was out there and by shots he put his body in front of.
+  const posW = p.pos === "D" ? 1.45 : 0.75;
+  const swing = (s.pm || 0) * 0.06 + (s.blk || 0) * 0.012;
+  out.dps = ((s.toi || 0) * DEF_POINTS_PER_MIN * posW) + swing / GOALS_PER_POINT;
+  out.ps = out.ops + out.dps;
+  return out;
+}
+const psOf = (G, p, line) => pointShares(G, p, line).ps;
+
 /* --------------------------- contracts & the cap --------------------------- */
 
 function marketValue(G, p) {
@@ -659,6 +703,8 @@ function migrate(G) {
     if (!p.season) p.season = blankStats(p.pos);
     if (!p.career) p.career = [];
     if (!p.trophies) p.trophies = [];
+    if (!p.rings) p.rings = [];
+    if (!p.allStars) p.allStars = [];
     if (p.fatigue == null) p.fatigue = 0;
     if (!p.shoots) p.shoots = (p.id % 100) < 62 ? "L" : "R";
     const kind = p.pos === "G" ? "G" : "S";
@@ -1435,6 +1481,11 @@ function simPlayoffRound(G) {
     P.champion = winners[0];
     const t = G.teams[P.champion];
     t.cupWins++;
+    // Rings go on the players, not just the club — a career is measured in them.
+    rosterOf(G, P.champion).forEach((p) => {
+      p.rings = p.rings || [];
+      p.rings.push({ year: G.year, t: P.champion });
+    });
     news(G, `${t.city} ${t.name} win the Cup.`, "good");
     finishSeason(G);
     return G;
@@ -1558,6 +1609,12 @@ function runAllStar(G) {
     eastScore: Math.max(0, eastScore), westScore: Math.max(0, westScore),
     mvp: mvp ? mvp.id : null,
   };
+  rosters.east.concat(rosters.west).forEach((id) => {
+    const p = G.players[id];
+    if (!p) return;
+    p.allStars = p.allStars || [];
+    if (!p.allStars.includes(G.year)) p.allStars.push(G.year);
+  });
   const mine = rosters.east.concat(rosters.west).filter((id) => G.players[id] && G.players[id].teamId === G.userTeam);
   if (mine.length) news(G, `All-Star selections: ${mine.map((id) => fullName(G.players[id])).join(", ")}.`, "good");
   return G.allStar;
@@ -1633,6 +1690,16 @@ function finishSeason(G) {
     p.stints = null;
     p.stats = p.season;
     p.season = blankStats(p.pos);
+    // A playoff run used to be thrown away at the rollover, which meant a
+    // twenty-year career had no postseason record at all. Keep the running
+    // total and a count of the springs he played.
+    if (p.po && p.po.gp) {
+      if (!p.careerPO) { p.careerPO = blankStats(p.pos); delete p.careerPO.z; delete p.careerPO.net; }
+      Object.keys(p.careerPO).forEach((k) => {
+        if (typeof p.careerPO[k] === "number" && typeof p.po[k] === "number") p.careerPO[k] += p.po[k];
+      });
+      p.poRuns = (p.poRuns || 0) + 1;
+    }
     p.po = null;
     p.rookie = false;
     p.age++;
@@ -2261,7 +2328,8 @@ function pruneSave(G) {
     p.season = blankStats(p.pos); p.stats = blankStats(p.pos);
     p.po = null; p.farmSeason = null; p.farmCareer = null; p.marks = null;
     // Anyone with no trophies and no honours is not history, just clutter.
-    const honoured = G.teams.some((t) => (t.honours || []).some((h) => h.pid === p.id));
+    const honoured = G.teams.some((t) => (t.honours || []).some((h) => h.pid === p.id))
+      || (p.rings || []).length > 0;
     if (!honoured && !(p.trophies || []).length) keep.push(p.id);
   });
   // Keep the most recent departures around so history pages can still name them.
@@ -2577,6 +2645,22 @@ function scatter(n, x0, y0, w, h, seed, spill, bounds) {
   for (let i = 0; i < n; i++) out.push(spotAt(x0, y0, w, h, seed + i, spill, bounds));
   return out;
 }
+/* Placement inside a CELL tapers toward its edges and bleeds into its
+   neighbours. Spreading dots uniformly across the cell rectangle makes the
+   nine buckets legible as nine boxes — where a dense cell abuts a sparse one
+   the density jumps at the line, which is most obvious around centre mass. A
+   sum of two uniforms is a cheap triangular distribution: peaked in the middle
+   of the cell, thinning to nothing at the edges, so adjacent cells blend and
+   the whole thing reads as one cloud. The cell is still where the shot was
+   counted; it just isn't drawn as a wall. */
+function spotSoft(x0, y0, w, h, seed, bounds) {
+  const tri = (a, b) => (jitter(a) + jitter(b)) / 2;
+  const s = seed * 4;
+  let x = x0 + w / 2 + (tri(s, s + 1) - 0.5) * w * 1.7;
+  let y = y0 + h / 2 + (tri(s + 2, s + 3) - 0.5) * h * 1.7;
+  if (bounds) { x = clamp(x, bounds[0], bounds[2]); y = clamp(y, bounds[1], bounds[3]); }
+  return [x, y];
+}
 /* A dot's position belongs to the SHOT, not to its index in a list. Seeding off
    the record's game day and clock time means two charts can never line up: with
    an index seed, dot #1 of a club's own map and dot #1 of the map it concedes
@@ -2680,8 +2764,8 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
           const nG = goals, nS = shots - goals;
           const count = recs ? recs.length : nG + nS;
           const pts = !dots ? []
-            : recs ? recs.map((r, k) => spotAt(x0, y0, w, h, sd + shotSeed(r, k), 5, NET_BOUNDS))
-            : scatter(count, x0, y0, w, h, sd + i * 131, 5, NET_BOUNDS);
+            : recs ? recs.map((r, k) => spotSoft(x0, y0, w, h, sd + shotSeed(r, k), NET_BOUNDS))
+            : Array.from({ length: count }, (_, k) => spotSoft(x0, y0, w, h, sd + i * 131 + k, NET_BOUNDS));
           return (
             <g key={c.key}>
               <rect x={x0} y={y0} width={w} height={h}
@@ -2843,6 +2927,71 @@ function FormBars({ log, mode }) {
   );
 }
 
+/* --------------------------------- honours ---------------------------------
+ * Rings first, because that's how a career is actually measured, then the
+ * individual awards grouped rather than listed one line per year — three MVPs
+ * should read as "×3", not as three separate rows you have to count.
+ * ------------------------------------------------------------------------- */
+
+function TrophyCase({ G, p }) {
+  const rings = p.rings || [];
+  const stars = p.allStars || [];
+  const byAward = {};
+  (p.trophies || []).forEach((t) => {
+    (byAward[t.award] = byAward[t.award] || []).push(t.year);
+  });
+  const awards = Object.entries(byAward).sort((a, b) => b[1].length - a[1].length);
+  if (!rings.length && !stars.length && !awards.length) return null;
+
+  return (
+    <Section title="Trophy case" className="p-3">
+      <div className="space-y-3 pt-1">
+        {rings.length ? (
+          <div>
+            <div className="flex items-baseline gap-2">
+              <span className="text-2xl font-bold text-amber-300 tnum">{rings.length}</span>
+              <span className="text-sm text-slate-300">
+                Cup{rings.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1.5 mt-1.5">
+              {rings.map((r, i) => (
+                <span key={i}
+                  title={`${r.year} · ${G.teams[r.t] ? G.teams[r.t].city + " " + G.teams[r.t].name : ""}`}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs
+                    bg-amber-500/15 border border-amber-500/40 text-amber-200">
+                  <span className="w-2 h-2 rounded-full border-2 border-amber-300 inline-block" />
+                  {r.year}{G.teams[r.t] ? ` ${G.teams[r.t].abbr}` : ""}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {awards.length ? (
+          <div className="space-y-1">
+            {awards.map(([k, years]) => (
+              <div key={k} className="flex items-baseline gap-2 text-sm">
+                <span className="text-slate-200">{AWARD_LABEL[k] || k}</span>
+                {years.length > 1 ? <span className="text-sky-300 font-semibold">×{years.length}</span> : null}
+                <span className="text-slate-500 text-xs">{years.slice().sort().join(", ")}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {stars.length ? (
+          <div className="flex items-baseline gap-2 text-sm">
+            <span className="text-slate-200">All-Star</span>
+            {stars.length > 1 ? <span className="text-sky-300 font-semibold">×{stars.length}</span> : null}
+            <span className="text-slate-500 text-xs">{stars.slice().sort().join(", ")}</span>
+          </div>
+        ) : null}
+      </div>
+    </Section>
+  );
+}
+
 /* ------------------------------- player page ------------------------------ */
 
 function RatingBar({ label, v }) {
@@ -2890,15 +3039,7 @@ function PlayerModal({ G, pid, onClose, onGo }) {
               {keys.map((k) => p.r[k] != null ? <RatingBar key={k} label={k} v={p.r[k]} /> : null)}
             </div>
           </Section>
-          {p.trophies && p.trophies.length ? (
-            <Section title="Honours" className="p-3">
-              <div className="text-sm text-slate-300 space-y-0.5 pt-1">
-                {p.trophies.slice(-8).reverse().map((tr, i) => (
-                  <div key={i}>{tr.year} — {AWARD_LABEL[tr.award] || tr.award}</div>
-                ))}
-              </div>
-            </Section>
-          ) : null}
+          <TrophyCase G={G} p={p} />
         </div>
 
         <div className="space-y-3">
@@ -2960,6 +3101,11 @@ function PlayerModal({ G, pid, onClose, onGo }) {
                 <div><span className="text-slate-400">SV% </span>{(svPct(p.season) * 100).toFixed(1)}</div>
                 <div><span className="text-slate-400">GAA </span>{gaa(p.season).toFixed(2)}</div>
                 <div><span className="text-slate-400">Shootout </span>{p.season.sosv}/{p.season.sosa}</div>
+                <div className="col-span-3 pt-1 border-t border-[#1e2b45] mt-1">
+                  <span className="text-slate-400">Point shares </span>
+                  <span className="font-semibold text-sky-300">{pointShares(G, p).ps.toFixed(1)}</span>
+                  <span className="text-slate-500 text-xs"> — standings points he was worth</span>
+                </div>
               </div>
             ) : (
               <div className="grid grid-cols-3 gap-2 text-sm pt-1">
@@ -2975,6 +3121,17 @@ function PlayerModal({ G, pid, onClose, onGo }) {
                 <div><span className="text-slate-400">PPG </span>{p.season.ppg}</div>
                 <div><span className="text-slate-400">EN </span>{p.season.eng}</div>
                 <div><span className="text-slate-400">Fights </span>{p.season.fights}</div>
+                <div><span className="text-slate-400">SH% </span>
+                  {p.season.sog ? (p.season.g / p.season.sog * 100).toFixed(1) : "—"}</div>
+                <div><span className="text-slate-400">TOI/g </span>
+                  {p.season.gp ? (p.season.toi / p.season.gp).toFixed(1) : "—"}</div>
+                <div className="col-span-3 pt-1 border-t border-[#1e2b45] mt-1">
+                  <span className="text-slate-400">Point shares </span>
+                  <span className="font-semibold text-sky-300">{pointShares(G, p).ps.toFixed(1)}</span>
+                  <span className="text-slate-500 text-xs">
+                    {" "}({pointShares(G, p).ops.toFixed(1)} off / {pointShares(G, p).dps.toFixed(1)} def)
+                  </span>
+                </div>
               </div>
             )}
           </Section>
@@ -3038,10 +3195,19 @@ function PlayerModal({ G, pid, onClose, onGo }) {
                   { key: "p", label: "P", get: (r) => (r.g || 0) + (r.a || 0) },
                   { key: "pim", label: "PIM", get: (r) => r.pim || 0 },
                 ]} />
-              <div className="px-3 py-2 text-xs text-slate-400 border-t border-[#1e2b45] tnum">
-                Career: {totals.gp || 0} GP
-                {isG ? ` · ${totals.w || 0}W · ${totals.so || 0} SO`
-                     : ` · ${totals.g || 0}G ${totals.a || 0}A · ${(totals.g || 0) + (totals.a || 0)} P`}
+              <div className="px-3 py-2 text-xs border-t border-[#1e2b45] tnum space-y-0.5">
+                <div className="text-slate-400">
+                  Career: {totals.gp || 0} GP
+                  {isG ? ` · ${totals.w || 0}W · ${totals.so || 0} SO`
+                       : ` · ${totals.g || 0}G ${totals.a || 0}A · ${(totals.g || 0) + (totals.a || 0)} P`}
+                </div>
+                {p.careerPO && p.careerPO.gp ? (
+                  <div className="text-amber-300/80">
+                    Playoffs: {p.careerPO.gp} GP over {p.poRuns || 1} run{(p.poRuns || 1) === 1 ? "" : "s"}
+                    {isG ? ` · ${p.careerPO.w}W · ${p.careerPO.so} SO`
+                         : ` · ${p.careerPO.g}G ${p.careerPO.a}A · ${p.careerPO.g + p.careerPO.a} P`}
+                  </div>
+                ) : null}
               </div>
             </Section>
           ) : null}
@@ -3606,6 +3772,8 @@ function StatsTab({ G, openPlayer }) {
     { key: "ppg", label: "PPG", get: (p) => p.season.ppg },
     { key: "hit", label: "Hits", get: (p) => p.season.hit },
     { key: "blk", label: "Blk", get: (p) => p.season.blk },
+    { key: "ps", label: "PS", get: (p) => pointShares(G, p).ps, cls: "font-semibold text-sky-300",
+      cell: (p) => pointShares(G, p).ps.toFixed(1) },
   ];
   const goalieCols = [
     { key: "name", label: "Goalie", get: (p) => p.ln, cell: nameCell },
@@ -3621,6 +3789,8 @@ function StatsTab({ G, openPlayer }) {
     { key: "sa", label: "SA", get: (p) => p.season.sa },
     { key: "sosv", label: "SO SV", get: (p) => p.season.sosa ? p.season.sosv / p.season.sosa : 0,
       cell: (p) => (p.season.sosa ? `${p.season.sosv}/${p.season.sosa}` : "—") },
+    { key: "ps", label: "PS", get: (p) => pointShares(G, p).ps, cls: "font-semibold text-sky-300",
+      cell: (p) => pointShares(G, p).ps.toFixed(1) },
   ];
   return (
     <div className="space-y-3">

@@ -143,6 +143,18 @@ which is what makes line construction and last change matter.
   how sharply the board reacts. Pressure on the manager only — the AI never gets better
   information.
 
+## Point shares
+`pointShares(G, p, line)` is hockey's Win Shares — the closest thing the sport has to WAR that a
+box score can produce — split into `ops` / `dps` / `gps` and measured in **standings points**.
+It is a Point Shares-*style* estimate, not Hockey Reference's exact formula (that needs league
+constants this engine doesn't produce). `GOALS_PER_POINT`, `REPL_SV`, `REPL_GC_PER_MIN` and
+`DEF_POINTS_PER_MIN` were **solved numerically** so the league's shares sum to the standings
+points actually handed out (~0.95) and the leader lands in the real 15–18 range. The harness pins
+the sum, the leader, the positional composition, and the correlation with production — retune the
+constants only against those.
+Nothing is stored: it's derived from `p.season` (or any career row) on demand, so it costs no
+save size.
+
 ## Seasons split by club
 `p.stints` is a chronological list of spells — one slim stat line per club a player turned out for
 this season, in order, created lazily by `stintFor(p, teamId)` in `applyGame`. It exists because

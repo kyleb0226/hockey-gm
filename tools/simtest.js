@@ -40,7 +40,7 @@ const EXPORTS = [
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
   "offseasonStage", "offseasonAction", "doOffseasonStep", "OFFSEASON_STEPS",
-  "stintFor", "stintTotal",
+  "stintFor", "stintTotal", "spotSoft", "spotAt", "pointShares", "psOf",
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES",
 ];
@@ -1143,6 +1143,103 @@ const CHECKS = {
     ok(!!single, "a player who stayed put gets exactly one row");
     A.autoDraft(G, false); A.startNextSeason(G);
     ok(A.playersOf(G).every((p) => !p.stints || !p.stints.length), "spells are cleared at the rollover");
+  },
+
+  // Point shares: hockey's Win Shares. The number only means anything if the
+  // league's shares add up to the standings points actually handed out.
+  pointShares(A) {
+    section("Point shares");
+    const G = A.newGame(0, { seed: 606, rules: { seasonLen: 82 } });
+    simSeason(A, G);
+    const played = A.playersOf(G).filter((p) => p.teamId != null && p.season.gp);
+    const rows = played.map((p) => ({ p, ps: A.pointShares(G, p) }));
+    const total = rows.reduce((s, r) => s + r.ps.ps, 0);
+    const leaguePts = G.teams.reduce((s, t) => s + t.pts, 0);
+    const ratio = total / leaguePts;
+    ok(ratio > 0.85 && ratio < 1.15,
+      `the league's point shares match the points handed out (${total.toFixed(0)} vs ${leaguePts}, ratio ${ratio.toFixed(2)})`);
+
+    rows.sort((a, b) => b.ps.ps - a.ps.ps);
+    const leader = rows[0];
+    ok(leader.ps.ps > 11 && leader.ps.ps < 24,
+      `the leader is in the real range (${leader.ps.ps.toFixed(1)}, NHL leaders ~15-18)`);
+    ok(rows.slice(0, 15).some((r) => r.p.pos === "G"), "goalies rank near the top, as they do in reality");
+    ok(rows.slice(0, 25).some((r) => r.p.pos === "D"), "and defencemen appear too");
+    ok(rows.slice(0, 25).some((r) => r.p.pos !== "G" && r.p.pos !== "D"), "alongside forwards");
+
+    // Composition has to be the right shape.
+    const gk = rows.find((r) => r.p.pos === "G");
+    ok(gk.ps.ops === 0 && gk.ps.dps === 0 && gk.ps.gps > 0, "a goalie's shares are all goaltending");
+    const sk = rows.find((r) => r.p.pos !== "G");
+    ok(sk.ps.gps === 0, "a skater has no goaltending shares");
+    ok(sk.ps.dps > 0, "and always earns something for the minutes he plays");
+    const dmen = rows.filter((r) => r.p.pos === "D" && r.p.season.toi > 800);
+    const fwds = rows.filter((r) => r.p.pos !== "D" && r.p.pos !== "G" && r.p.season.toi > 800);
+    const dDef = dmen.reduce((s, r) => s + r.ps.dps, 0) / dmen.length;
+    const fDef = fwds.reduce((s, r) => s + r.ps.dps, 0) / fwds.length;
+    ok(dDef > fDef, `defencemen out-earn forwards defensively (${dDef.toFixed(1)} vs ${fDef.toFixed(1)})`);
+    const fOff = fwds.reduce((s, r) => s + r.ps.ops, 0) / fwds.length;
+    const dOff = dmen.reduce((s, r) => s + r.ps.ops, 0) / dmen.length;
+    ok(fOff > dOff, `and forwards out-earn defencemen offensively (${fOff.toFixed(1)} vs ${dOff.toFixed(1)})`);
+
+    // It has to track actual production.
+    const corr = (xs, ys) => {
+      const mx = xs.reduce((a, b) => a + b, 0) / xs.length, my = ys.reduce((a, b) => a + b, 0) / ys.length;
+      const n = xs.reduce((s, x, i) => s + (x - mx) * (ys[i] - my), 0);
+      const dx = Math.sqrt(xs.reduce((s, x) => s + (x - mx) ** 2, 0));
+      const dy = Math.sqrt(ys.reduce((s, y) => s + (y - my) ** 2, 0));
+      return dx && dy ? n / (dx * dy) : 0;
+    };
+    const r = corr(fwds.map((x) => A.pts(x.p.season)), fwds.map((x) => x.ps.ps));
+    ok(r > 0.85, `a forward's point shares track his production (r=${r.toFixed(2)})`);
+    // A player who never dressed earns nothing.
+    const idle = A.playersOf(G).find((p) => !p.season.gp);
+    ok(!idle || A.psOf(G, idle) === 0, "somebody who never played is worth zero");
+  },
+
+  // Rings, awards and a postseason record all have to survive the rollover.
+  accolades(A) {
+    section("Rings and accolades");
+    const G = A.newGame(0, { seed: 231, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const starred = A.playersOf(G).filter((p) => (p.allStars || []).length);
+    ok(starred.length === 20, `All-Star selections are recorded on the players (${starred.length})`);
+    ok(starred.every((p) => p.allStars[0] === G.year), "against the right year");
+
+    simPlayoffs(A, G);
+    const champ = G.playoffs.champion;
+    const ringed = A.playersOf(G).filter((p) => (p.rings || []).length);
+    ok(ringed.length >= 18, `the winning roster got rings (${ringed.length})`);
+    ok(ringed.every((p) => p.rings[0].t === champ), "all from the club that won it");
+    ok(ringed.every((p) => p.rings[0].year === G.year), "and stamped with the year");
+    const losers = A.playersOf(G).filter((p) => p.teamId != null && p.teamId !== champ);
+    ok(losers.every((p) => !(p.rings || []).length), "nobody else got one");
+
+    /* The postseason used to be thrown away entirely. finishSeason archives it
+       the moment the Cup is decided, so by the time simPlayoffs returns the
+       single-season line is already folded into the career total. */
+    const ran = A.playersOf(G).filter((p) => p.careerPO && p.careerPO.gp);
+    ok(ran.length > 0, `playoff runs are kept as career totals (${ran.length} players)`);
+    ok(A.playersOf(G).every((p) => p.po == null), "and the single-season line is cleared");
+    const sample = ran.sort((a, b) => b.careerPO.gp - a.careerPO.gp)[0];
+    ok(sample.poRuns === 1, "one run counted after one playoffs");
+    ok(sample.careerPO.z === undefined, "career playoff totals carry no zone buckets");
+    ok(sample.careerPO.gp <= 28, `and a plausible number of games (${sample.careerPO.gp})`);
+    const before = sample.careerPO.gp;
+
+    // A second run accumulates rather than replacing.
+    A.autoDraft(G, false); A.startNextSeason(G);
+    ok(sample.careerPO.gp === before, "the rollover doesn't disturb it");
+    simSeason(A, G); simPlayoffs(A, G);
+    if (sample.careerPO.gp > before) {
+      ok(sample.poRuns === 2, `a second run is counted (${sample.poRuns})`);
+      ok(sample.careerPO.gp > before, `and added to the total (${before} → ${sample.careerPO.gp})`);
+    } else {
+      ok(sample.poRuns === 1, "his club missed the second playoffs, so the total held");
+      ok(true, "nothing to accumulate");
+    }
+    const stillRinged = A.playersOf(G).filter((p) => (p.rings || []).length);
+    ok(stillRinged.length > 0, `rings persist across the rollover (${stillRinged.length})`);
   },
 
   // The offseason has to be walkable from one button without hunting.
