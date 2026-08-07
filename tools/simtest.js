@@ -39,6 +39,7 @@ const EXPORTS = [
   "askingPrice", "negotiate", "isProspect", "prospectReady", "simFarmDay",
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
+  "offseasonStage", "offseasonAction", "doOffseasonStep", "OFFSEASON_STEPS",
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES",
 ];
@@ -992,6 +993,42 @@ const CHECKS = {
     // And it still plays.
     simSeason(A, G);
     ok(G.teams.every((t) => t.gp === 41), "the ninth season plays to completion");
+  },
+
+  // The offseason has to be walkable from one button without hunting.
+  offseason(A) {
+    section("Offseason flow");
+    const G = A.newGame(0, { seed: 211, rules: { seasonLen: 41 } });
+    simSeason(A, G); simPlayoffs(A, G);
+    ok(G.phase === "offseason", "the playoffs hand over to the offseason");
+
+    const seen = [];
+    let guard = 0;
+    while (G.phase === "offseason" && guard++ < 200) {
+      const st = A.offseasonStage(G);
+      const act = A.offseasonAction(G);
+      ok(!!act && !!act.label, `stage ${st} offers a next action: ${act ? act.label : "none"}`);
+      seen.push(st);
+      A.doOffseasonStep(G);
+    }
+    ok(guard < 200, `the offseason terminates (${guard} steps)`);
+    ok(G.phase === "regular", `and lands back in a regular season (${G.phase})`);
+    ok(seen[0] === "review", "it starts at the review");
+    ok(seen.includes("draft"), "passes through the draft");
+    ok(seen.includes("fa"), "and free agency");
+    ok(G.draftClass.length === 0, "the draft class was fully picked");
+    ok(A.playersOf(G).filter((p) => p.rookie === false && p.farm).length > 0, "draftees landed somewhere");
+    ok(A.offseasonAction(G) === null, "and once the season starts there's no offseason action left");
+    ok(G.teams.every((t) => A.rosterOf(G, t.id).length >= 20), "every club can dress a roster after it");
+
+    // Walking it must not depend on a stored step that can go stale.
+    const G2 = A.newGame(0, { seed: 212, rules: { seasonLen: 41 } });
+    simSeason(A, G2); simPlayoffs(A, G2);
+    G2.offseasonStep = null;
+    ok(A.offseasonStage(G2) === "review", "a missing step falls back to the review");
+    G2.offseasonStep = "draft";
+    G2.draftClass = [];
+    ok(A.offseasonStage(G2) === "draftDone", "an emptied draft class reads as done, not stuck");
   },
 
   // A save has to round-trip, because that's the whole persistence story.

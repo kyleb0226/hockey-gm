@@ -1724,6 +1724,56 @@ function autoDraft(G, stopAtUser) {
 
 /* ------------------------------ free agency ------------------------------- */
 
+/* ---------------------------- the offseason path --------------------------
+ * The offseason is a sequence, and the user should never have to hunt for what
+ * advances it. `offseasonStage` derives where we are from the state (not from a
+ * stored field that can go stale), `offseasonAction` names the one next step,
+ * and `doOffseasonStep` performs it. The header renders that action in the same
+ * place the sim controls live during the season, so it never moves.
+ * ------------------------------------------------------------------------- */
+
+const OFFSEASON_STEPS = [
+  { key: "review", label: "Review" },
+  { key: "draft", label: "Draft" },
+  { key: "fa", label: "Free agency" },
+];
+
+function offseasonStage(G) {
+  if (G.phase !== "offseason") return null;
+  const step = G.offseasonStep || "review";
+  if (step === "draft" && !G.draftClass.length) return "draftDone";
+  return step;
+}
+function offseasonAction(G) {
+  switch (offseasonStage(G)) {
+    case "review": return { label: "Go to the draft" };
+    case "draft":
+      return pickOwner(G, G.draftPick) === G.userTeam
+        ? { label: "Draft best available", onClock: true }
+        : { label: "Sim to my pick" };
+    case "draftDone": return { label: "Go to free agency" };
+    case "fa": return { label: `Start the ${G.year + 1} season` };
+    default: return null;
+  }
+}
+function doOffseasonStep(G) {
+  const st = offseasonStage(G);
+  if (st === "review") { G.offseasonStep = "draft"; return G; }
+  if (st === "draft") {
+    if (pickOwner(G, G.draftPick) === G.userTeam) {
+      const best = G.draftClass.map((id) => G.players[id])
+        .sort((a, b) => (b.pot * 0.7 + b.ovr * 0.3) - (a.pot * 0.7 + a.ovr * 0.3))[0];
+      if (best) draftPlayer(G, best.id);
+    }
+    autoDraft(G, true);
+    if (!G.draftClass.length) G.offseasonStep = "fa";
+    return G;
+  }
+  if (st === "draftDone") { G.offseasonStep = "fa"; return G; }
+  if (st === "fa") { startNextSeason(G); return G; }
+  return G;
+}
+
 function contractOffer(G, p, amt, yrs) {
   const want = marketValue(G, p) * diff(G).askPrice;
   const yearBonus = yrs >= 4 ? 0.94 : yrs === 1 ? 1.08 : 1;
@@ -4189,8 +4239,45 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
   const nm = (id) => (id != null && G.players[id] ? fullName(G.players[id]) : "—");
   const onClock = G.draftPick != null && G.draftClass.length ? pickOwner(G, G.draftPick) : null;
 
+  const stage = offseasonStage(G);
+  const act = offseasonAction(G);
+  const stepIdx = { review: 0, draft: 1, draftDone: 1, fa: 2 }[stage];
+
   return (
     <div className="space-y-3">
+      {/* Where you are, what's next, and the button to do it — all above the
+          fold, because hunting for it down the page was the whole complaint. */}
+      {act ? (
+        <div className={`${card} p-3 space-y-3`}>
+          <div className="flex items-center gap-2 text-xs">
+            {OFFSEASON_STEPS.map((s, i) => (
+              <React.Fragment key={s.key}>
+                {i ? <span className="text-slate-600">→</span> : null}
+                <span className={i === stepIdx ? "text-sky-300 font-medium"
+                  : i < stepIdx ? "text-slate-400" : "text-slate-600"}>
+                  {i < stepIdx ? "✓ " : ""}{s.label}
+                </span>
+              </React.Fragment>
+            ))}
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button className={`${btnPri} py-2`} onClick={() => upd((g) => doOffseasonStep(g))}>
+              {act.label}
+            </button>
+            <div className="text-sm text-slate-400">
+              {stage === "review" ? "Look over the awards, then start the draft."
+                : stage === "draft" ? (act.onClock
+                  ? "You're on the clock — take the best available, or pick from the board below."
+                  : "Simming to your next pick.")
+                : stage === "draftDone" ? "The draft is done. Free agency is next."
+                : "Sign who you want, then roll the season over. Nothing else is waiting on you."}
+            </div>
+            <div className="flex-1" />
+            <div className="text-xs text-slate-500">press <kbd className="px-1 py-0.5 bg-[#18243c] rounded border border-[#243250]">n</kbd></div>
+          </div>
+        </div>
+      ) : null}
+
       <Section title={`${G.year} awards`} className="p-3">
         {A ? (
           <div className="grid sm:grid-cols-3 gap-2 text-sm pt-1">
@@ -4210,10 +4297,6 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
         <div className={`${card} p-3 text-sm text-slate-400`}>
           The {G.year} season is under way. The draft and free agency open again once the Cup is decided.
         </div>
-      ) : null}
-
-      {step === "review" ? (
-        <button className={btnPri} onClick={() => upd((g) => { g.offseasonStep = "draft"; })}>Go to the draft</button>
       ) : null}
 
       {step === "draft" ? (
@@ -4248,14 +4331,7 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
         </Section>
       ) : null}
 
-      {step === "fa" ? (
-        <div className="space-y-3">
-          <FreeAgencyTab G={G} setG={setG} notify={notify} openPlayer={openPlayer} />
-          <button className={btnPri} onClick={() => upd((g) => { startNextSeason(g); })}>
-            Start the {G.year + 1} season
-          </button>
-        </div>
-      ) : null}
+      {step === "fa" ? <FreeAgencyTab G={G} setG={setG} notify={notify} openPlayer={openPlayer} /> : null}
     </div>
   );
 }
@@ -4427,7 +4503,20 @@ function App() {
       if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setPalette(true); return; }
       if (typing) return;
       if (e.key === "?") { e.preventDefault(); setPalette(true); return; }
-      if (!G || G.phase !== "regular") return;
+      if (!G) return;
+      // `n` always does whatever the header's primary button does, whatever
+      // phase you're in — one key to move things along.
+      if (e.key === "n") {
+        e.preventDefault();
+        if (G.phase === "offseason") {
+          const g2 = migrate(JSON.parse(JSON.stringify(G)));
+          doOffseasonStep(g2);
+          setG(g2);
+          go("offseason");
+        } else advance(1);
+        return;
+      }
+      if (G.phase !== "regular") return;
       if (e.key === "d") { e.preventDefault(); advance(1); }
       if (e.key === "w") { e.preventDefault(); advance(7); }
     };
@@ -4457,6 +4546,14 @@ function App() {
               </>
             ) : null}
             {G.phase === "playoffs" ? <button className={btnPri} onClick={() => advance(1)} disabled={busy}>Play round</button> : null}
+            {G.phase === "offseason" && offseasonAction(G) ? (
+              <button className={btnPri} disabled={busy} title="n" onClick={() => {
+                const g2 = migrate(JSON.parse(JSON.stringify(G)));
+                doOffseasonStep(g2);
+                setG(g2);
+                go("offseason");
+              }}>{offseasonAction(G).label}</button>
+            ) : null}
             <button className={btnGhost} onClick={() => setPalette(true)} title="⌘K">⌘K</button>
             <button className={btnGhost} onClick={() => setShowSlots(true)}>💾</button>
             <button className={btnGhost} onClick={() => setShowRules(true)}>📋</button>

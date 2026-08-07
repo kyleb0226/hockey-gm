@@ -196,7 +196,15 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
 - `GameTab` replays `G.lastGame`, which holds the **user's most recent game only** — a full
   season of play-by-play would dwarf everything else in the save. Events carry an invented clock
   time and are sorted; the events themselves are real.
-- ⌘K / `?` opens the command palette; `d` and `w` sim a day and a week.
+- ⌘K / `?` opens the command palette; `d` and `w` sim a day and a week; **`n` does whatever the
+  header's primary button does in any phase** — play a day, play a round, or take the next
+  offseason step.
+- **The offseason is a sequence with exactly one next action, always in the same place.**
+  `offseasonStage(G)` derives where you are from state (never a stored field that can go stale),
+  `offseasonAction(G)` names the next step, `doOffseasonStep(G)` performs it. The header renders it
+  where the sim controls live during the season, and `OffseasonTab` repeats it above the fold with
+  a Review → Draft → Free agency breadcrumb. Don't bury the advance button under the free-agent
+  table again — that was the original complaint.
 
 ## Gotchas
 - `emptyBox` covers the **whole organisation** (farm and injured included) so a stray player id

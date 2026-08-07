@@ -80,3 +80,10 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   30.4 shots per team-game through the rewrite. Also snapshotted All-Star selections
   (`G.allStar.at`) so a player traded across conferences at the deadline doesn't retroactively
   switch benches. Harness grew from 262 to 263 assertions.
+- 2026-08-05 · S · Made the offseason walkable. It had no header button at all, so the thing that
+  advanced it moved to a different place at every step and the last one sat under a 60-row
+  free-agent table. Added `offseasonStage`/`offseasonAction`/`doOffseasonStep`: one derived next
+  action, rendered in the header where the sim controls live all season, repeated above the fold
+  with a Review → Draft → Free agency breadcrumb and a one-line explanation of what's waiting on
+  you. `n` now triggers the header's primary action in any phase. End of playoffs to next season
+  is five presses. Harness grew from 263 to 280 assertions.
