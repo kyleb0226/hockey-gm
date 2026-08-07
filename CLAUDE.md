@@ -143,6 +143,23 @@ which is what makes line construction and last change matter.
   how sharply the board reacts. Pressure on the manager only — the AI never gets better
   information.
 
+## The draft
+Seven rounds (`DRAFT_ROUNDS`), 224 prospects, and **you never see a prospect's true rating**.
+Each carries `p.scout = {fog, bias, bias2}`; `scoutedOvr`/`scoutedPot` apply the bias scaled by
+the fog, so the read is deterministic per player and only `scoutProspect` moves it. The top of the
+board starts better known than the bottom. `SCOUT_POINTS` visits per offseason, each cutting a
+prospect's fog to ~45% of what it was. **The AI drafts off `draftValue`, which is the FOGGED read
+plus extra noise**, so thirty-two clubs genuinely disagree about the board.
+`p.draft = {year, round, pick, teamId}` is stamped on the player for life and `G.draftLog` records
+the pick-by-pick order. `closeDraft` deletes everyone left on the board — without it a hundred-odd
+undrafted prospects leaked into `G.players` every year.
+
+**Attrition is not optional.** Seven rounds puts 224 players a year into a league that loses ~50
+to retirement, so without culling the save reached 4.9 MB in eight seasons. Two mechanisms in
+`finishSeason`: stalled prospects (23+, still poor, nothing on their record) are released, and the
+free-agent pool is hard-capped at `FA_POOL_MAX` — players who can't get a contract leave the
+sport, keeping only those with trophies, rings or 200+ career games. That holds it at 2.7 MB.
+
 ## Point shares
 `pointShares(G, p, line)` is hockey's Win Shares — the closest thing the sport has to WAR that a
 box score can produce — split into `ops` / `dps` / `gps` and measured in **standings points**.

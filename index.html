@@ -697,6 +697,8 @@ function migrate(G) {
   if (!G.retained) G.retained = [];
   if (!G.waivers) G.waivers = [];
   if (!G.shotLog) G.shotLog = {};
+  if (G.scoutPoints == null) G.scoutPoints = 0;
+  if (!G.draftLog) G.draftLog = [];
   if (!G.gameLog) G.gameLog = {};
   playersOf(G).forEach((p) => {
     if (!p.stats) p.stats = blankStats(p.pos);
@@ -1764,6 +1766,47 @@ function finishSeason(G) {
     }
   });
 
+  /* Attrition. Seven rounds is 224 prospects a year and most late picks never
+     become anything — without this they sit on farm rosters forever and the
+     save grows by a thousand dead players a decade. A prospect who is old
+     enough to have shown something and hasn't is released outright. */
+  playersOf(G).forEach((p) => {
+    if (p.retired) return;
+    const nothingToShow = !(p.career || []).length && !(p.trophies || []).length && !(p.rings || []).length;
+    if (!nothingToShow) return;
+    // A prospect old enough to have shown something who hasn't.
+    const stalled = p.farm && p.teamId != null && p.age >= 23 && p.ovr < 49 && p.pot < 57;
+    // And the bigger leak: an entry-level deal expires, nobody signs him, and
+    // he sits in the free-agent pool forever. Most of a seven-round class ends
+    // up here, which is a thousand dead records a decade.
+    const unwanted = p.teamId == null && p.age >= 22 && p.ovr < 53;
+    if (!stalled && !unwanted) return;
+    if (stalled && p.teamId === G.userTeam && p.draft && p.draft.round <= 2) {
+      news(G, `${fullName(p)} never developed and has been released.`, "bad");
+    }
+    const fi = G.freeAgents.indexOf(p.id);
+    if (fi >= 0) G.freeAgents.splice(fi, 1);
+    delete G.players[p.id];
+  });
+
+  /* And a hard cap on the pool, because thresholds alone can't hold it. Seven
+     rounds puts 224 players a year into a league that only loses ~50 to
+     retirement, so the free-agent list grows without bound whatever the quality
+     bar. Everyone who can't get a contract eventually leaves the sport; here
+     the ones with nothing on their record leave first. */
+  if (G.freeAgents.length > FA_POOL_MAX) {
+    const ranked = G.freeAgents.map((id) => G.players[id]).filter(Boolean)
+      .sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5));
+    ranked.slice(FA_POOL_MAX).forEach((p) => {
+      // A career worth remembering buys a place in the record; a dozen games
+      // eight years ago does not.
+      const games = (p.career || []).reduce((s, c) => s + (c.gp || 0), 0);
+      if ((p.trophies || []).length || (p.rings || []).length || games >= 200) return;
+      delete G.players[p.id];
+    });
+    G.freeAgents = G.freeAgents.filter((id) => G.players[id]);
+  }
+
   buildDraftClass(G);
   return G;
 }
@@ -1809,15 +1852,77 @@ function fillRosters(G) {
 
 /* --------------------------------- draft ---------------------------------- */
 
+/* ---------------------------------- the draft -----------------------------
+ * Seven rounds, and a board you have to form an opinion about. Every prospect
+ * carries FOG: what you see is his true rating pushed around by a bias you
+ * can't observe, and the only way to shrink it is to spend scouting on him.
+ * The AI drafts off its own noisy read, so the board is genuinely contestable
+ * rather than a ranked list everyone agrees on.
+ * ------------------------------------------------------------------------- */
+
+const DRAFT_ROUNDS = 7;
+const SCOUT_POINTS = 14;      // scouting visits per offseason
+const FA_POOL_MAX = 150;      // players who can't get a contract leave the sport
+const FOG_MAX_SWING = 13;     // how far an unscouted read can be off
+
+const JUNIOR = ["major junior", "college", "European elite", "national program", "prep school"];
+const STYLES = {
+  C: ["two-way pivot", "playmaker", "faceoff specialist", "power forward"],
+  LW: ["sniper", "grinder", "puck hound", "net-front presence"],
+  RW: ["sniper", "rush threat", "agitator", "finisher"],
+  D: ["shutdown", "puck mover", "offensive defenceman", "stay-at-home", "physical"],
+  G: ["butterfly", "hybrid", "athletic scrambler", "positional"],
+};
+
+// The reading you get on a prospect, not the truth. Deterministic per player so
+// it doesn't shimmer between renders — only scouting moves it.
+function scoutedOvr(p) {
+  const f = p.scout ? p.scout.fog : 0;
+  return Math.round(clamp(p.ovr + (p.scout ? p.scout.bias : 0) * f * FOG_MAX_SWING, 20, 99));
+}
+function scoutedPot(p) {
+  const f = p.scout ? p.scout.fog : 0;
+  return Math.round(clamp(p.pot + (p.scout ? p.scout.bias2 : 0) * f * FOG_MAX_SWING * 1.3,
+    scoutedOvr(p), 99));
+}
+const scoutBand = (p) => Math.round((p.scout ? p.scout.fog : 0) * FOG_MAX_SWING);
+const scoutLabel = (p) => {
+  const f = p.scout ? p.scout.fog : 0;
+  return f > 0.75 ? "unseen" : f > 0.45 ? "one viewing" : f > 0.2 ? "well scouted" : "known quantity";
+};
+function scoutProspect(G, pid) {
+  const p = G.players[pid];
+  if (!p || !p.scout) return { ok: false, why: "not a prospect" };
+  if ((G.scoutPoints || 0) <= 0) return { ok: false, why: "no scouting left this offseason" };
+  if (p.scout.fog <= 0.06) return { ok: false, why: "you already know him" };
+  G.scoutPoints--;
+  p.scout.fog = Math.max(0.05, p.scout.fog * 0.45);
+  return { ok: true, fog: p.scout.fog };
+}
+// What a club thinks he's worth: potential first, but only what it can see.
+const draftValue = (p) => scoutedPot(p) * 0.68 + scoutedOvr(p) * 0.32;
+
 function buildDraftClass(G) {
   G.draftClass = [];
-  for (let i = 0; i < 64; i++) {
-    const p = genPlayer(G, pick(G, ["C", "C", "LW", "RW", "D", "D", "G"]), 44 + (64 - i) * 0.16, 18);
+  const total = DRAFT_ROUNDS * G.teams.length;
+  for (let i = 0; i < total; i++) {
+    const p = genPlayer(G, pick(G, ["C", "C", "LW", "RW", "D", "D", "G"]), 42 + (total - i) * 0.055, 18);
     p.pot = Math.round(clamp(p.ovr + gauss(G, 18, 7), p.ovr + 2, 99));
     p.rookie = true;
+    // The top of the board is public knowledge; nobody has seen the late kids.
+    const known = clamp(0.35 + i / total * 0.75, 0.35, 1);
+    p.scout = {
+      fog: known,
+      bias: clamp(gauss(G, 0, 0.55), -1, 1),
+      bias2: clamp(gauss(G, 0, 0.6), -1, 1),
+    };
+    p.junior = pick(G, JUNIOR);
+    p.style = pick(G, STYLES[p.pos] || STYLES.C);
     G.players[p.id] = p;
     G.draftClass.push(p.id);
   }
+  G.scoutPoints = SCOUT_POINTS;
+  G.draftLog = [];
   // Lottery order: non-playoff teams worst-first, with a real lottery on top.
   const nonPlayoff = G.teams.filter((t) => !inPlayoffs(G, t.id)).sort((a, b) => a.pts - b.pts);
   const playoffTeams = G.teams.filter((t) => inPlayoffs(G, t.id)).sort((a, b) => a.pts - b.pts);
@@ -1847,32 +1952,54 @@ function pickOwner(G, index) {
   const rec = G.picks.find((pk) => pk.year === G.year && pk.round === round && pk.orig === orig);
   return rec ? rec.owner : orig;
 }
+const draftPicksTotal = (G) => G.teams.length * DRAFT_ROUNDS;
+
 function draftPlayer(G, pid) {
   // draftPick counts picks made overall; the class shrinks as it goes, so the
   // two must never be compared against each other.
-  if (!G.draftClass.length || G.draftPick >= G.teams.length * 2) return false;
+  if (!G.draftClass.length || G.draftPick >= draftPicksTotal(G)) return false;
   const team = pickOwner(G, G.draftPick);
   const p = G.players[pid];
   if (!p || !G.draftClass.includes(pid)) return false;
+  const round = Math.floor(G.draftPick / G.teams.length) + 1;
   p.teamId = team;
   p.farm = true;
   p.contract = { amt: ELC_SALARY, yrs: 3 };
+  // Where he went is part of who he is for the rest of his career.
+  p.draft = { year: G.year, round, pick: G.draftPick + 1, teamId: team };
+  // Drafting him is a viewing in itself.
+  if (p.scout) p.scout.fog = Math.min(p.scout.fog, 0.3);
+  G.draftLog = G.draftLog || [];
+  G.draftLog.push({ round, pick: G.draftPick + 1, teamId: team, pid });
   G.draftClass.splice(G.draftClass.indexOf(pid), 1);
   G.draftPick++;
-  if (team === G.userTeam) news(G, `Drafted ${fullName(p)} (${p.pos}, ${p.ovr} ovr / ${p.pot} pot).`, "good");
+  if (team === G.userTeam) {
+    news(G, `Drafted ${fullName(p)} — ${p.pos}, ${p.style}, out of ${p.junior}.`, "good");
+  }
   return true;
 }
 function autoDraft(G, stopAtUser) {
   let guard = 0;
-  while (G.draftPick < G.teams.length * 2 && G.draftClass.length && guard++ < 200) {
+  while (G.draftPick < draftPicksTotal(G) && G.draftClass.length && guard++ < 400) {
     const team = pickOwner(G, G.draftPick);
     if (stopAtUser && team === G.userTeam) return false;
+    // Clubs draft off their OWN read of the board, with a little extra noise, so
+    // the same prospect isn't ranked identically by all thirty-two of them.
     const best = G.draftClass
       .map((id) => G.players[id])
-      .sort((a, b) => (b.pot * 0.7 + b.ovr * 0.3) - (a.pot * 0.7 + a.ovr * 0.3))[0];
-    draftPlayer(G, best.id);
+      .map((p) => ({ p, v: draftValue(p) + gauss(G, 0, 3.2) }))
+      .sort((a, b) => b.v - a.v)[0];
+    draftPlayer(G, best.p.id);
   }
+  if (!G.draftClass.length || G.draftPick >= draftPicksTotal(G)) closeDraft(G);
   return true;
+}
+/* Anyone left on the board goes home. Without this every undrafted prospect
+   stayed in G.players forever — 100+ dead records a season. */
+function closeDraft(G) {
+  (G.draftClass || []).forEach((id) => { delete G.players[id]; });
+  G.draftClass = [];
+  return G;
 }
 
 /* ------------------------------ free agency ------------------------------- */
@@ -1919,7 +2046,7 @@ function doOffseasonStep(G) {
       if (best) draftPlayer(G, best.id);
     }
     autoDraft(G, true);
-    if (!G.draftClass.length) G.offseasonStep = "fa";
+    if (!G.draftClass.length) { closeDraft(G); G.offseasonStep = "fa"; }
     return G;
   }
   if (st === "draftDone") { G.offseasonStep = "fa"; return G; }
@@ -4550,6 +4677,151 @@ function HistoryTab({ G, openPlayer, openTeam }) {
 
 /* -------------------------------- offseason ------------------------------- */
 
+/* ------------------------------- draft board -------------------------------
+ * You never see a prospect's true rating — only your read of him, with a band
+ * that narrows when you spend scouting on him. All thirty-two clubs work off
+ * their own noisy reads, so the board is something to have an opinion about
+ * rather than a ranked list everybody already agrees on.
+ * ------------------------------------------------------------------------- */
+
+function DraftBoard({ G, setG, notify, openPlayer }) {
+  const [posFilter, setPosFilter] = useState("ALL");
+  const [onlyUnseen, setOnlyUnseen] = useState(false);
+  const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); const r = fn(g2); setG(g2); return r; };
+
+  const total = draftPicksTotal(G);
+  const onClock = G.draftClass.length && G.draftPick < total ? pickOwner(G, G.draftPick) : null;
+  const round = Math.floor(G.draftPick / G.teams.length) + 1;
+  const mine = onClock === G.userTeam;
+
+  // What the organisation is actually short of, so the board can flag it.
+  const org = rosterOf(G, G.userTeam, true);
+  const need = {};
+  [["C", 5], ["LW", 5], ["RW", 5], ["D", 8], ["G", 3]].forEach(([pos, want]) => {
+    const have = org.filter((p) => p.pos === pos && p.age < 30).length;
+    if (have < want) need[pos] = want - have;
+  });
+
+  let board = G.draftClass.map((id) => G.players[id]).filter(Boolean);
+  if (posFilter !== "ALL") board = board.filter((p) => p.pos === posFilter);
+  if (onlyUnseen) board = board.filter((p) => p.scout && p.scout.fog > 0.45);
+
+  const myPicks = [];
+  for (let i = G.draftPick; i < total && myPicks.length < 4; i++) {
+    if (pickOwner(G, i) === G.userTeam) myPicks.push(i + 1);
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className={`${card} p-3 space-y-3`}>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="text-sm">
+            <span className="text-slate-400">Round {round} · pick </span>
+            <span className="font-semibold">{Math.min(G.draftPick + 1, total)}</span>
+            <span className="text-slate-500"> of {total}</span>
+          </div>
+          <div className="text-sm">
+            {onClock != null
+              ? <span className={mine ? "text-sky-300 font-medium" : "text-slate-400"}>
+                  {mine ? "You're on the clock" : `${G.teams[onClock].city} ${G.teams[onClock].name} on the clock`}
+                </span>
+              : <span className="text-slate-400">The draft is complete.</span>}
+          </div>
+          <div className="text-sm">
+            <span className="text-slate-400">Scouting </span>
+            <span className={G.scoutPoints > 0 ? "text-emerald-300 font-semibold" : "text-slate-500"}>
+              {G.scoutPoints || 0}
+            </span>
+            <span className="text-slate-500"> left</span>
+          </div>
+          <div className="flex-1" />
+          <button className={btnGhost} onClick={() => upd((g) => autoDraft(g, true))}>Sim to my pick</button>
+          <button className={btnPri} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>
+            Auto the rest
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
+          {myPicks.length ? <span>Your next picks: <span className="text-slate-200">{myPicks.join(", ")}</span></span> : null}
+          {Object.keys(need).length
+            ? <span>Thin at <span className="text-amber-300">{Object.keys(need).join(", ")}</span></span>
+            : <span>No glaring holes in the organisation.</span>}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {["ALL", "C", "LW", "RW", "D", "G"].map((k) => (
+          <button key={k} className={posFilter === k ? btnPri : btnGhost} onClick={() => setPosFilter(k)}>{k}</button>
+        ))}
+        <button className={onlyUnseen ? btnPri : btnGhost} onClick={() => setOnlyUnseen(!onlyUnseen)}>
+          Unscouted only
+        </button>
+      </div>
+
+      <Section title={`Board — ${board.length} available`}>
+        <SortTable min={880} rows={board} initial="val" rowKey={(p) => p.id}
+          onRow={(p) => openPlayer(p.id)}
+          rowCls={(p) => (need[p.pos] ? "bg-amber-950/20" : "")}
+          cols={[
+            { key: "name", label: "Prospect", get: (p) => p.ln,
+              cell: (p) => <span className="whitespace-nowrap">{fullName(p)}</span> },
+            { key: "pos", label: "Pos", get: (p) => POS.indexOf(p.pos),
+              cell: (p) => <span className="flex items-center gap-1"><PosBadge pos={p.pos} />
+                {need[p.pos] ? <span className="text-[10px] text-amber-400" title="you're thin here">need</span> : null}</span> },
+            { key: "ovr", label: "Ovr", get: (p) => scoutedOvr(p), cls: "font-semibold",
+              cell: (p) => <span>{scoutedOvr(p)}<span className="text-slate-500 text-xs">
+                {scoutBand(p) ? ` ±${scoutBand(p)}` : ""}</span></span> },
+            { key: "pot", label: "Ceiling", get: (p) => scoutedPot(p), cls: "text-slate-300",
+              cell: (p) => <span>{scoutedPot(p)}<span className="text-slate-500 text-xs">
+                {scoutBand(p) ? ` ±${Math.round(scoutBand(p) * 1.3)}` : ""}</span></span> },
+            { key: "style", label: "Style", get: (p) => p.style || "", cls: "text-slate-400 text-xs" },
+            { key: "junior", label: "From", get: (p) => p.junior || "", cls: "text-slate-500 text-xs" },
+            { key: "seen", label: "Report", get: (p) => -(p.scout ? p.scout.fog : 0), cls: "text-xs",
+              cell: (p) => <span className={p.scout && p.scout.fog <= 0.2 ? "text-emerald-400" : "text-slate-400"}>
+                {scoutLabel(p)}</span> },
+            { key: "val", label: "", get: (p) => draftValue(p), cell: (p) => (
+              <span className="flex gap-2 justify-end">
+                <button className="text-xs text-emerald-400 hover:underline disabled:opacity-30"
+                  disabled={!G.scoutPoints || (p.scout && p.scout.fog <= 0.06)}
+                  onClick={(e) => { e.stopPropagation(); const r = upd((g) => scoutProspect(g, p.id));
+                    if (r && !r.ok) notify(r.why); }}>scout</button>
+                {mine ? (
+                  <button className="text-xs text-sky-400 hover:underline"
+                    onClick={(e) => { e.stopPropagation(); upd((g) => { draftPlayer(g, p.id); autoDraft(g, true); }); }}>
+                    draft
+                  </button>
+                ) : null}
+              </span>
+            ) },
+          ]} empty="The board is empty." />
+      </Section>
+
+      {G.draftLog && G.draftLog.length ? (
+        <Section title="Picks so far">
+          <div className="max-h-64 overflow-y-auto">
+            {G.draftLog.slice().reverse().slice(0, 60).map((d, i) => {
+              const p = G.players[d.pid];
+              return (
+                <div key={i} className={`flex items-center gap-3 px-3 py-1 border-b border-[#16223a] last:border-0 text-sm
+                  ${d.teamId === G.userTeam ? "bg-sky-950/30" : ""}`}>
+                  <span className="w-16 text-slate-500 tnum text-xs">R{d.round} · {d.pick}</span>
+                  <span className="w-12 text-slate-400 text-xs">{G.teams[d.teamId].abbr}</span>
+                  {p ? <>
+                    <PosBadge pos={p.pos} />
+                    <button className="flex-1 text-left hover:text-sky-300" onClick={() => openPlayer(d.pid)}>
+                      {fullName(p)}
+                    </button>
+                    <span className="text-slate-500 text-xs">{p.style}</span>
+                  </> : <span className="flex-1 text-slate-600">—</span>}
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      ) : null}
+    </div>
+  );
+}
+
 function OffseasonTab({ G, setG, notify, openPlayer }) {
   // Derived from the phase, not from a stored field — otherwise a finished
   // rollover leaves a stale draft board on screen.
@@ -4619,37 +4891,7 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
         </div>
       ) : null}
 
-      {step === "draft" ? (
-        <Section title={`Draft — pick ${Math.min(G.draftPick + 1, G.teams.length * 2)} of ${G.teams.length * 2}`} className="p-3"
-          right={
-            <div className="flex gap-2">
-              <button className={btnGhost} onClick={() => upd((g) => autoDraft(g, true))}>Sim to my pick</button>
-              <button className={btnGhost} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>Auto the rest</button>
-            </div>
-          }>
-          <div className="space-y-2 pt-2">
-            <div className="text-sm text-slate-400">
-              {onClock != null ? <>{G.teams[onClock].city} {G.teams[onClock].name} on the clock</> : "The draft is complete."}
-            </div>
-            {onClock === G.userTeam ? (
-              <div className="max-h-80 overflow-y-auto space-y-1">
-                {G.draftClass.map((id) => G.players[id]).sort((a, b) => b.pot - a.pot).slice(0, 30).map((p) => (
-                  <div key={p.id} className="flex items-center gap-2 text-sm px-2 py-1 rounded hover:bg-[#16223a]">
-                    <PosBadge pos={p.pos} />
-                    <button className="flex-1 text-left hover:text-sky-300" onClick={() => openPlayer(p.id)}>{fullName(p)}</button>
-                    <span className="text-slate-400 tnum">{p.ovr} / {p.pot}</span>
-                    <button className="text-xs text-sky-400 hover:underline"
-                      onClick={() => upd((g) => { draftPlayer(g, p.id); autoDraft(g, true); })}>Draft</button>
-                  </div>
-                ))}
-              </div>
-            ) : <div className="text-sm text-slate-500">Not your pick.</div>}
-            <button className={btnPri} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>
-              Finish the draft
-            </button>
-          </div>
-        </Section>
-      ) : null}
+      {step === "draft" ? <DraftBoard G={G} setG={setG} notify={notify} openPlayer={openPlayer} /> : null}
 
       {step === "fa" ? <FreeAgencyTab G={G} setG={setG} notify={notify} openPlayer={openPlayer} /> : null}
     </div>

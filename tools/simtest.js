@@ -41,6 +41,8 @@ const EXPORTS = [
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
   "offseasonStage", "offseasonAction", "doOffseasonStep", "OFFSEASON_STEPS",
   "stintFor", "stintTotal", "spotSoft", "spotAt", "pointShares", "psOf",
+  "DRAFT_ROUNDS", "draftPicksTotal", "closeDraft", "scoutProspect", "scoutedOvr", "scoutedPot",
+  "scoutBand", "scoutLabel", "draftValue", "SCOUT_POINTS",
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES",
 ];
@@ -388,7 +390,7 @@ const CHECKS = {
     const G = A.newGame(0, { seed: 77, rules: { seasonLen: 41 } });
     simSeason(A, G); simPlayoffs(A, G);
 
-    ok(G.draftClass.length === 64, `a draft class was generated (${G.draftClass.length})`);
+    ok(G.draftClass.length === A.draftPicksTotal(G), `a draft class was generated (${G.draftClass.length})`);
     ok(G.draftOrder.length === 32, "every club has a draft slot");
     const nonPlayoff = G.teams.filter((t) => !A.inPlayoffs(G, t.id)).length;
     ok(nonPlayoff === 16, `sixteen clubs missed the playoffs (${nonPlayoff})`);
@@ -396,9 +398,9 @@ const CHECKS = {
     ok(firstTen.every((id) => !A.inPlayoffs(G, id)), "the lottery only draws from non-playoff clubs");
 
     A.autoDraft(G, false);
-    ok(G.draftClass.length <= 0 || G.draftPick === 64, `the draft completed (${G.draftPick} picks made)`);
+    ok(G.draftPick === A.draftPicksTotal(G), `the draft completed (${G.draftPick} picks made)`);
     const drafted = A.playersOf(G).filter((p) => p.rookie && p.teamId != null);
-    ok(drafted.length >= 60, `prospects landed on clubs (${drafted.length})`);
+    ok(drafted.length >= A.draftPicksTotal(G) * 0.9, `prospects landed on clubs (${drafted.length})`);
     ok(drafted.every((p) => p.farm), "draftees start on the farm");
 
     const oldAges = A.playersOf(G).filter((p) => p.teamId != null).map((p) => p.age);
@@ -1143,6 +1145,66 @@ const CHECKS = {
     ok(!!single, "a player who stayed put gets exactly one row");
     A.autoDraft(G, false); A.startNextSeason(G);
     ok(A.playersOf(G).every((p) => !p.stints || !p.stints.length), "spells are cleared at the rollover");
+  },
+
+  // A seven-round draft you have to form an opinion about.
+  draft(A) {
+    section("The draft");
+    const G = A.newGame(0, { seed: 241, rules: { seasonLen: 41 } });
+    simSeason(A, G); simPlayoffs(A, G);
+    ok(A.DRAFT_ROUNDS === 7, `seven rounds (${A.DRAFT_ROUNDS})`);
+    ok(G.draftClass.length === A.draftPicksTotal(G), `a prospect for every pick (${G.draftClass.length})`);
+    ok(G.scoutPoints === A.SCOUT_POINTS, `scouting budget is set (${G.scoutPoints})`);
+
+    const board = G.draftClass.map((id) => G.players[id]);
+    ok(board.every((p) => p.scout && p.scout.fog > 0), "every prospect starts behind some fog");
+    ok(board.every((p) => p.style && p.junior), "and has a style and a background");
+    // The top of the board is better known than the bottom.
+    const early = board.slice(0, 32).reduce((s, p) => s + p.scout.fog, 0) / 32;
+    const late = board.slice(-32).reduce((s, p) => s + p.scout.fog, 0) / 32;
+    ok(early < late, `the top of the board is better known (${early.toFixed(2)} vs ${late.toFixed(2)})`);
+    // The read is not the truth.
+    const off = board.filter((p) => A.scoutedOvr(p) !== p.ovr);
+    ok(off.length > board.length * 0.6, `most reads differ from the truth (${off.length}/${board.length})`);
+    ok(board.every((p) => A.scoutedPot(p) >= A.scoutedOvr(p)), "a ceiling is never below the current read");
+
+    // Scouting narrows the band and is finite.
+    const target = board[40];
+    const bandBefore = A.scoutBand(target);
+    const r = A.scoutProspect(G, target.id);
+    ok(r.ok, "you can scout a prospect");
+    ok(A.scoutBand(target) < bandBefore, `which narrows the band (${bandBefore} → ${A.scoutBand(target)})`);
+    ok(G.scoutPoints === A.SCOUT_POINTS - 1, "and costs a point");
+    let guard = 0;
+    while (G.scoutPoints > 0 && guard++ < 100) A.scoutProspect(G, board[guard].id);
+    ok(G.scoutPoints === 0, "the budget runs out");
+    ok(!A.scoutProspect(G, board[60].id).ok, "and then you can't scout any more");
+
+    // The draft runs to completion and nobody is left in limbo.
+    A.autoDraft(G, false);
+    ok(G.draftPick === A.draftPicksTotal(G), `every pick was made (${G.draftPick})`);
+    ok(G.draftClass.length === 0, "the board is emptied");
+    ok(G.draftLog.length === A.draftPicksTotal(G), `every pick is logged (${G.draftLog.length})`);
+    const logged = G.draftLog.every((d, i) => d.pick === i + 1 && d.round === Math.floor(i / 32) + 1);
+    ok(logged, "the log is in order with the right rounds");
+    const picked = G.draftLog.map((d) => G.players[d.pid]).filter(Boolean);
+    ok(picked.length === G.draftLog.length, "every drafted player still exists");
+    ok(picked.every((p) => p.draft && p.draft.year === G.year && p.teamId === p.draft.teamId),
+      "and carries where he was taken");
+    ok(picked.every((p) => p.farm), "draftees start on the farm");
+    const perTeam = {};
+    G.draftLog.forEach((d) => { perTeam[d.teamId] = (perTeam[d.teamId] || 0) + 1; });
+    ok(Object.keys(perTeam).length === 32, "every club drafted somebody");
+
+    // Better prospects go earlier, but not perfectly — that's the fog working.
+    const firstRound = G.draftLog.filter((d) => d.round === 1).map((d) => G.players[d.pid].pot);
+    const lastRound = G.draftLog.filter((d) => d.round === 7).map((d) => G.players[d.pid].pot);
+    const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+    ok(avg(firstRound) > avg(lastRound) + 5,
+      `first-rounders out-rank last-rounders (${avg(firstRound).toFixed(0)} vs ${avg(lastRound).toFixed(0)})`);
+    const bestPot = Math.max(...picked.map((p) => p.pot));
+    const bestTakenIn = G.draftLog.find((d) => G.players[d.pid].pot === bestPot).round;
+    ok(bestTakenIn >= 1, `and the best prospect doesn't always go first (round ${bestTakenIn})`);
   },
 
   // Point shares: hockey's Win Shares. The number only means anything if the

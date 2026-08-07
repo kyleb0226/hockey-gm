@@ -115,3 +115,13 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   games — `autoLines` now calls a goalie up when it's a man short, and the starter load is back to
   55. NHL calibration held throughout (67% above the pads, top glove 22%, five-hole 14%, .902
   save percentage). Harness grew from 294 to 307 assertions.
+- 2026-08-05 · L · Rebuilt the draft. Seven rounds and 224 prospects, and you no longer see true
+  ratings: every prospect has fog, so the board shows a read with a ± band that only narrows when
+  you spend one of your scouting visits on him — and the AI drafts off its own fogged read plus
+  noise, so the thirty-two clubs actually disagree. Prospects carry a style, a background and a
+  scouting-report status; the board filters by position, flags where your organisation is thin,
+  lists your upcoming picks, and logs every pick as it happens. Where a player was taken is stamped
+  on him for life. Undrafted players are now deleted instead of leaking into the save.
+  Seven rounds also broke the population maths — 224 in a year against ~50 retirements pushed the
+  save to 4.9 MB over eight seasons — so stalled prospects are released and the free-agent pool is
+  hard-capped, which brought it back to 2.7 MB. Harness grew from 339 to 362 assertions.
