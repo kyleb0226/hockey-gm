@@ -2612,9 +2612,13 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
      they're drawn for the same club from the same aggregate counts. */
   const sd = (seed || 1) * 977 + (mode === "G" ? 524287 : 0);
 
-  // One dot per shot until a cell gets crowded, then one dot per k.
+  /* One shot, one dot — always. A chart that collapses fourteen shots into a
+     single dot is a bar chart wearing a disguise. When a cell gets crowded the
+     DOTS shrink; they never merge. Overlap is expected and fine. */
   const cellShots = NET_CELLS.map((c) => (mode === "G" ? net[c.key].sa : net[c.key].a));
-  const perDot = Math.max(1, Math.ceil(Math.max(...cellShots) / 42));
+  const busiest = Math.max(1, ...cellShots);
+  const CELL_AREA = 60 * 40;
+  const dotR = clamp(0.45 * Math.sqrt(CELL_AREA / busiest), 0.42, 2.6);
   const miss = (extra && extra.miss) || 0;
   const blkd = (extra && extra.blkd) || 0;
 
@@ -2673,7 +2677,7 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
           const isHole = hole && hole.key === c.key;
           const x0 = X[c.col], y0 = Y[c.row], w = X[c.col + 1] - x0, h = Y[c.row + 1] - y0;
           const recs = real ? buckets[c.key] : null;
-          const nG = Math.round(goals / perDot), nS = Math.round((shots - goals) / perDot);
+          const nG = goals, nS = shots - goals;
           const count = recs ? recs.length : nG + nS;
           const pts = !dots ? []
             : recs ? recs.map((r, k) => spotAt(x0, y0, w, h, sd + shotSeed(r, k), 5, NET_BOUNDS))
@@ -2684,7 +2688,7 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
                 fill={dots ? "rgba(13,23,40,0.35)" : `hsla(${hue}, 80%, 55%, ${0.08 + share * 0.75})`}
                 stroke={isHole ? "#f59e0b" : "#243250"} strokeWidth={isHole ? 2 : 1} />
               {dots ? pts.map((p, k) => (
-                <Dot key={k} p={p} r={2.4}
+                <Dot key={k} p={p} r={dotR}
                   fill={recs ? DOT_FILL[recs[k].r] : (k < nG ? "#fb7185" : "#38bdf8")}
                   title={recs ? tip(recs[k]) : null} />
               )) : (
@@ -2704,7 +2708,7 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
 
         {/* off target: over the bar and wide of the posts */}
         {dots && (real ? offNet.length : miss) ? (() => {
-          const n = real ? offNet.length : Math.round(miss / perDot);
+          const n = real ? offNet.length : miss;
           const over = Math.round(n * 0.4), side = n - over;
           // Three bands, each an independent draw, every dot salted by the chart
           // and by the shot it belongs to.
@@ -2719,14 +2723,14 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
             }
           });
           return out.map((d, k) => (
-            <Dot key={`m${k}`} p={d.p} r={2.2} stroke="#64748b" title={d.r ? tip(d.r) : null} />
+            <Dot key={`m${k}`} p={d.p} r={dotR} stroke="#64748b" title={d.r ? tip(d.r) : null} />
           ));
         })() : null}
 
         {/* empty-netters: no goalie, so no corner to pick */}
         {dots && real && emptied.length
           ? emptied.map((r, k) => (
-            <Dot key={`e${k}`} r={2.6} fill="#c084fc" title={tip(r)}
+            <Dot key={`e${k}`} r={dotR} fill="#c084fc" title={tip(r)}
               p={spotAt(96, 76, 68, 48, sd + 995 + shotSeed(r, k), 4, NET_BOUNDS)} />
           )) : null}
 
@@ -2734,8 +2738,8 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
         {dots && (real ? blocked.length : blkd) ? (
           <>
             <text x="130" y="176" textAnchor="middle" fontSize="7" className="fill-slate-500">BLOCKED</text>
-            {(real ? blocked : new Array(Math.round(blkd / perDot)).fill(null)).map((r, k) => (
-              <Dot key={`b${k}`} r={2.2} fill="#f59e0b" title={r ? tip(r) : null}
+            {(real ? blocked : new Array(blkd).fill(null)).map((r, k) => (
+              <Dot key={`b${k}`} r={dotR} fill="#f59e0b" title={r ? tip(r) : null}
                 p={spotAt(30, 180, 200, 26, sd + 994 + (r ? shotSeed(r, k) : k * 151), 3)} />
             ))}
           </>
@@ -2762,9 +2766,9 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
           {real && emptied.length ? <span className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-full bg-purple-400 inline-block" />
             <span className="text-slate-300">Empty net</span></span> : null}
-          {real
-            ? <span className="text-slate-500">{real.length} shots · hover for the game</span>
-            : perDot > 1 ? <span className="text-slate-500">1 dot = {perDot} shots</span> : null}
+          <span className="text-slate-500">
+            {real ? `${real.length} shots · hover for the game` : `${faced + miss + blkd} shots, one dot each`}
+          </span>
         </div>
       ) : null}
 
