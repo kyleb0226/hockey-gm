@@ -75,8 +75,13 @@ which is what makes line construction and last change matter.
   games it has played with the same three players (`t.lineChem`/`t.lineSig`, capped at
   `LINE_CHEM_MAX_GAMES`) and is called once per side per game in the even-strength loop, which
   both reads the current streak and advances it. It feeds a small `lineOff` multiplier
-  (`LINE_CHEM_PER_GAME`), so shuffling a line every week costs real offence. Only forwards are
-  tracked today — defence pairs get no equivalent bonus.
+  (`LINE_CHEM_PER_GAME`), so shuffling a line every week costs real offence. `pairChemistry(t,
+  lines)` is the same idea for defence pairs (`t.pairChem`/`t.pairSig`, `PAIR_CHEM_MAX_GAMES`),
+  feeding a `unitDef` multiplier (`PAIR_CHEM_PER_GAME`). Both are computed for each side **before**
+  either side's shots are resolved, in their own pass at the top of the even-strength loop — a
+  defending pair's continuity has to be known (it belongs to the *opponent* of the side generating
+  shots) before that opponent's shot rate is calculated, so the two can't share the single
+  attacker-only pass `lineChemistry` used alone.
 - **Shot zones (`SHOT_ZONES`, `pickZone`):** every shot picks a zone first — rush, cycle or point
   — and the zone decides both *who* shoots (`dBias` makes the point a defenceman's shot) and *how
   stoppable* it is (`save` offsets the goalie's percentage). Conversion must stay ordered

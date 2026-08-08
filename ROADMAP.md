@@ -22,9 +22,10 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   against shots allowed, applied as a multiplier in the same place `momentum` and `legs` are.
 - **M** — Goalie pull strategy. The last-two-minutes block uses fixed 17%/28% odds; make when to
   pull a user setting (down one from 2:00, from 1:00, never) with the payoff moving accordingly.
-- **S** — Defence-pair chemistry. Forward lines now build a continuity bonus via `lineChemistry`
-  (`index.html`); extend the same tracking to `lines.D` pairs, since `unitDef` weights a settled
-  pair the same way `lineOff` weights a settled line.
+- **S** — Chemistry-aware auto lines. `autoLines` rebuilds a lineup from scratch by depth chart
+  every time it's called (after an injury, a trade, a recall), which throws away whatever streak
+  `lineChemistry`/`pairChemistry` had going even when the roster change doesn't touch that line or
+  pair. Have it keep any line/pair untouched by the change instead of always sorting from zero.
 
 ## GM depth
 
@@ -72,8 +73,9 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
 - **M** — A dedicated goalie page in the player modal: workload chart by month, and rest-versus-
   save-percentage, now that both are tracked.
 - **S** — Chemistry in the box score. `GameTab` replays `G.lastGame` but never shows which lines
-  were fully jelled (`t.lineChem[i] >= LINE_CHEM_MAX_GAMES`) going into that game; a small note
-  next to the line score would make the new chemistry bonus visible, not just felt.
+  or D pairs were fully jelled (`t.lineChem[i] >= LINE_CHEM_MAX_GAMES`, and now `t.pairChem[i] >=
+  PAIR_CHEM_MAX_GAMES`) going into that game; a small note next to the line score would make the
+  chemistry bonus visible, not just felt.
 
 ## Housekeeping
 

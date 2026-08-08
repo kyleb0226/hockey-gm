@@ -134,3 +134,11 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   must fall on a day the club actually played, name the right opponent, add up to the season
   totals, grow incrementally rather than in one lump, and every logged goal must appear in the
   scoring record. Harness grew from 362 to 390 assertions.
+- 2026-08-08 · S · Defence pairs now build chemistry the same way forward lines do. `pairChemistry`
+  tracks how many consecutive games a pair has stayed together (`t.pairChem`/`t.pairSig`, capped
+  at `PAIR_CHEM_MAX_GAMES`) and feeds a small `unitDef` bonus, so a settled shutdown pair actually
+  defends better and shuffling the blue line every week costs real defence — it used to cost
+  nothing, since `unitDef` had no continuity term at all. Both chemistry reads now happen in a
+  pass before either side's shots are resolved, since a defending pair's streak belongs to the
+  opponent of whoever's shooting. The Lines tab shows a filled dot next to a capped-out pair, same
+  as it already did for forward lines. Harness grew from 390 to 394 assertions.

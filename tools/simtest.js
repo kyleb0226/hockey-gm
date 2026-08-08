@@ -45,7 +45,7 @@ const EXPORTS = [
   "DRAFT_ROUNDS", "draftPicksTotal", "closeDraft", "scoutProspect", "scoutedOvr", "scoutedPot",
   "scoutBand", "scoutLabel", "draftValue", "SCOUT_POINTS",
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
-  "lineChemistry", "LINE_CHEM_MAX_GAMES",
+  "lineChemistry", "LINE_CHEM_MAX_GAMES", "pairChemistry", "PAIR_CHEM_MAX_GAMES",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -489,6 +489,18 @@ const CHECKS = {
     live.F[1][0] = tmp;
     A.simDays(G, 10);
     ok(t0.lineChem[0] < A.LINE_CHEM_MAX_GAMES, `swapping the top line resets its chemistry streak (now ${t0.lineChem[0]})`);
+
+    // Defence pairs build the same continuity bonus as forward lines.
+    ok(t0.pairChem[0] > 0, `an intact top pair has built chemistry (${t0.pairChem[0]} games)`);
+    ok(t0.pairChem.every((g) => g <= A.PAIR_CHEM_MAX_GAMES), "pair chemistry caps out rather than growing forever");
+    A.simDays(G, 60);
+    ok(t0.pairChem[0] === A.PAIR_CHEM_MAX_GAMES, `a pair left alone for a season hits the cap (${t0.pairChem[0]})`);
+    const liveD = A.ensureLines(G, 0);
+    const tmpD = liveD.D[0][0];
+    liveD.D[0][0] = liveD.D[1][0];
+    liveD.D[1][0] = tmpD;
+    A.simDays(G, 10);
+    ok(t0.pairChem[0] < A.PAIR_CHEM_MAX_GAMES, `swapping the top pair resets its chemistry streak (now ${t0.pairChem[0]})`);
 
     // An injury must not leave a hole in the lineup.
     const victim = G.players[L.F[0][1]];
