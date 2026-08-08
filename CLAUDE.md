@@ -212,6 +212,35 @@ attempts that actually reached him. Both are capped (`SHOT_LOG_MAX`, `GAME_LOG_M
 **cleared at the rollover** — they're a this-season view. As with the play-by-play, the game and
 the outcome are real; the clock time within the game is generated.
 
+## Deployment, the staff and the room
+- **Ice time** (`t.iceF`, `iceTimeF`) is a per-club split, normalised on read, so a save without
+  one plays the standard 30/27/24/19. Riding a line costs fatigue, which is already wired.
+- **Matchups** (`t.checkLine`, `matchupMix`) decide which of THEIR lines each of yours sees.
+  Line-for-line is the default; a checking line chases their best and the scoring line is steered
+  toward their depth. **Last change is the whole point**: the effect is 0.62 at home and 0.22 away.
+- **Coaching** (`SYSTEMS`, `coachOf`): the system multiplies shot rate in the same place `momentum`
+  and `legs` do — ours pushes our volume, theirs decides what they allow. `pp`/`pk` move special
+  teams, `dev` moves prospect progression in `progress()`.
+- **Rivalries** (`t.rivalId`, `isRivalry`) are paired inside a division, so they're always mutual
+  and nobody is left out. A rivalry night plays 4.5% harder both ways and fights nearly double.
+- **The room**: `personalityOf` is derived from the player id, so it's stable for a career and an
+  old save gets one for free. It is pure character and **never touches a rating**. `letters()`
+  computes the C and the two A's from `leadership()` on the fly rather than storing them, so a
+  trade can't leave a departed player wearing the C; `t.captainId` overrides it.
+- **The board's ask** (`MANDATES`, `setMandate`, `seasonAchievement`): set from team strength at
+  every rollover and judged when the Cup is handed out, so `boardConfidence` moves against a
+  stated expectation instead of a flat did-you-make-the-playoffs.
+- **Hall of Fame** (`hofScore`, `runHallOfFame`): eligible `HOF_WAIT` years after retiring, capped
+  at `HOF_CLASS_MAX` a year over `HOF_BAR`. Inductees are exempt from `pruneSave`.
+- **The block** (`setBlock`, `generateOffers`, `acceptOffer`): listing a player invites offers
+  every fifth day; the AI still has to want him and be able to fit him.
+- **Draft-day picks**: `tradablePicks` includes this year's picks whose slot hasn't come up yet.
+  `seedPicks` starts at the CURRENT year — seeding only future years meant the first draft had no
+  tradeable picks at all. Only `PICK_ROUNDS` rounds are tradeable; the rest fall back to `orig`.
+
+**A React component that doesn't exist still passes the harness** — the harness never renders. A
+UI addition needs a browser pass; two components were silently missing while 448 checks were green.
+
 ## The GM layer
 - **Retained salary** (`G.retained`, `effectiveCap`, `retainedBy`): a club keeps up to
   `RETAIN_MAX_PCT` of a contract it trades away, for the contract's full remaining term, capped at

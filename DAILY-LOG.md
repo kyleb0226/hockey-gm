@@ -142,3 +142,16 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   pass before either side's shots are resolved, since a defending pair's streak belongs to the
   opponent of whoever's shooting. The Lines tab shows a filled dot next to a capped-out pair, same
   as it already did for forward lines. Harness grew from 390 to 394 assertions.
+- 2026-08-08 · L · Thirteen features in one pass, by hand. Deployment: per-line ice time you can push, and
+  matchup control where a checking line chases their best — last change is worth 0.62 at home
+  against 0.22 away, so home ice finally means something you can use. Staff: every club has a head
+  coach with a system (forecheck/balanced/trap) that multiplies shot rates, plus power play,
+  penalty kill and development ratings that all bite. Rivalries paired inside each division, mutual
+  by construction, played 4.5% harder with nearly double the fights. The room: characters derived
+  from player id, a captain and two alternates computed from leadership rather than stored, and a
+  morale figure. A board mandate set from team strength each year and judged against what actually
+  happened. Hall of Fame with a three-year wait and a capped class. Club colours, jersey-raising on
+  the wire, a trade block that draws real offers, draft-day pick trading, and a pre-game scouting
+  report naming the opposing starter and where he's soft. Harness grew from 394 to 452 assertions.
+  Worth remembering: two whole React components were missing after a bad edit and all 448 checks
+  still passed, because the harness never renders. The browser pass caught it.

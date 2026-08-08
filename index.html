@@ -81,6 +81,20 @@ const TEAMS = [
   { city:"Anchorage",   name:"Aurora",      abbr:"ANC", conf:1, div:3, mkt:1 },
   { city:"Eugene",      name:"Emeralds",    abbr:"EUG", conf:1, div:3, mkt:2 },
 ];
+/* Two colours a club, so the standings, bracket, box score and shot maps all
+   stop being uniformly blue. Index-matched to TEAMS. */
+const COLOURS = [
+  ["#1e3a8a", "#f8fafc"], ["#7f1d1d", "#fbbf24"], ["#064e3b", "#a7f3d0"], ["#312e81", "#c7d2fe"],
+  ["#0c4a6e", "#7dd3fc"], ["#7c2d12", "#fed7aa"], ["#4c1d95", "#ddd6fe"], ["#134e4a", "#5eead4"],
+  ["#111827", "#ef4444"], ["#7e22ce", "#f5d0fe"], ["#831843", "#fbcfe8"], ["#1e40af", "#93c5fd"],
+  ["#365314", "#bef264"], ["#0f172a", "#38bdf8"], ["#78350f", "#fcd34d"], ["#0e7490", "#a5f3fc"],
+  ["#9a3412", "#fdba74"], ["#166534", "#86efac"], ["#1e1b4b", "#a5b4fc"], ["#701a75", "#f0abfc"],
+  ["#14532d", "#4ade80"], ["#0369a1", "#bae6fd"], ["#b91c1c", "#fecaca"], ["#3730a3", "#c7d2fe"],
+  ["#155e75", "#67e8f9"], ["#1f2937", "#9ca3af"], ["#57534e", "#e7e5e4"], ["#166534", "#bbf7d0"],
+  ["#92400e", "#fde68a"], ["#5b21b6", "#ddd6fe"], ["#0b3b5c", "#7dd3fc"], ["#14532d", "#d9f99d"],
+];
+const clubColour = (t) => COLOURS[(t && t.id != null ? t.id : 0) % COLOURS.length];
+
 const CONFS = ["East", "West"];
 const DIVS  = ["Atlantic", "Metro", "Central", "Pacific"];
 const DIV_CONF = [0, 0, 1, 1];
@@ -126,6 +140,145 @@ const DIFFICULTIES = {
   normal:    { label:"Normal",    budget:1.0,  askPrice:1.0,  injury:1.0,  patience:1.0 },
   cutthroat: { label:"Cutthroat", budget:0.9,  askPrice:1.15, injury:1.25, patience:0.55 },
 };
+
+/* ----------------------------- the board's ask -----------------------------
+ * boardConfidence existed but nothing ever said what was expected, so a season
+ * had no stated stakes. A mandate is set at the start of every year from where
+ * the club actually is, and judged when the Cup is handed out.
+ * ------------------------------------------------------------------------- */
+const MANDATES = {
+  rebuild:   { label: "Develop the young players", need: 0,  blurb: "Nobody expects the playoffs. Bring the kids along." },
+  compete:   { label: "Push for a playoff spot",   need: 1,  blurb: "Be in it in March." },
+  playoffs:  { label: "Make the playoffs",         need: 1,  blurb: "Anything less is a failed season." },
+  round:     { label: "Win a round",               need: 2,  blurb: "Getting in isn't the job any more." },
+  contend:   { label: "Reach the Cup Final",       need: 3,  blurb: "This roster was built to go deep." },
+  cup:       { label: "Win the Cup",               need: 4,  blurb: "It's the Cup or it's a wasted year." },
+};
+function setMandate(G) {
+  const t = G.teams[G.userTeam];
+  const strength = teamStrength(G, G.userTeam);
+  const last = t.seasons && t.seasons.length ? t.seasons[t.seasons.length - 1] : null;
+  const wonCup = last && last.cup;
+  let key = "rebuild";
+  if (wonCup || strength >= 66) key = "cup";
+  else if (strength >= 63) key = "contend";
+  else if (strength >= 60) key = "round";
+  else if (strength >= 57) key = "playoffs";
+  else if (strength >= 54) key = "compete";
+  G.mandate = { key, year: G.year, ...MANDATES[key] };
+  return G.mandate;
+}
+/* What the club actually achieved, on the mandate's own scale. */
+function seasonAchievement(G) {
+  const P = G.playoffs;
+  if (!P) return 0;
+  const made = P.rounds[0].some((s) => s.hi === G.userTeam || s.lo === G.userTeam);
+  if (!made) return 0;
+  if (P.champion === G.userTeam) return 4;
+  const rounds = P.rounds.filter((rd) => rd.some((s) => s.winner === G.userTeam)).length;
+  return Math.min(3, 1 + rounds);
+}
+
+/* -------------------------------- the room ---------------------------------
+ * Hockey is the most dressing-room sport there is and the game had none of it.
+ * A personality is derived from the player's id, so it's stable for his whole
+ * career and an old save gets one without reshuffling anybody. It is pure
+ * character — it never touches a rating — but it decides who wears the C, how
+ * he takes a bad run, and how much the room sags when things go wrong.
+ * ------------------------------------------------------------------------- */
+const PERSONALITIES = [
+  { key: "leader",    label: "Natural leader",  lead: 2.2, steady: 1.6 },
+  { key: "quiet",     label: "Quiet pro",       lead: 1.1, steady: 1.5 },
+  { key: "warrior",   label: "Warrior",         lead: 1.6, steady: 1.2 },
+  { key: "sniper",    label: "Pure shooter",    lead: 0.7, steady: 0.9 },
+  { key: "hothead",   label: "Hothead",         lead: 0.5, steady: 0.4 },
+  { key: "joker",     label: "Room joker",      lead: 0.9, steady: 1.3 },
+  { key: "workhorse", label: "Workhorse",       lead: 1.3, steady: 1.4 },
+  { key: "moody",     label: "Moody",           lead: 0.4, steady: 0.5 },
+];
+const personalityOf = (p) => PERSONALITIES[(p.id * 2749) % PERSONALITIES.length];
+
+/* Who deserves the letter: leadership is what he is, plus what he's done, plus
+   how long he's been here. Age matters — a 21-year-old rarely gets the C. */
+function leadership(G, p) {
+  const per = personalityOf(p);
+  const yrs = (p.career || []).filter((c) => c.teamId === p.teamId).length;
+  return per.lead * 10
+    + Math.max(0, p.age - 22) * 1.6
+    + p.ovr * 0.22
+    + yrs * 2.4
+    + (p.rings || []).length * 3
+    + (p.trophies || []).length * 2;
+}
+/* The captain and two alternates, recomputed when the roster changes rather
+   than stored, so a trade can never leave a departed player wearing the C. */
+function letters(G, teamId) {
+  const r = rosterOf(G, teamId).filter((p) => p.pos !== "G")
+    .sort((a, b) => leadership(G, b) - leadership(G, a));
+  const t = G.teams[teamId];
+  // A named captain is honoured as long as he's still here and healthy enough.
+  const named = t.captainId != null ? r.find((p) => p.id === t.captainId) : null;
+  const cap = named || r[0] || null;
+  const alts = r.filter((p) => !cap || p.id !== cap.id).slice(0, 2);
+  return { captain: cap, alternates: alts };
+}
+const letterFor = (G, p) => {
+  if (p.teamId == null || p.pos === "G") return null;
+  const { captain, alternates } = letters(G, p.teamId);
+  if (captain && captain.id === p.id) return "C";
+  return alternates.some((a) => a.id === p.id) ? "A" : null;
+};
+
+/* How settled the room is, 0-100. Winning and leadership hold it up; a losing
+   run and a roster full of hotheads drag it down. It feeds the board's read of
+   the season and nudges how a club performs when things are going badly. */
+function roomMorale(G, teamId) {
+  const t = G.teams[teamId];
+  const r = rosterOf(G, teamId).filter((p) => p.pos !== "G");
+  if (!r.length) return 50;
+  const steady = r.reduce((s, p) => s + personalityOf(p).steady, 0) / r.length;
+  const form = (t.l10 || []).reduce((s, x) => s + (x === "W" ? 1 : x === "O" ? 0.4 : -0.8), 0);
+  const { captain } = letters(G, teamId);
+  const capBonus = captain ? personalityOf(captain).lead * 2.2 : 0;
+  return Math.round(clamp(50 + form * 3.4 + (steady - 1.1) * 18 + capBonus, 0, 100));
+}
+
+/* ------------------------------ the staff ---------------------------------
+ * A head coach is a system and two competences. The system trades shot volume
+ * against shots allowed — it multiplies in the same place `momentum` and `legs`
+ * do — while the special-teams and development ratings move the power play, the
+ * kill, and how fast prospects come along.
+ * ------------------------------------------------------------------------- */
+const SYSTEMS = {
+  aggressive: { label: "Aggressive forecheck", off: 1.075, def: 1.055,
+    blurb: "More chances both ways. Good with legs, punished by a slow defence." },
+  balanced:   { label: "Balanced", off: 1.0, def: 1.0,
+    blurb: "No edge and no hole. Whatever your roster is, that's what you get." },
+  trap:       { label: "Neutral-zone trap", off: 0.935, def: 0.925,
+    blurb: "Strangles the game. Wins you low-scoring nights, wastes a scoring line." },
+};
+const COACH_FIRST = ["Dale", "Barry", "Ken", "Mike", "Claude", "Rod", "Jon", "Bruce", "Pete", "Gerard",
+  "Lindy", "Craig", "Sheldon", "Todd", "Andre", "Marc", "Randy", "Bob", "Rick", "Guy"];
+const COACH_LAST = ["Hitchens", "Trotman", "Boudreault", "Quennel", "Julienne", "Tortora", "Maurer",
+  "Cassidy", "Laviolette", "Gallantry", "Ruffe", "Berube", "Keefer", "McLellan", "Tocchetti", "Vigneau"];
+
+function genCoach(G, tier) {
+  const sysKeys = Object.keys(SYSTEMS);
+  return {
+    name: pick(G, COACH_FIRST) + " " + pick(G, COACH_LAST),
+    system: pick(G, sysKeys),
+    pp: Math.round(clamp(gauss(G, tier, 9), 25, 95)),   // power play
+    pk: Math.round(clamp(gauss(G, tier, 9), 25, 95)),   // penalty kill
+    dev: Math.round(clamp(gauss(G, tier, 9), 25, 95)),  // develops prospects
+    years: ri(G, 1, 4),
+  };
+}
+const coachOf = (t) => t.coach || { system: "balanced", pp: 55, pk: 55, dev: 55, name: "Interim" };
+const systemOf = (t) => SYSTEMS[coachOf(t).system] || SYSTEMS.balanced;
+
+/* A rivalry night is louder: both sides push, gloves come off more often, and
+   the result moves the room further than an ordinary Tuesday would. */
+const isRivalry = (G, a, b) => G.teams[a] && G.teams[a].rivalId === b;
 
 const CAP_FLOOR_PCT = 0.76;
 const MIN_SALARY = 0.78;
@@ -639,6 +792,11 @@ function newGame(userTeam, opts) {
     news: [],
     retained: [],
     waivers: [],
+    mandate: null,
+    lastMandate: null,
+    hall: [],
+    block: [],
+    offers: [],
     shotLog: {},
     gameLog: {},
     records: null,
@@ -692,6 +850,17 @@ function newGame(userTeam, opts) {
     }
     t.lines = autoLines(G, t.id);
     t.budget = round1(20 + t.mkt * 6);
+    t.coach = genCoach(G, 50 + t.mkt * 3);
+  });
+
+  /* Rivalries, paired inside each division so they're always mutual. Eight
+     clubs a division makes four pairs; nobody is left without one. */
+  DIVS.forEach((_, d) => {
+    const ids = G.teams.filter((t) => t.div === d).map((t) => t.id);
+    for (let i = 0; i + 1 < ids.length; i += 2) {
+      G.teams[ids[i]].rivalId = ids[i + 1];
+      G.teams[ids[i + 1]].rivalId = ids[i];
+    }
   });
 
   // Free agent pool and this year's draft picks.
@@ -700,15 +869,22 @@ function newGame(userTeam, opts) {
     G.players[p.id] = p;
     G.freeAgents.push(p.id);
   }
-  seedPicks(G, G.year + 1, 3);
+  seedPicks(G, G.year, 4);
 
   buildSchedule(G);
+  setMandate(G);
   return G;
 }
 
+/* Tradeable pick records. Rounds beyond `PICK_ROUNDS` still exist in the draft —
+   `pickOwner` falls back to the original club — they just can't be traded, which
+   keeps the record count bounded. Seeding starts at the CURRENT year so this
+   year's picks can move on draft day; seeding only future years meant the very
+   first draft had no tradeable picks at all. */
+const PICK_ROUNDS = 3;
 function seedPicks(G, fromYear, years) {
   for (let y = 0; y < years; y++) {
-    for (let rd = 1; rd <= 2; rd++) {
+    for (let rd = 1; rd <= PICK_ROUNDS; rd++) {
       G.teams.forEach((t) => G.picks.push({ year: fromYear + y, round: rd, owner: t.id, orig: t.id }));
     }
   }
@@ -731,6 +907,9 @@ function migrate(G) {
   if (!G.shotLog) G.shotLog = {};
   if (G.scoutPoints == null) G.scoutPoints = 0;
   if (!G.draftLog) G.draftLog = [];
+  if (!G.block) G.block = [];
+  if (!G.offers) G.offers = [];
+  if (!G.hall) G.hall = [];
   if (!G.gameLog) G.gameLog = {};
   playersOf(G).forEach((p) => {
     if (!p.stats) p.stats = blankStats(p.pos);
@@ -773,6 +952,48 @@ function migrate(G) {
  * home side gets last change: a small bias toward putting its top line against
  * the opponent's weaker pairs.
  * ========================================================================== */
+
+/* ------------------------------ deployment --------------------------------
+ * Two levers the coach actually has: how the minutes are split, and who plays
+ * against whom. Ice time is stored per club and normalised on read, so a save
+ * that predates it still behaves exactly as before.
+ * ------------------------------------------------------------------------- */
+
+function normalise(arr, fallback) {
+  if (!arr || arr.length !== fallback.length) return fallback.slice();
+  const tot = arr.reduce((a, b) => a + Math.max(0, b), 0);
+  if (tot <= 0) return fallback.slice();
+  return arr.map((v) => Math.max(0, v) / tot);
+}
+const iceTimeF = (t) => normalise(t && t.iceF, LINE_TOI);
+
+/* How often our line `li` sees each of their four. Line-for-line is the default
+   because that's what happens when nobody is steering. With last change, the
+   home coach gets to steer: his designated checking line chases their best, and
+   his own top line is pushed away from it toward their depth. On the road he
+   can only ask — the other bench answers. */
+function matchupMix(G, side, li, oppT) {
+  const mix = [0, 0, 0, 0];
+  const base = Math.min(3, li);
+  mix[base] = 1;
+  const myT = G.teams[side.box.teamId];
+  const check = myT.checkLine;
+  if (check == null) return mix;
+  // Away, the coach still tries, he just doesn't get the last word.
+  const power = side.isHome ? 0.62 : 0.22;
+  if (li === check) {
+    // Throw this line at their top line.
+    for (let k = 0; k < 4; k++) mix[k] *= (1 - power);
+    mix[0] += power;
+  } else if (li === 0 && check !== 0) {
+    // And keep our best away from their checkers, out against their depth.
+    for (let k = 0; k < 4; k++) mix[k] *= (1 - power);
+    mix[2] += power * 0.55;
+    mix[3] += power * 0.45;
+  }
+  const tot = mix.reduce((a, b) => a + b, 0);
+  return tot > 0 ? mix.map((v) => v / tot) : [1, 0, 0, 0];
+}
 
 const ES_MINUTES = 47;      // even strength
 const PP_MIN_PER = 1.7;     // ice time per power play
@@ -1027,11 +1248,17 @@ function simGame(G, homeId, awayId, opts) {
     { box: away, opp: home, lines: al, gid: aG, oppGid: hG, oppLines: hl, isHome: false },
   ];
 
+  // ---- rivalry ----
+  // A rivalry night is played harder by both sides: more push, more gloves off,
+  // and a result the room feels for longer.
+  const rivalNight = isRivalry(G, homeId, awayId);
+  const rivalHeat = rivalNight ? 1.045 : 1;
+
   // ---- fighting ----
   // A fight is five minutes each and a small, real swing in who carries the play
   // afterwards. It never touches the scoreboard directly.
   const momentum = { [homeId]: 1, [awayId]: 1 };
-  if (R.fighting && rnd(G) < 0.22) {
+  if (R.fighting && rnd(G) < (rivalNight ? 0.38 : 0.22)) {
     const enforcer = (tid) => {
       const pool = activeRoster(G, tid).filter((p) => p.pos !== "G")
         .sort((x, y) => y.r.phy - x.r.phy).slice(0, 5);
@@ -1066,14 +1293,24 @@ function simGame(G, homeId, awayId, opts) {
   sides.forEach((side) => {
     const chem = teamChemF[side.box.teamId];
     const oppChemD = teamChemD[side.opp.teamId];
+    const myT = G.teams[side.box.teamId];
+    const oppT = G.teams[side.opp.teamId];
+    const fIce = iceTimeF(myT);
     side.lines.F.forEach((fLine, li) => {
-      const mins = ES_MINUTES * LINE_TOI[li];
-      // Last change: at home, the top line sees soft matchups more often.
+      const mins = ES_MINUTES * fIce[li];
+      // Which of THEIR lines this one sees. The default is line-for-line, but
+      // last change bends it: at home a coach hides his top line from their
+      // checkers and throws his checking line at their best.
+      const oppMix = matchupMix(G, side, li, oppT);
+      // Last change: at home, the top line sees soft pairs more often.
       side.oppLines.D.forEach((pair, pi) => {
         let share = PAIR_TOI[pi];
         if (side.isHome) share *= li === 0 ? (pi === 2 ? 1.28 : pi === 1 ? 1.05 : 0.78) : 1;
         const m = mins * share;
-        const oppF = side.oppLines.F[Math.min(3, li)];
+        // Draw the opposing forward line from the matchup distribution.
+        let ox = rnd(G), oi = oppMix.length - 1;
+        for (let k = 0; k < oppMix.length; k++) { ox -= oppMix[k]; if (ox <= 0) { oi = k; break; } }
+        const oppF = side.oppLines.F[oi] || side.oppLines.F[0];
         // The unit on the ice is five skaters, not three. Which of our own pairs
         // is out there is drawn by ice-time share — that's what puts defencemen
         // on the scoresheet at all, and it evens out across a season.
@@ -1084,7 +1321,10 @@ function simGame(G, homeId, awayId, opts) {
         const off = lineOff(G, fLine) * (1 + chem[li] * LINE_CHEM_PER_GAME);
         const def = unitDef(G, oppF, pair) * (1 + oppChemD[pi] * PAIR_CHEM_PER_GAME);
         // ~30 shots per 60 at even strength for an average team.
-        const rate = (30.5 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId];
+        const sys = systemOf(myT), oppSys = systemOf(oppT);
+        // Our system pushes our own volume; theirs decides how much they allow.
+        const rate = (30.5 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId]
+          * sys.off * oppSys.def * rivalHeat;
         const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)) * 0.9)));
         resolveShots(G,
           { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },
@@ -1111,7 +1351,9 @@ function simGame(G, homeId, awayId, opts) {
     const unit = side.lines.PP[0].length ? side.lines.PP[0] : side.lines.F[0];
     const pkUnit = side.oppLines.PK[0].length ? side.oppLines.PK[0] : side.oppLines.D[0];
     const m = drawn * PP_MIN_PER;
-    const rate = (52 / 60) * (lineOff(G, unit) / unitDef(G, pkUnit, side.oppLines.D[0]));
+    const ppC = coachOf(G.teams[side.box.teamId]), pkC = coachOf(G.teams[side.opp.teamId]);
+    const rate = (52 / 60) * (lineOff(G, unit) / unitDef(G, pkUnit, side.oppLines.D[0]))
+      * (1 + (ppC.pp - 55) * 0.0035) * (1 - (pkC.pk - 55) * 0.0030);
     const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)))));
     resolveShots(G, { off: 1, ppOff: 1, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },
       shots, unit, pkUnit, side.oppGid, "pp");
@@ -1409,6 +1651,8 @@ function simDay(G) {
   processWaivers(G);
   playedToday.forEach((tid) => simFarmDay(G, tid));
   checkMilestones(G);
+  // Clubs ring about listed players every few days rather than instantly.
+  if ((G.block || []).length && G.day % 5 === 0) generateOffers(G);
   if (G.day === deadlineDay(G)) { aiDeadlineMoves(G); news(G, "The trade deadline has passed.", "info"); }
   if (G.day === G.allStarDay && !G.allStar) runAllStar(G);
 
@@ -1607,6 +1851,61 @@ function endRegularSeason(G) {
   return G;
 }
 
+/* ----------------------------- the Hall of Fame ----------------------------
+ * Rings, trophies and honoured numbers all accumulate; this is what they were
+ * for. Eligible three years after retiring, judged on a career score, and the
+ * class is capped so induction stays worth something.
+ * ------------------------------------------------------------------------- */
+const HOF_WAIT = 3;         // years after retirement before he's on the ballot
+const HOF_CLASS_MAX = 3;    // inducted per year
+const HOF_BAR = 62;         // career score needed
+
+function hofScore(G, p) {
+  const c = p.career || [];
+  const gp = c.reduce((s, x) => s + (x.gp || 0), 0);
+  if (!gp) return 0;
+  if (p.pos === "G") {
+    const sv = c.reduce((s, x) => s + (x.sv || 0), 0);
+    const sa = c.reduce((s, x) => s + (x.sa || 0), 0);
+    const w = c.reduce((s, x) => s + (x.w || 0), 0);
+    const so = c.reduce((s, x) => s + (x.so || 0), 0);
+    return w * 0.16 + so * 1.1 + (sa ? (sv / sa - 0.9) * 900 : 0)
+      + (p.trophies || []).length * 9 + (p.rings || []).length * 7 + (p.allStars || []).length * 2;
+  }
+  const g = c.reduce((s, x) => s + (x.g || 0), 0);
+  const a = c.reduce((s, x) => s + (x.a || 0), 0);
+  return (g + a) * 0.11 + g * 0.05
+    + (p.trophies || []).length * 9 + (p.rings || []).length * 7 + (p.allStars || []).length * 2;
+}
+function runHallOfFame(G) {
+  G.hall = G.hall || [];
+  const inducted = new Set(G.hall.map((h) => h.pid));
+  const ballot = playersOf(G)
+    .filter((p) => p.retired && !inducted.has(p.id))
+    .filter((p) => p.retiredYear == null || G.year - p.retiredYear >= HOF_WAIT)
+    .map((p) => ({ p, score: hofScore(G, p) }))
+    .filter((x) => x.score >= HOF_BAR)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, HOF_CLASS_MAX);
+  ballot.forEach(({ p, score }) => {
+    const c = p.career || [];
+    G.hall.push({
+      pid: p.id, name: fullName(p), pos: p.pos, year: G.year,
+      score: Math.round(score),
+      gp: c.reduce((s, x) => s + (x.gp || 0), 0),
+      g: c.reduce((s, x) => s + (x.g || 0), 0),
+      a: c.reduce((s, x) => s + (x.a || 0), 0),
+      w: c.reduce((s, x) => s + (x.w || 0), 0),
+      rings: (p.rings || []).length,
+      trophies: (p.trophies || []).length,
+      teamId: c.length ? c[c.length - 1].teamId : null,
+    });
+    p.hof = G.year;
+    news(G, `${fullName(p)} has been elected to the Hall of Fame.`, "good");
+  });
+  return G.hall;
+}
+
 /* ------------------------------ record book -------------------------------
  * League records survive across seasons, and a player closing on one is worth
  * a line on the wire while it's still in doubt.
@@ -1746,8 +2045,15 @@ function finishSeason(G) {
   // Board reaction: making the playoffs is the baseline expectation.
   const me = G.teams[G.userTeam];
   const made = G.playoffs && G.playoffs.rounds[0].some((s) => s.hi === G.userTeam || s.lo === G.userTeam);
-  let swing = made ? 6 : -12;
-  if (champ === G.userTeam) swing = 30;
+  // Judged against what the board actually asked for at the start of the year,
+  // not against a flat "did you make the playoffs".
+  const want = (G.mandate && G.mandate.need) || 1;
+  const got = seasonAchievement(G);
+  let swing = (got - want) * 9;
+  if (champ === G.userTeam) swing = Math.max(swing, 30);
+  if (got >= want) news(G, `The board is satisfied: ${(G.mandate && G.mandate.label) || "expectations met"}.`, "good");
+  else news(G, `The board wanted more: ${(G.mandate && G.mandate.label) || "expectations"}.`, "bad");
+  G.lastMandate = { ...(G.mandate || {}), got, met: got >= want };
   G.boardConfidence = clamp(G.boardConfidence + (swing < 0 ? swing / diff(G).patience : swing * diff(G).patience), 0, 100);
 
   // Ageing, progression and contract expiry all happen HERE rather than at the
@@ -1806,9 +2112,9 @@ function finishSeason(G) {
         const t = G.teams[+home];
         t.honours = t.honours || [];
         t.honours.push({ pid: p.id, name: fullName(p), pos: p.pos, seasons: byClub[home], pts: careerPts, year: G.year });
-        news(G, `${G.teams[+home].name} will honour ${fullName(p)} after ${byClub[home]} seasons.`, "good");
+        news(G, `The ${G.teams[+home].name} will raise ${fullName(p)}\u2019s number to the rafters — ${byClub[home]} seasons, ${careerPts} points.`, "good");
       }
-      p.teamId = null; p.retired = true;
+      p.teamId = null; p.retired = true; p.retiredYear = G.year;
       const i = G.freeAgents.indexOf(p.id); if (i >= 0) G.freeAgents.splice(i, 1);
       return;
     }
@@ -1880,12 +2186,13 @@ function finishSeason(G) {
       // A career worth remembering buys a place in the record; a dozen games
       // eight years ago does not.
       const games = (p.career || []).reduce((s, c) => s + (c.gp || 0), 0);
-      if ((p.trophies || []).length || (p.rings || []).length || games >= 200) return;
+      if (p.hof != null || (p.trophies || []).length || (p.rings || []).length || games >= 200) return;
       delete G.players[p.id];
     });
     G.freeAgents = G.freeAgents.filter((id) => G.players[id]);
   }
 
+  runHallOfFame(G);
   buildDraftClass(G);
   return G;
 }
@@ -2299,6 +2606,112 @@ function doTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts) {
   return ev;
 }
 
+/* -------------------------------- the market -------------------------------
+ * Two things a GM does that the game only let the AI do: listen to offers, and
+ * trade on draft day.
+ * ------------------------------------------------------------------------- */
+
+/* Players you've made available. Listing a player invites offers rather than
+   forcing a sale — the AI still has to want him. */
+/* Picks you can actually move. Future years always; this year's too while the
+   draft is still running and the slot hasn't come up yet — trading up or down
+   on the clock is where draft-day drama lives. */
+function tradablePicks(G, teamId) {
+  const out = (G.picks || []).filter((pk) => pk.owner === teamId && pk.year > G.year);
+  if (G.phase === "offseason" && G.draftClass && G.draftClass.length) {
+    const used = new Set((G.draftLog || []).map((d) => `${d.round}-${d.pick}`));
+    (G.picks || []).forEach((pk) => {
+      if (pk.owner !== teamId || pk.year !== G.year) return;
+      // Its slot in this year's order — gone once that pick has been made.
+      const slot = G.draftOrder.indexOf(pk.orig) + (pk.round - 1) * G.teams.length;
+      if (slot >= G.draftPick) out.push(pk);
+    });
+  }
+  return out.sort((a, b) => a.year - b.year || a.round - b.round);
+}
+
+/* Who's likely to be in the other net, and where he's soft. The information
+   exists — goalieHole is permanent and the shot maps already draw it — but
+   nothing surfaced it before the game it matters for. */
+function nextOpponent(G) {
+  if (G.phase !== "regular") return null;
+  const day = G.schedule[G.day] || [];
+  const fx = day.find((f) => f.home === G.userTeam || f.away === G.userTeam);
+  if (!fx) return null;
+  const oppId = fx.home === G.userTeam ? fx.away : fx.home;
+  const lines = ensureLines(G, oppId);
+  const starter = G.players[pickStarter(G, lines, restFor(G, oppId))];
+  return {
+    teamId: oppId,
+    home: fx.home === G.userTeam,
+    rivalry: isRivalry(G, G.userTeam, oppId),
+    starter,
+    hole: starter ? goalieHole(starter) : null,
+    rest: restFor(G, oppId),
+    form: (G.teams[oppId].l10 || []).slice(-5).join(""),
+  };
+}
+
+function setBlock(G, pid, on) {
+  G.block = G.block || [];
+  const i = G.block.indexOf(pid);
+  if (on && i < 0) G.block.push(pid);
+  if (!on && i >= 0) G.block.splice(i, 1);
+  return G.block;
+}
+const onBlock = (G, pid) => (G.block || []).includes(pid);
+
+/* Clubs ring about the players you've listed. An offer is built from what they
+   can actually afford and are willing to give up, so accepting it is a real
+   decision rather than a formality. */
+function generateOffers(G) {
+  G.offers = [];
+  if (!tradesOpen(G)) return G.offers;
+  (G.block || []).forEach((pid) => {
+    const p = G.players[pid];
+    if (!p || p.teamId !== G.userTeam || hasNtc(p)) return;
+    const want = tradeValue(G, p);
+    G.teams.forEach((t) => {
+      if (t.id === G.userTeam || G.offers.length >= 12) return;
+      // Only clubs with a hole at his position and room to fit him bother.
+      const theirs = rosterOf(G, t.id).filter((x) => x.pos === p.pos);
+      const best = theirs.sort((a, b) => b.ovr - a.ovr)[0];
+      if (best && best.ovr >= p.ovr + 3) return;
+      if (rules(G).hardCap && capHit(G, t.id) + effectiveCap(G, p) > rules(G).capAmount) return;
+      if (rnd(G) > 0.28) return;
+      // Build a package: a body and/or a pick, up to roughly what he's worth.
+      const pool = rosterOf(G, t.id).filter((x) => !hasNtc(x) && x.id !== best?.id)
+        .sort((a, b) => tradeValue(G, a) - tradeValue(G, b));
+      const picks = (G.picks || []).filter((pk) => pk.owner === t.id && pk.year > G.year);
+      const give = [], givePicks = [];
+      let got = 0;
+      for (const cand of pool) {
+        if (got >= want * 0.92) break;
+        const v = tradeValue(G, cand);
+        if (got + v > want * 1.45) continue;
+        give.push(cand.id); got += v;
+      }
+      for (const pk of picks) {
+        if (got >= want * 0.92) break;
+        givePicks.push(pk); got += pickValue(G, pk);
+      }
+      if (got < want * 0.7) return;
+      G.offers.push({ from: t.id, want: pid, give, givePicks, value: round1(got), ask: round1(want) });
+    });
+  });
+  return G.offers;
+}
+function acceptOffer(G, index) {
+  const o = (G.offers || [])[index];
+  if (!o) return { ok: false, why: "no such offer" };
+  const res = doTrade(G, G.userTeam, [o.want], [], o.from, o.give, o.givePicks);
+  if (res.ok) {
+    setBlock(G, o.want, false);
+    G.offers.splice(index, 1);
+  }
+  return res;
+}
+
 /* ---------------------------------- waivers -------------------------------
  * A young player can be shuttled to the farm freely. Once he's established, he
  * has to clear waivers first — and a rival with room can simply take him.
@@ -2462,8 +2875,12 @@ function progress(G, p) {
   else if (p.age < peak + 4) delta = gauss(G, 0.2, 1.4);
   else delta = gauss(G, -(p.age - peak - 3) * 0.95, 1.5);
   // A young player developing on the farm improves faster than one riding an
-  // NHL bench for eight minutes a night.
+  // NHL bench for eight minutes a night — and a coach who develops players is
+  // worth real progression on top of that.
   if (p.farm && p.age <= 23) delta += 1.5;
+  if (p.age <= 24 && p.teamId != null) {
+    delta += (coachOf(G.teams[p.teamId]).dev - 55) * 0.035;
+  }
   keys.forEach((k) => {
     if (p.r[k] == null) return;
     p.r[k] = Math.round(clamp(p.r[k] + delta + gauss(G, 0, 1.1), 15, 99));
@@ -2505,6 +2922,7 @@ function startNextSeason(G) {
   G.picks = G.picks.filter((pk) => pk.year >= G.year);
   buildSchedule(G);
   G.teams.forEach((t) => ensureLines(G, t.id));
+  setMandate(G);
   return G;
 }
 
@@ -2534,7 +2952,8 @@ function pruneSave(G) {
     p.season = blankStats(p.pos); p.stats = blankStats(p.pos);
     p.po = null; p.farmSeason = null; p.farmCareer = null; p.marks = null;
     // Anyone with no trophies and no honours is not history, just clutter.
-    const honoured = G.teams.some((t) => (t.honours || []).some((h) => h.pid === p.id))
+    const honoured = p.hof != null
+      || G.teams.some((t) => (t.honours || []).some((h) => h.pid === p.id))
       || (p.rings || []).length > 0;
     if (!honoured && !(p.trophies || []).length) keep.push(p.id);
   });
@@ -3544,6 +3963,39 @@ function HomeTab({ G, setG, go, openPlayer }) {
         ) : null}
       </div>
 
+      {(() => {
+        const scout = nextOpponent(G);
+        if (!scout) return null;
+        const ot = G.teams[scout.teamId];
+        const col = clubColour(ot);
+        return (
+          <Section title="Scouting report" className="p-3">
+            <div className="pt-1 space-y-2">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="w-3 h-3 rounded-sm inline-block" style={{ background: col[0], border: `1px solid ${col[1]}` }} />
+                <span className="font-medium">{scout.home ? "vs" : "at"} {ot.city} {ot.name}</span>
+                {scout.rivalry ? <span className="text-xs px-1.5 py-0.5 rounded bg-rose-900/60 text-rose-200">RIVALRY</span> : null}
+                <span className="text-xs text-slate-400">{ot.w}-{ot.l}-{ot.otl}</span>
+                <span className="text-xs text-slate-500">last five {scout.form || "—"}</span>
+                <span className="text-xs text-slate-500">
+                  {scout.rest === 0 ? "on a back-to-back" : `${scout.rest} days rest`}
+                </span>
+              </div>
+              {scout.starter ? (
+                <div className="text-sm">
+                  <span className="text-slate-400">Likely starter </span>
+                  {fullName(scout.starter)}
+                  <span className="text-slate-500"> ({scout.starter.ovr} ovr, {Math.round(100 - scout.starter.fatigue)}% fresh)</span>
+                  {scout.hole ? (
+                    <span className="text-amber-300"> — beatable {scout.hole.label}.</span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </Section>
+        );
+      })()}
+
       {G.lastGame ? (
         <div className={`${card} p-3 flex items-center justify-between gap-3`}>
           <div className="text-sm">
@@ -3782,6 +4234,59 @@ function LinesTab({ G, setG }) {
         </div>
       </div>
 
+      <Section title="Deployment" className="p-3">
+        <div className="space-y-3 pt-1">
+          <div>
+            <div className="text-xs text-slate-400 mb-1">
+              Even-strength ice time. Ride a line hard and it wins you February and costs you April —
+              minutes drive fatigue and injury risk.
+            </div>
+            {ensureLines(G, G.userTeam).F.map((_, i) => {
+              const ice = iceTimeF(G.teams[G.userTeam]);
+              return (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="w-8 text-xs text-slate-500">L{i + 1}</span>
+                  <input type="range" min="5" max="45" step="1" className="flex-1"
+                    value={Math.round(ice[i] * 100)}
+                    onChange={(e) => {
+                      const g2 = { ...G, teams: G.teams.slice() };
+                      const cur = iceTimeF(g2.teams[G.userTeam]).map((v) => v * 100);
+                      cur[i] = +e.target.value;
+                      g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], iceF: cur };
+                      setG(g2);
+                    }} />
+                  <span className="w-20 text-right text-xs tnum text-slate-300">
+                    {(ice[i] * ES_MINUTES).toFixed(1)} min
+                  </span>
+                </div>
+              );
+            })}
+            <button className={`${btnGhost} mt-1`} onClick={() => {
+              const g2 = { ...G, teams: G.teams.slice() };
+              g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], iceF: null };
+              setG(g2);
+            }}>Reset to standard</button>
+          </div>
+          <div>
+            <div className="text-xs text-slate-400 mb-1">
+              Checking line — the one you throw at their best. At home you get last change and
+              usually win the matchup; on the road you can only ask.
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              {[null, 0, 1, 2, 3].map((k) => (
+                <button key={String(k)}
+                  className={(G.teams[G.userTeam].checkLine ?? null) === k ? btnPri : btnGhost}
+                  onClick={() => {
+                    const g2 = { ...G, teams: G.teams.slice() };
+                    g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], checkLine: k };
+                    setG(g2);
+                  }}>{k == null ? "No matching" : `Line ${k + 1}`}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </Section>
+
       <Section title="Forwards" className="p-3">
         <div className="space-y-2 pt-1">
           {lines.F.map((ln, i) => {
@@ -3911,7 +4416,13 @@ function StandingsTab({ G, openTeam }) {
   const [mode, setMode] = useState("div");
   const cols = [
     { key: "team", label: "Team", get: (t) => t.city, cell: (t) => (
-      <span className="whitespace-nowrap font-medium">{t.city} {t.name}</span>
+      <span className="whitespace-nowrap font-medium flex items-center gap-2">
+        <span className="w-2.5 h-4 rounded-sm inline-block shrink-0"
+          style={{ background: clubColour(t)[0], borderLeft: `2px solid ${clubColour(t)[1]}` }} />
+        {t.city} {t.name}
+        {t.id === G.userTeam ? null : t.rivalId === G.userTeam
+          ? <span className="text-[10px] text-rose-400" title="your rival">rival</span> : null}
+      </span>
     ) },
     { key: "gp", label: "GP", get: (t) => t.gp },
     { key: "w", label: "W", get: (t) => t.w },
@@ -4255,8 +4766,9 @@ function TradeTab({ G, setG, notify, openPlayer }) {
   const [retain, setRetain] = useState({});
   const myRoster = rosterOf(G, G.userTeam, true).sort((a, b) => b.ovr - a.ovr);
   const theirRoster = rosterOf(G, other, true).sort((a, b) => b.ovr - a.ovr);
-  const picksOf = (tid) => (G.picks || []).filter((pk) => pk.owner === tid && pk.year > G.year)
-    .sort((a, b) => a.year - b.year || a.round - b.round);
+  // Includes this year's unused picks while the draft is running, so you can
+  // trade up or down on the clock.
+  const picksOf = (tid) => tradablePicks(G, tid);
   const pkId = (pk) => `${pk.year}-${pk.round}-${pk.orig}`;
   const toggle = (list, set, id) => set(list.includes(id) ? list.filter((x) => x !== id) : list.concat(id));
 
@@ -4279,6 +4791,17 @@ function TradeTab({ G, setG, notify, openPlayer }) {
             </button>
             <span className="text-slate-400 tnum">{p.ovr}</span>
             <span className="text-slate-500 tnum text-xs w-14 text-right">${effectiveCap(G, p)}M</span>
+            {tid === G.userTeam ? (
+              <button className={`text-[10px] px-1 rounded ${onBlock(G, p.id) ? "bg-amber-500/25 text-amber-200" : "text-slate-500 hover:text-slate-300"}`}
+                title={onBlock(G, p.id) ? "listed — clubs will call" : "list him and see who calls"}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const g2 = migrate(JSON.parse(JSON.stringify(G)));
+                  setBlock(g2, p.id, !onBlock(g2, p.id));
+                  generateOffers(g2);
+                  setG(g2);
+                }}>{onBlock(G, p.id) ? "listed" : "list"}</button>
+            ) : null}
             {canRetain && sel.includes(p.id) && rules(G).retainedSalary ? (
               <select className="bg-[#0d1728] border border-[#243250] rounded text-[11px] px-1 py-0.5"
                 value={retain[p.id] || 0}
@@ -4322,6 +4845,38 @@ function TradeTab({ G, setG, notify, openPlayer }) {
         {daysToDeadline(G) != null && daysToDeadline(G) > 0
           ? <span className="text-xs text-amber-300">{daysToDeadline(G)} days to the deadline</span> : null}
       </div>
+
+      {(G.offers || []).length ? (
+        <Section title={`Offers for your listed players (${G.offers.length})`}>
+          <div className="max-h-72 overflow-y-auto">
+            {G.offers.map((o, i) => {
+              const p = G.players[o.want];
+              if (!p) return null;
+              return (
+                <div key={i} className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[#16223a] last:border-0 text-sm">
+                  <span className="text-slate-400">{G.teams[o.from].abbr} want</span>
+                  <span className="font-medium">{shortName(p)}</span>
+                  <span className="text-slate-500">for</span>
+                  <span className="flex-1">
+                    {o.give.map((id) => (G.players[id] ? shortName(G.players[id]) : "?")).join(", ")}
+                    {o.give.length && o.givePicks.length ? " + " : ""}
+                    {o.givePicks.map((pk) => `${pk.year} R${pk.round}`).join(", ") || (o.give.length ? "" : "nothing")}
+                  </span>
+                  <span className={`text-xs ${o.value >= o.ask ? "text-emerald-400" : "text-amber-400"}`}>
+                    {o.value >= o.ask ? "fair value" : "a little light"}
+                  </span>
+                  <button className={btnPri} onClick={() => {
+                    const g2 = migrate(JSON.parse(JSON.stringify(G)));
+                    const r = acceptOffer(g2, i);
+                    if (r.ok) { setG(g2); notify(`Traded ${fullName(p)} to ${G.teams[o.from].name}.`); }
+                    else notify(r.why);
+                  }}>Accept</button>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      ) : null}
 
       <div className="grid md:grid-cols-2 gap-3">
         <Side tid={G.userTeam} roster={myRoster} sel={mine} set={setMine}
@@ -4624,6 +5179,136 @@ function AllStarTab({ G, openPlayer }) {
 
 /* --------------------------------- records -------------------------------- */
 
+/* ---------------------------------- the room ------------------------------- */
+
+function RoomTab({ G, setG, openPlayer, notify }) {
+  const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); fn(g2); setG(g2); };
+  const t = G.teams[G.userTeam];
+  const { captain, alternates } = letters(G, G.userTeam);
+  const morale = roomMorale(G, G.userTeam);
+  const coach = coachOf(t);
+  const sys = systemOf(t);
+  const roster = rosterOf(G, G.userTeam).filter((p) => p.pos !== "G")
+    .sort((a, b) => leadership(G, b) - leadership(G, a));
+  const rival = t.rivalId != null ? G.teams[t.rivalId] : null;
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Room" value={morale} sub="morale"
+          tone={morale < 35 ? "text-rose-400" : morale > 65 ? "text-emerald-400" : ""} />
+        <Stat label="Captain" value={captain ? shortName(captain) : "—"}
+          sub={captain ? personalityOf(captain).label : ""} />
+        <Stat label="Board" value={Math.round(G.boardConfidence)} sub="confidence"
+          tone={G.boardConfidence < 30 ? "text-rose-400" : ""} />
+        <Stat label="Rival" value={rival ? rival.abbr : "—"} sub={rival ? rival.name : ""} />
+      </div>
+
+      {G.mandate ? (
+        <Section title="What the board is asking for" className="p-3">
+          <div className="pt-1">
+            <div className="text-lg font-semibold text-sky-300">{G.mandate.label}</div>
+            <div className="text-sm text-slate-400">{G.mandate.blurb}</div>
+            {G.lastMandate ? (
+              <div className={`text-xs mt-2 ${G.lastMandate.met ? "text-emerald-400" : "text-rose-400"}`}>
+                Last season they wanted: {G.lastMandate.label} — {G.lastMandate.met ? "delivered" : "not delivered"}.
+              </div>
+            ) : null}
+          </div>
+        </Section>
+      ) : null}
+
+      <Section title="Coaching staff" className="p-3">
+        <div className="pt-1 space-y-3">
+          <div className="flex flex-wrap items-baseline gap-x-3">
+            <span className="font-medium">{coach.name}</span>
+            <span className="text-sm text-slate-400">head coach</span>
+          </div>
+          <div>
+            <div className="text-xs text-slate-400 mb-1">System</div>
+            <select className={`${inputCls} w-full sm:w-72`} value={coach.system}
+              onChange={(e) => upd((g) => {
+                g.teams[g.userTeam].coach = { ...coachOf(g.teams[g.userTeam]), system: e.target.value };
+              })}>
+              {Object.entries(SYSTEMS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+            </select>
+            <div className="text-xs text-slate-400 mt-1">{sys.blurb}</div>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <Stat label="Power play" value={coach.pp} />
+            <Stat label="Penalty kill" value={coach.pk} />
+            <Stat label="Development" value={coach.dev} sub="prospects" />
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Leadership">
+        <div className="px-3 py-2 text-xs text-slate-400 border-b border-[#1e2b45]">
+          The letter goes to whoever the room follows — years here, what he has won, and who he is.
+          Name your own captain if you disagree.
+        </div>
+        <SortTable min={720} rows={roster} initial="lead" rowKey={(p) => p.id}
+          onRow={(p) => openPlayer(p.id)}
+          cols={[
+            { key: "name", label: "Player", get: (p) => p.ln, cell: (p) => (
+              <span className="whitespace-nowrap">
+                {fullName(p)}
+                {letterFor(G, p) ? <span className="ml-1.5 text-[10px] px-1 rounded bg-amber-500/20 text-amber-300 font-bold">
+                  {letterFor(G, p)}</span> : null}
+              </span>
+            ) },
+            { key: "pos", label: "Pos", get: (p) => POS.indexOf(p.pos), cell: (p) => <PosBadge pos={p.pos} /> },
+            { key: "age", label: "Age", get: (p) => p.age },
+            { key: "per", label: "Character", get: (p) => personalityOf(p).label, cls: "text-slate-300" },
+            { key: "yrs", label: "Here", get: (p) => (p.career || []).filter((c) => c.teamId === p.teamId).length,
+              cell: (p) => `${(p.career || []).filter((c) => c.teamId === p.teamId).length}y` },
+            { key: "rings", label: "Cups", get: (p) => (p.rings || []).length, cls: "text-amber-300" },
+            { key: "lead", label: "Leadership", get: (p) => leadership(G, p), cls: "font-semibold",
+              cell: (p) => Math.round(leadership(G, p)) },
+            { key: "act", label: "", get: () => 0, cell: (p) => (
+              captain && captain.id === p.id ? <span className="text-xs text-slate-500">captain</span> : (
+                <button className="text-xs text-sky-400 hover:underline" onClick={(e) => {
+                  e.stopPropagation();
+                  upd((g) => { g.teams[g.userTeam].captainId = p.id; });
+                  notify(`${fullName(p)} named captain.`);
+                }}>make captain</button>
+              )
+            ) },
+          ]} />
+      </Section>
+    </div>
+  );
+}
+
+/* ------------------------------ hall of fame ------------------------------- */
+
+function HallTab({ G, openPlayer }) {
+  const hall = (G.hall || []).slice().reverse();
+  return (
+    <div className="space-y-3">
+      <div className={`${card} p-3 text-sm text-slate-400`}>
+        Eligible three years after retiring. At most three go in a year, so it stays worth something.
+      </div>
+      <Section title={`Hall of Fame — ${hall.length} inducted`}>
+        <SortTable min={680} rows={hall} initial="year" rowKey={(h) => h.pid}
+          onRow={(h) => openPlayer(h.pid)}
+          cols={[
+            { key: "year", label: "Class", get: (h) => h.year },
+            { key: "name", label: "Player", get: (h) => h.name,
+              cell: (h) => <span className="whitespace-nowrap">{h.name}</span> },
+            { key: "pos", label: "Pos", get: (h) => POS.indexOf(h.pos), cell: (h) => <PosBadge pos={h.pos} /> },
+            { key: "gp", label: "GP", get: (h) => h.gp },
+            { key: "prod", label: "Career", get: (h) => (h.pos === "G" ? h.w : h.g + h.a),
+              cell: (h) => (h.pos === "G" ? `${h.w} W` : `${h.g}G ${h.a}A`) },
+            { key: "rings", label: "Cups", get: (h) => h.rings, cls: "text-amber-300" },
+            { key: "tro", label: "Awards", get: (h) => h.trophies },
+            { key: "score", label: "Score", get: (h) => h.score, cls: "text-slate-400" },
+          ]} empty="Nobody has been inducted yet — it takes a career." />
+      </Section>
+    </div>
+  );
+}
+
 function RecordsTab({ G, openPlayer }) {
   const recs = G.records || {};
   return (
@@ -4669,7 +5354,13 @@ function ClubModal({ G, teamId, onClose, openPlayer }) {
   const alumni = playersOf(G).filter((p) => p.teamId === teamId).sort((a, b) => b.ovr - a.ovr).slice(0, 6);
   const best = seasons.slice().sort((a, b) => b.pts - a.pts)[0];
   return (
-    <Modal wide title={`${t.city} ${t.name}`} onClose={onClose}>
+    <Modal wide onClose={onClose} title={
+      <span className="flex items-center gap-2">
+        <span className="w-3 h-5 rounded-sm inline-block"
+          style={{ background: clubColour(t)[0], borderTop: `3px solid ${clubColour(t)[1]}` }} />
+        {t.city} {t.name}
+      </span>
+    }>
       <div className="space-y-3">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <Stat label="Cups" value={t.cupWins} />
@@ -4833,6 +5524,9 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
           {myPicks.length ? <span>Your next picks: <span className="text-slate-200">{myPicks.join(", ")}</span></span> : null}
+          <span className="text-slate-500">
+            This year's unused picks are tradeable from the Trade tab while the draft runs.
+          </span>
           {Object.keys(need).length
             ? <span>Thin at <span className="text-amber-300">{Object.keys(need).join(", ")}</span></span>
             : <span>No glaring holes in the organisation.</span>}
@@ -5036,6 +5730,7 @@ const TABS = [
   { key: "home", label: "Home", group: "Club" },
   { key: "roster", label: "Roster", group: "Club" },
   { key: "lines", label: "Lines", group: "Club" },
+  { key: "room", label: "Room", group: "Club" },
   { key: "game", label: "Game", group: "Club" },
   { key: "schedule", label: "Schedule", group: "League" },
   { key: "standings", label: "Standings", group: "League" },
@@ -5047,6 +5742,7 @@ const TABS = [
   { key: "fa", label: "Free agents", group: "Market" },
   { key: "offseason", label: "Offseason", group: "Market" },
   { key: "records", label: "Records", group: "History" },
+  { key: "hall", label: "Hall of Fame", group: "History" },
   { key: "history", label: "History", group: "History" },
 ];
 const GROUPS = ["Club", "League", "Market", "History"];
@@ -5190,7 +5886,10 @@ function App() {
     <div className="min-h-screen pb-10">
       <div className="sticky top-0 z-40 bg-[#0b1220]/95 backdrop-blur border-b border-[#1e2b45]">
         <div className="max-w-6xl mx-auto px-3 py-2 flex items-center gap-2 sm:gap-3 flex-wrap">
-          <button className="font-semibold truncate hover:text-sky-300" onClick={() => setClub(G.userTeam)}>
+          <button className="font-semibold truncate hover:text-sky-300 flex items-center gap-2"
+            onClick={() => setClub(G.userTeam)}>
+            <span className="w-1.5 h-5 rounded-sm inline-block shrink-0"
+              style={{ background: clubColour(t)[0], borderTop: `3px solid ${clubColour(t)[1]}` }} />
             {t.city} <span className="text-sky-400">{t.name}</span>
           </button>
           <div className="text-xs text-slate-400 whitespace-nowrap">{G.year} · {t.w}-{t.l}-{t.otl} · {t.pts} pts</div>
@@ -5247,6 +5946,7 @@ function App() {
         {tab === "home" && <HomeTab G={G} setG={setG} go={go} openPlayer={setPlayer} />}
         {tab === "roster" && <RosterTab G={G} setG={setG} openPlayer={setPlayer} notify={notify} />}
         {tab === "lines" && <LinesTab G={G} setG={setG} />}
+        {tab === "room" && <RoomTab G={G} setG={setG} openPlayer={setPlayer} notify={notify} />}
         {tab === "game" && <GameTab G={G} openPlayer={setPlayer} />}
         {tab === "schedule" && <ScheduleTab G={G} openTeam={setClub} />}
         {tab === "standings" && <StandingsTab G={G} openTeam={setClub} />}
@@ -5258,6 +5958,7 @@ function App() {
         {tab === "fa" && <FreeAgencyTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
         {tab === "offseason" && <OffseasonTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
         {tab === "records" && <RecordsTab G={G} openPlayer={setPlayer} />}
+        {tab === "hall" && <HallTab G={G} openPlayer={setPlayer} />}
         {tab === "history" && <HistoryTab G={G} openPlayer={setPlayer} openTeam={setClub} />}
       </div>
 
