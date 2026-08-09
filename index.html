@@ -2255,26 +2255,80 @@ function runAllStar(G) {
 
 /* --------------------------------- awards --------------------------------- */
 
+/* A ballot rather than a sort. `share` is the fraction of the vote each man
+   got, so a runaway winner reads as one and a close race reads as one — which
+   is most of what an awards page is for. Scores are shifted so the fifth-placed
+   candidate sits near zero; otherwise every ballot comes out looking like a
+   four-way tie, because the gap between first and fifth is small next to the
+   absolute numbers. */
+const BALLOT_SIZE = 5;
+function ballot(cands, scoreFn, size) {
+  const n = size || BALLOT_SIZE;
+  const scored = cands.map((p) => ({ p, score: scoreFn(p) }))
+    .filter((x) => isFinite(x.score))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, n);
+  if (!scored.length) return [];
+  const floor = scored[scored.length - 1].score;
+  const spread = scored.map((x) => Math.max(0, x.score - floor) + 0.12 * Math.abs(scored[0].score - floor || 1));
+  const tot = spread.reduce((a, b) => a + b, 0) || 1;
+  return scored.map((x, i) => ({ id: x.p.id, share: spread[i] / tot }));
+}
+
 function computeAwards(G) {
   const sk = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 10);
   const gs = playersOf(G).filter((p) => p.pos === "G" && p.season.gp > 15);
   const byPts = sk.slice().sort((a, b) => pts(b.season) - pts(a.season) || b.season.g - a.season.g);
   const byGoals = sk.slice().sort((a, b) => b.season.g - a.season.g);
-  const byDef = sk.filter((p) => p.pos === "D").sort((a, b) => (b.season.blk + b.season.pm * 3) - (a.season.blk + a.season.pm * 3));
-  const byGoalie = gs.slice().sort((a, b) => svPct(b.season) - svPct(a.season));
-  const rookies = playersOf(G).filter((p) => p.rookie && p.season.gp > 10)
-    .sort((a, b) => pts(b.season) - pts(a.season));
+  const rookiePool = playersOf(G).filter((p) => p.rookie && p.season.gp > 10);
+  const clubPts = (p) => (p.teamId != null && G.teams[p.teamId] ? G.teams[p.teamId].pts : 0);
+
+  /* The MVP used to BE the scoring champion — the same id in two fields, so the
+     two trophies could never disagree and the Hart meant nothing on its own.
+     It's now its own argument: value on the ice, weighted by whether it carried
+     a team anywhere. */
+  /* Goalies are DISCOUNTED here, not boosted. Point shares systematically rate
+     them above skaters — a starter's saves-over-replacement dwarfs a forward's
+     goals-over-replacement — so scoring the Hart on raw shares handed it to a
+     goaltender in every season tested. Real voters correct for exactly that,
+     giving it to a netminder perhaps one year in ten. */
+  const mvpScore = (p) => {
+    const ps = pointShares(G, p);
+    if (p.pos === "G") return ps.ps * 0.72 + clubPts(p) * 0.028;
+    // For skaters, weight what he did WITH THE PUCK. Defensive shares come
+    // mostly from ice time, so scoring the Hart on total shares handed it to a
+    // defenceman five years in eight — the same flaw as the goalie case.
+    return ps.ops * 1.5 + ps.dps * 0.3 + clubPts(p) * 0.028;
+  };
+  const votes = {
+    mvp: ballot(sk.concat(gs), mvpScore),
+    defence: ballot(sk.filter((p) => p.pos === "D"),
+      (p) => pointShares(G, p).ps * 1.25 + p.season.blk * 0.012 + p.season.pm * 0.06
+        + (p.season.toi / Math.max(1, p.season.gp)) * 0.18),
+    goalie: ballot(gs.filter((p) => p.season.sa > 700),
+      (p) => (svPct(p.season) - 0.885) * 240 + p.season.w * 0.09 + p.season.so * 0.35),
+    // A rookie goaltender is eligible for the Calder, which sorting by points
+    // quietly made impossible.
+    rookie: ballot(rookiePool,
+      (p) => (p.pos === "G"
+        ? (svPct(p.season) - 0.885) * 200 + p.season.w * 0.08
+        : pts(p.season) * 0.12 + pointShares(G, p).ps * 0.5)),
+    scoring: ballot(sk, (p) => pts(p.season)),
+    goals: ballot(sk, (p) => p.season.g),
+  };
+  const winner = (k) => (votes[k] && votes[k][0] ? votes[k][0].id : null);
   const A = {
     year: G.year,
     scoring: byPts[0] ? byPts[0].id : null,
     goals: byGoals[0] ? byGoals[0].id : null,
-    mvp: byPts[0] ? byPts[0].id : null,
-    defence: byDef[0] ? byDef[0].id : null,
-    goalie: byGoalie[0] ? byGoalie[0].id : null,
-    rookie: rookies[0] ? rookies[0].id : null,
+    mvp: winner("mvp"),
+    defence: winner("defence"),
+    goalie: winner("goalie"),
+    rookie: winner("rookie"),
+    votes,
   };
   Object.entries(A).forEach(([k, id]) => {
-    if (k === "year" || id == null) return;
+    if (k === "year" || k === "votes" || id == null) return;
     const p = G.players[id];
     if (p) p.trophies.push({ year: G.year, award: k });
   });
@@ -6834,15 +6888,38 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
 
       <Section title={`${G.year} awards`} className="p-3">
         {A ? (
-          <div className="grid sm:grid-cols-3 gap-2 text-sm pt-1">
-            {["mvp", "scoring", "goals", "defence", "goalie", "rookie"].map((k) => (
-              <div key={k}>
-                <span className="text-slate-400">{AWARD_LABEL[k]} </span>
-                {A[k] != null && G.players[A[k]]
-                  ? <button className="hover:text-sky-300" onClick={() => openPlayer(A[k])}>{nm(A[k])}</button>
-                  : "—"}
-              </div>
-            ))}
+          <div className="grid sm:grid-cols-2 gap-x-4 gap-y-3 text-sm pt-1">
+            {["mvp", "scoring", "goals", "defence", "goalie", "rookie"].map((k) => {
+              const ballotRows = (A.votes && A.votes[k]) || [];
+              // A counting title is won on the number, not on a vote.
+              const counted = k === "scoring" || k === "goals";
+              return (
+                <div key={k} className="space-y-1">
+                  <div>
+                    <span className="text-slate-400">{AWARD_LABEL[k]} </span>
+                    {A[k] != null && G.players[A[k]]
+                      ? <button className="font-medium hover:text-sky-300" onClick={() => openPlayer(A[k])}>{nm(A[k])}</button>
+                      : "—"}
+                  </div>
+                  {ballotRows.length > 1 ? (
+                    <div className="space-y-0.5">
+                      {ballotRows.map((v) => (
+                        <div key={v.id} className="flex items-center gap-2">
+                          <button className="w-40 truncate text-left text-xs text-slate-300 hover:text-sky-300"
+                            onClick={() => openPlayer(v.id)}>{nm(v.id)}</button>
+                          <div className="flex-1 h-1.5 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
+                            <div className="h-full bg-sky-500" style={{ width: `${Math.round(v.share * 100)}%` }} />
+                          </div>
+                          <span className="w-10 text-right text-[11px] tnum text-slate-400">
+                            {counted ? "" : `${Math.round(v.share * 100)}%`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
         ) : <div className="text-slate-500 text-sm">—</div>}
       </Section>

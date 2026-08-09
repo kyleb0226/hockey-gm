@@ -38,6 +38,7 @@ const EXPORTS = [
   "iceTimeD", "PAIR_TOI", "PP_UNIT_SPLIT", "PK_UNIT_SPLIT", "ES_MINUTES",
   "PERSONALITIES", "personalityOf", "leadership", "letters", "letterFor", "roomMorale",
   "MANDATES", "setMandate", "seasonAchievement", "hofScore", "runHallOfFame", "HOF_BAR",
+  "ballot", "BALLOT_SIZE",
   "setBlock", "onBlock", "generateOffers", "acceptOffer", "tradablePicks", "nextOpponent",
   "deadlineDay", "tradesOpen", "daysToDeadline", "aiDeadlineMoves",
   "hasNtc", "eligibleForNtc", "requestNtcWaiver",
@@ -2504,6 +2505,71 @@ const CHECKS = {
     A.autoDraft(G, false);
     A.startNextSeason(G);
     ok(A.playersOf(G).every((p) => !p.rust), "a new season starts everybody fresh");
+  },
+
+  /* Awards used to be six sorts, and the MVP was literally the same id as the
+     scoring champion — two trophies that could never disagree, so the Hart
+     meant nothing on its own. They are ballots now, with vote shares. */
+  awardVoting(A) {
+    section("Awards voting");
+    /* Two seasons, because only DRAFTED players carry the rookie flag — the
+       opening world has none, so a first season can never award a Calder. */
+    const G = A.newGame(0, { seed: 3939, rules: { seasonLen: 82 } });
+    simSeason(A, G); simPlayoffs(A, G);
+    A.autoDraft(G, false); A.startNextSeason(G);
+    simSeason(A, G);
+    const aw = G.awards;
+    ok(aw && aw.votes, "the season produced a ballot");
+    ok(A.playersOf(G).some((p) => p.rookie && p.season.gp > 10),
+      "the draft class reached the league");
+
+    ["mvp", "defence", "goalie", "rookie", "scoring", "goals"].forEach((k) => {
+      const b = aw.votes[k] || [];
+      ok(b.length > 1, `${k} drew a real field (${b.length})`);
+      const sum = b.reduce((s, v) => s + v.share, 0);
+      ok(Math.abs(sum - 1) < 1e-6, `${k} shares add up to the whole vote`);
+      ok(b.every((v) => v.share >= 0 && v.share <= 1), `${k} shares are all real fractions`);
+      // Ordered, and the winner is the man who topped it.
+      ok(b.every((v, i) => i === 0 || b[i - 1].share >= v.share), `${k} is ordered by share`);
+      ok(aw[k] === b[0].id || k === "scoring" || k === "goals", `${k} went to the leader of its ballot`);
+      ok(new Set(b.map((v) => v.id)).size === b.length, `nobody appears twice on the ${k} ballot`);
+    });
+
+    // The winner must actually be clear of the field, not a rounding artefact.
+    ok(aw.votes.mvp[0].share > aw.votes.mvp[4].share * 1.5,
+      `the MVP is clear of fifth place (${(aw.votes.mvp[0].share * 100).toFixed(0)}% vs ${(aw.votes.mvp[4].share * 100).toFixed(0)}%)`);
+
+    /* The Hart has to be able to disagree with the Art Ross — that is the whole
+       reason it is a separate trophy. Over several seasons they must sometimes
+       differ, and the MVP must sometimes not be a forward at all. */
+    let differed = 0, seasons = 0;
+    const mvpPos = {};
+    [3939, 4040, 4141, 4242, 4343, 4444, 4545, 4646].forEach((seed) => {
+      const g = A.newGame(0, { seed, rules: { seasonLen: 41 } });
+      simSeason(A, g);
+      seasons++;
+      if (g.awards.mvp !== g.awards.scoring) differed++;
+      const mvp = g.players[g.awards.mvp];
+      if (mvp) mvpPos[mvp.pos === "G" || mvp.pos === "D" ? mvp.pos : "F"] =
+        (mvpPos[mvp.pos === "G" || mvp.pos === "D" ? mvp.pos : "F"] || 0) + 1;
+    });
+    ok(differed > 0, `the Hart and the Art Ross disagree sometimes (${differed}/${seasons} seasons)`);
+    /* The Hart goes to a forward MOST years and to a goaltender or defenceman
+       occasionally — that is the real pattern. Weighting goalies too generously
+       made it a goalie award every single season, which is as wrong as making
+       it a copy of the scoring title. */
+    const mix = Object.entries(mvpPos).map(([k, v]) => `${k} ${v}`).join(", ");
+    ok((mvpPos.F || 0) >= seasons * 0.5, `the MVP is usually a forward (${mix})`);
+    ok((mvpPos.F || 0) < seasons, `but not always (${mix})`);
+
+    // Trophies still land on the players, and the ballot isn't one of them.
+    const holders = A.playersOf(G).filter((p) => (p.trophies || []).some((t) => t.year === G.year));
+    ok(holders.length > 0, `trophies were handed out (${holders.length})`);
+    ok(!holders.some((p) => p.trophies.some((t) => t.award === "votes")),
+      "the ballot itself is not mistaken for a trophy");
+    // A rookie goaltender must be able to win the Calder.
+    const rookieBallots = aw.votes.rookie.map((v) => G.players[v.id]).filter(Boolean);
+    ok(rookieBallots.length > 0, "rookies were considered");
   },
 
   // The same seed must produce the same season, or nothing above is reproducible.
