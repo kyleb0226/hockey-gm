@@ -178,6 +178,95 @@ to retirement, so without culling the save reached 4.9 MB in eight seasons. Two 
 free-agent pool is hard-capped at `FA_POOL_MAX` — players who can't get a contract leave the
 sport, keeping only those with trophies, rings or 200+ career games. That holds it at 2.7 MB.
 
+## The club picker
+`Splash` generates a REAL preview league with `newGame(0, {seed})` and hands the same seed to
+`onStart`, so **the league you browsed is the league you manage**. That only works because world
+generation reads the seed and never `userTeam` or `difficulty` — the `clubPicker` check pins it
+for four different clubs and both difficulties. Break that and the preview silently becomes a
+lie that nothing in the UI would reveal.
+- `clubSummary(G, id)` builds the row: rating, best player, starting goalie, average age, cap
+  space, prospect count and average prospect ceiling, coach, and an outlook band.
+- **The outlook thresholds are MEASURED** (256 clubs over 8 seeds: range 47–80, median 65,
+  quartiles 60/65/69). Guessed ones put all 32 clubs in "Contender". The harness fails if any
+  single label swallows the league.
+
+## Contracts
+- **Demotion is free.** Moving a player between your own NHL roster and your own farm exposes him
+  to nobody. Waivers used to gate this and made shuffling depth a gamble.
+- **Waivers are for RELEASES.** `releasePlayer` puts him on the wire; another club can claim him
+  and take the contract. If he clears he becomes a free agent and the club carries
+  `RELEASE_DEAD_PCT` (a third) of his salary as dead cap for the remaining term.
+  **Dead money must not follow the player** — `retainedOn` filters `dead` entries so his next club
+  negotiates its own price, while `retainedBy` still sees it because that's the half that hits the
+  cap. `retainedTraded` is the non-dead subset, used for the `MAX_RETAINED` trade limit.
+- **You can re-sign your own.** `canExtend` (last year of the deal) → `extensionAsk`
+  (`askingPrice` × `EXTEND_LOYALTY`) → `extendPlayer`. The extension REPLACES the expiring deal,
+  so only the difference is new money against the cap.
+- **AI clubs make real decisions.** `aiExtensionOffer` runs in `finishSeason` before contracts
+  expire: core players and rising youngsters get kept, veterans and fringe players walk.
+  **The baseline is deliberately low (0.1).** Starting from a coin flip meant clubs kept everybody
+  — and since a signed player never enters the free-agent pool, he also never hit `FA_POOL_MAX`,
+  so eight seasons put ~500 extra bodies in the save. The harness pins that clubs keep the better
+  players and let the older ones walk.
+- `FARM_MAX` was declared but never enforced; farms drifted past sixteen. `finishSeason` now trims
+  each org to its best twelve and sends the rest to the market.
+- **`p.stats` carries no `z`/`net` buckets.** Last season's shot maps are never rendered, and
+  keeping nine net cells plus three zones on every player in the league cost ~0.3 MB. `migrate`
+  strips them from old saves. Only `p.season` is live.
+
+## The farm league
+Prospects used to accumulate a stat line in a vacuum — no opponent, no result, nothing to win.
+Every affiliate now plays a real league with a table and a championship.
+
+- **Affiliates MIRROR the parent schedule.** When Hartford visit Boston, so do their farm clubs.
+  That's a deliberate simplification: no second calendar to build, store or keep in sync, no way
+  for the two to drift apart, and every farm game still has a real opponent and a real result.
+- **The sim is coarse on purpose.** `simFarmGame` is strength-vs-strength, not the line-matchup
+  engine — running the full engine 1,300 extra times a season would cost far more than it tells
+  anyone. For the same reason a farm line carries **no zone or net buckets**.
+- **Non-prospects are PHANTOM WEIGHT, not records.** A club carries only two to five prospects,
+  but an affiliate ices `FARM_DRESSED` skaters; the rest is its own signed depth, modelled as
+  weight in the scoring draw at `FARM_FILLER_OVR`. Giving each club ten more player objects would
+  put three hundred dead rows back in the save. Without the phantoms, five prospects split every
+  goal their club scored and the best of them finished on **138 goals in 82 games**.
+- **A goal drawn to a phantom still generates assists.** Skipping the whole event when the scorer
+  wasn't tracked cut league assists to a third of goals and buried every playmaker. Credit the
+  goal only if the scorer is real, but always draw the helpers.
+- `runFarmPlayoffs` seeds `FARM_CUP_FIELD` clubs, best-of-three, three rounds, resolved in one go
+  at `endRegularSeason`. Winners get `t.farmCups` and `p.farmTitles`.
+- `prospectReady` now also fires on farm production — a prospect outscoring the league is telling
+  you he's finished learning there, whatever his rating says.
+
+## Development
+`progress(G, p)` runs **once a year, in `finishSeason`**, never in-season. The age curve (peak 26
+for skaters, 28 for goalies) is the base; the interesting part is the environment term.
+
+**NHL minutes are the best teacher in the sport, but only if he's actually playing them and
+holding his own.** `devEnvironment(p, st, farm)` reads the season two ways — `role` (was he on the
+ice?) and `perf` (did he hold his own?), both normalised per position by `DEV_BANDS` — and
+combines them so that **role gates the whole term**: playing badly still teaches something, not
+playing teaches nothing (`DEV_NHL_LO` is 0, deliberately — a buried player isn't punished, he just
+gains nothing). Beating the farm takes roughly top-nine minutes *and* around-average production; a
+productive fourth-liner is still better off in the minors. That trade-off is the point. It replaced
+a flat "+1.5 if he's on the farm", which gave every prospect the same answer.
+
+- **`DEV_BANDS` are MEASURED, not invented** — forwards run ~12.7 min a night at ~1.15 pts/60,
+  defencemen ~16.2 and ~0.90, goalies ~.907. Re-measure against a simmed season before retuning
+  them, or the thresholds stop meaning anything.
+- **A mid-season move gets both**, weighted by games in each league, so a December callup is worth
+  exactly the share of the year it covered. Note that AI clubs almost never shuttle players (3 of
+  318 under-24s in a sample season), so in practice this mostly matters for the user's own callups.
+- `devAgeWeight` tapers it out: full to 21, 0.75 to 23, 0.4 to 25, nothing after — where a player
+  spends the year stops mattering once he's made.
+- **Read `p.stats`, not `p.season`.** By the time `progress` runs, `finishSeason` has already done
+  `p.stats = p.season` and blanked `p.season`. `p.farmSeason` is still intact (it's archived
+  further down), and `p.age` has *already* been incremented, so the age gates are post-birthday.
+- `DevelopmentNote` in the player modal surfaces all of this mid-season, while there's still time
+  to act. It is the only place the model is visible — **the harness never renders it**.
+- The `development` check in `tools/simtest.js` pins the corners (thriving/solid/buried/drowning),
+  monotonicity in both inputs, the games-weighted blend, and that young regulars in a real simmed
+  league develop far better than young scratches.
+
 ## Point shares
 `pointShares(G, p, line)` is hockey's Win Shares — the closest thing the sport has to WAR that a
 box score can produce — split into `ops` / `dps` / `gps` and measured in **standings points**.
@@ -258,7 +347,7 @@ UI addition needs a browser pass; two components were silently missing while 448
   shut through the playoffs. `aiDeadlineMoves` runs on the day and sorts the league into buyers
   and sellers.
 - **Prospects** (`isProspect`, `prospectReady`, `simFarmDay`): farm players accumulate a
-  `farmSeason` line and develop faster than they would on an NHL bench.
+  `farmSeason` line. Whether that beats an NHL seat is the whole question — see "Development".
 
 ## Continuity of the shot log
 The dots on a shot chart **are the shots from the games that were played** — recorded inside
@@ -324,6 +413,25 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
 - `emptyBox` covers the **whole organisation** (farm and injured included) so a stray player id
   can never miss a lookup. `applyGame` then skips anyone with `toi <= 0`, which is what stops
   scratches being credited with a game. Both halves are load-bearing.
+- **A negative base to a fractional power is `NaN`.** `(p.ovr - 32) ** 1.6` looks harmless until a
+  player is rated under 32; then every weight is NaN, every comparison is false, and a weighted
+  draw silently hands everything to the last item in the list. On a thin affiliate that gave one
+  prospect all 154 of his club's goals and the whole roster zero assists — and league *averages*
+  hid it completely. Clamp the base at zero.
+- **`SortTable` remembers its sort column, and React reuses the instance across sibling branches.**
+  Two different tables rendered at the same position in a `? :` share one component, so a sort key
+  from one carried into the other, matched nothing, and fell back to sorting by name. Give each a
+  distinct `key` when the columns differ.
+- **In a bracket, ORDER IS THE STRUCTURE.** `advancePlayoffRound` pairs adjacent survivors (slots
+  2i and 2i+1), so `buildBracket` must push round one with the series that are meant to meet
+  sitting next to each other: `[1v8, 4v5, 2v7, 3v6]` seeded, and each division's two series
+  adjacent in the divisional format. Listing all the top-seed openers first put the 1 and 2 seeds
+  in the SAME half — they met in round two instead of the conference final, and both formats were
+  wrong for months because every other playoff check still passed. The `seeding` check pins it.
+- The goalie scouting report reads `p.season.net` — what he has ACTUALLY conceded — not
+  `goalieHole`. The hole is real and bends `pickCell`, so evidence correlates with it (~13% of
+  reports name it, against an 11% chance floor) but must not simply echo it; the harness pins both
+  bounds. Printing the hole directly meant the note said the same thing on day 1 as on day 82.
 - `G.draftPick` counts picks made overall; `G.draftClass` shrinks as it goes. Never compare them
   to each other — that bug silently ended the draft at pick 32.
 - `autoLines` needs **two** healthy goaltenders dressed and calls the farm up when it only has
@@ -346,6 +454,11 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
 - UI state that mirrors engine state goes stale. `OffseasonTab` derives its step from `G.phase`
   rather than trusting `G.offseasonStep`, because a completed rollover otherwise leaves a draft
   board on screen.
+- The Hall of Fame check ("players get inducted over a long career") is **thin by nature** — a
+  healthy league inducts 1–5 over twelve seasons, so a single seed returning 0 is weak evidence of
+  a regression. Before tuning anything to fix it, sweep several seeds under both the old and new
+  code and compare the distributions; a change to progression shifts every downstream outcome even
+  when the RNG call count is identical.
 - Milestones and honours use **rates scaled to the season length**, not raw totals — a 41-game
   season would never reach a 50-goal mark or a 300-point career.
 - `tools/simtest.js`'s "season milestones fired" check (`atmosphere`) picks a fixed seed and

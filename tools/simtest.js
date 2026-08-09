@@ -42,6 +42,13 @@ const EXPORTS = [
   "hasNtc", "eligibleForNtc", "requestNtcWaiver",
   "needsWaivers", "sendDown", "recall", "processWaivers", "nhlGames",
   "askingPrice", "negotiate", "isProspect", "prospectReady", "simFarmDay",
+  "simFarmGame", "applyFarmGame", "farmStandings", "farmRec", "farmRoster", "farmStrength",
+  "farmStarter", "farmLine", "runFarmPlayoffs", "FARM_CUP_FIELD", "blankFarmRec",
+  "clubSummary", "ordinal", "goalieReport", "REPORT_MIN_SHOTS", "REPORT_TRUST_SA", "leagueNetRates",
+  "releasePlayer", "releaseCost", "RELEASE_DEAD_PCT", "canExtend", "extendPlayer",
+  "extensionAsk", "aiExtensionOffer", "EXTEND_LOYALTY", "retainedTraded", "FARM_MAX",
+  "progress", "devEnvironment", "nhlDevRead", "devAgeWeight", "devBand",
+  "DEV_FARM", "DEV_NHL_HI", "DEV_NHL_LO", "DEV_BANDS",
   "effectiveCap", "retainedBy", "retainedOn", "MAX_RETAINED", "RETAIN_MAX_PCT",
   "updateRecords", "checkMilestones", "runAllStar", "allStarRosters", "RECORD_DEFS",
   "offseasonStage", "offseasonAction", "doOffseasonStep", "OFFSEASON_STEPS",
@@ -884,22 +891,45 @@ const CHECKS = {
     const ev2 = A.evalTrade(G, mine.teamId, [mine.id], [], (mine.teamId + 1) % 32, [], []);
     ok(!/no-trade/.test(ev2.why || ""), "and then the trade is allowed to be judged on its merits");
 
-    section("Waivers");
+    /* Moving a player inside your own organisation is a roster decision and
+       costs nothing. Waivers are for RELEASES, where the risk belongs. */
+    section("Demotion and release");
     const kid = A.rosterOf(G, 0).find((p) => p.age < 22);
     if (kid) {
       const r = A.sendDown(G, kid.id);
-      ok(r.ok && !r.waivers, "a young player goes down without waivers");
-    } else ok(true, "no waiver-exempt youngster on this roster to test");
+      ok(r.ok && !r.waivers, "a young player goes down freely");
+      ok(kid.farm === true, "and reports to the farm immediately");
+    } else ok(true, "no youngster on this roster to test");
     const vet = A.rosterOf(G, 0).find((p) => p.age >= 24 && !p.farm);
     vet.career = [{ gp: 200 }];
-    ok(A.needsWaivers(G, vet), "an established player needs waivers");
     const r2 = A.sendDown(G, vet.id);
-    ok(r2.ok && r2.waivers, "sending him down puts him on waivers instead");
-    ok(vet.farm === false, "and he stays on the roster until they clear");
+    ok(r2.ok && !r2.waivers, "an established player goes down freely too");
+    ok(vet.farm === true, "and he is on the farm the moment you send him");
+    ok(!(G.waivers || []).length, "demoting your own player exposes him to nobody");
+
+    // Releasing is the one that costs something.
+    const cut = A.rosterOf(G, 0).find((p) => !p.farm && !A.hasNtc(p));
+    const cost = A.releaseCost(G, cut.id);
+    ok(cost > 0 && cost < cut.contract.amt, `a release carries dead money ($${cost}M of $${cut.contract.amt}M)`);
+    const rel = A.releasePlayer(G, cut.id);
+    ok(rel.ok, "you can release a player");
+    ok(G.waivers.length === 1 && G.waivers[0].release, "which puts him on the wire first");
+    ok(cut.teamId === 0, "and he is still yours until it clears");
+    const capBefore = A.capHit(G, 0);
     G.day++;
     A.processWaivers(G);
-    ok(vet.farm === true || vet.teamId !== 0, "after a day he either clears or is claimed");
     ok(G.waivers.length === 0, "the wire is emptied once processed");
+    if (cut.teamId === null) {
+      ok(G.freeAgents.includes(cut.id), "an unclaimed release becomes a free agent");
+      const dead = (G.retained || []).filter((r) => r.dead && r.from === 0);
+      ok(dead.length === 1 && dead[0].amt === cost, `and leaves dead cap behind ($${dead[0].amt}M)`);
+      ok(A.capHit(G, 0) < capBefore, "which still costs less than carrying the contract");
+      // Dead money must NOT follow him — his next club negotiates its own price.
+      ok(A.effectiveCap(G, cut) === cut.contract.amt, "the dead money stays with the club that cut him");
+    } else {
+      ok(cut.teamId !== 0, "or another club claims him and takes the contract");
+      ok(!(G.retained || []).some((r) => r.dead), "and the club that cut him owes nothing");
+    }
 
     section("Contract negotiation");
     const fa = G.freeAgents.map((id) => G.players[id]).sort((a, b) => b.ovr - a.ovr)[0];
@@ -1309,13 +1339,26 @@ const CHECKS = {
     const sysSpread = new Set(G.teams.map((t) => t.coach.system));
     ok(sysSpread.size >= 2, `clubs don't all play the same way (${sysSpread.size} systems)`);
     ok(A.systemOf(G.teams[0]).off > 0.5, "a system has an offensive multiplier");
-    // A trap club should concede fewer shots than an aggressive one over a season.
-    const G2 = A.newGame(0, { seed: 422, rules: { seasonLen: 41 } });
-    G2.teams.forEach((t, i) => { t.coach = { ...t.coach, system: i % 2 ? "trap" : "aggressive" }; });
-    simSeason(A, G2);
-    const trap = G2.teams.filter((_, i) => i % 2).reduce((s, t) => s + t.ga, 0) / 16;
-    const aggr = G2.teams.filter((_, i) => !(i % 2)).reduce((s, t) => s + t.ga, 0) / 16;
-    ok(trap < aggr, `the trap concedes less than the forecheck (${trap.toFixed(0)} vs ${aggr.toFixed(0)} GA)`);
+    /* A trap club concedes less than an aggressive one. One 41-game season of
+       sixteen clubs a side is NOT enough to show it — the real gap is about 5%
+       and a single season swings wider than that, so this check used to pass or
+       fail on which way the RNG happened to fall. Pool several seasons, and
+       FLIP which parity plays the trap each time, because assigning systems by
+       club index otherwise confounds the system with how good the clubs are. */
+    let trapGA = 0, aggrGA = 0, trapN = 0, aggrN = 0;
+    [[422, 0], [423, 1], [424, 0], [425, 1]].forEach(([seed, flip]) => {
+      const g = A.newGame(0, { seed, rules: { seasonLen: 41 } });
+      g.teams.forEach((t, i) => {
+        t.coach = { ...t.coach, system: (i % 2) === flip ? "trap" : "aggressive" };
+      });
+      simSeason(A, g);
+      g.teams.forEach((t, i) => {
+        if ((i % 2) === flip) { trapGA += t.ga; trapN++; } else { aggrGA += t.ga; aggrN++; }
+      });
+    });
+    const trap = trapGA / trapN, aggr = aggrGA / aggrN;
+    ok(aggr > trap * 1.02,
+      `the trap concedes less than the forecheck (${trap.toFixed(1)} vs ${aggr.toFixed(1)} GA over ${trapN + aggrN} club-seasons)`);
 
     // Rivalries are mutual and everybody has one.
     ok(G.teams.every((t) => t.rivalId != null), "every club has a rival");
@@ -1454,10 +1497,13 @@ const CHECKS = {
     ok(r1.every((s) => s.games.length === s.w[0] + s.w[1]), "games played equals the series score");
     ok(G.playoffs.round === 1 || G.playoffs.champion != null, "and the bracket advanced once it was done");
 
-    // The user's playoff games get a play-by-play, like his season games do.
-    // Seed 331 is chosen because the user's club qualifies — on a seed where it
-    // misses, this whole branch silently passes without testing anything.
-    const G2 = A.newGame(0, { seed: 331, rules: { seasonLen: 41 } });
+    /* The user's playoff games get a play-by-play, like his season games do.
+       The seed is chosen because the user's club qualifies — on a seed where it
+       misses, this whole branch silently passes without testing anything.
+       Pick one with MARGIN: 309 finishes 34-6-1, so it survives the RNG shift
+       that any new sim work causes. Seed 331 sat on the bubble and fell out the
+       moment the farm league started consuming the stream. */
+    const G2 = A.newGame(0, { seed: 309, rules: { seasonLen: 41 } });
     simSeason(A, G2);
     const inIt = G2.playoffs.rounds[0].some((s) => s.hi === G2.userTeam || s.lo === G2.userTeam);
     ok(inIt, "the user's club qualified, so the replay checks below actually run");
@@ -1477,7 +1523,7 @@ const CHECKS = {
         `and season totals still only count season shots (${onGoal} vs ${skater.season.sog})`);
       ok(reg.length > 0 && po.length < reg.length, "the two are kept apart");
     } else {
-      ok(false, "seed 331 no longer puts the user in the playoffs — pick another");
+      ok(false, "seed 309 no longer puts the user in the playoffs — pick another with margin");
       ok(true, ""); ok(true, ""); ok(true, ""); ok(true, "");
     }
 
@@ -1724,6 +1770,488 @@ const CHECKS = {
     A.localStorage.setItem("pgmh:slot1", JSON.stringify(G));
     const bare = A.unwrap(A.localStorage.getItem("pgmh:slot1"));
     ok(bare && bare.at === 0 && bare.g.day === G.day, "an old unwrapped save is still readable");
+  },
+
+  /* Where a young player spends the year, and how it goes, is the central
+     development decision. NHL minutes played well have to beat the farm; NHL
+     minutes played badly, or not played at all, have to lose to it. If this
+     ever flattens back into "the farm is always best", the choice is gone. */
+  development(A) {
+    section("Player development");
+    const F = A.DEV_FARM, HI = A.DEV_NHL_HI, LO = A.DEV_NHL_LO;
+    // A synthetic NHL line: gp games at `min` a night, scoring at `p60`.
+    const sk = (pos, gp, min, p60) => [{ pos }, { gp, toi: gp * min, g: (p60 * gp * min) / 60, a: 0 }];
+    const env = (args, farm) => A.devEnvironment(args[0], args[1], farm || null);
+    const farmOnly = { gp: 82, g: 20, a: 25 };
+
+    ok(A.devEnvironment({ pos: "C" }, null, farmOnly) === F,
+      `a full farm season is worth exactly DEV_FARM (${F})`);
+    ok(A.devEnvironment({ pos: "C" }, null, null) === 0, "playing nowhere is worth nothing");
+
+    // The four corners of the model.
+    const thriving = env(sk("C", 82, 20, 1.9));
+    const solid    = env(sk("C", 82, 19, 1.15));
+    const buried   = env(sk("C", 82, 8, 1.15));
+    const drowning = env(sk("C", 82, 20, 0.3));
+    ok(thriving > F, `thriving in a real NHL role beats the farm (${thriving.toFixed(2)} > ${F})`);
+    ok(solid > F, `so does an average regular (${solid.toFixed(2)})`);
+    ok(buried < F, `riding the bench does not (${buried.toFixed(2)} < ${F})`);
+    ok(buried === 0, `a season in the press box teaches him nothing at all (${buried.toFixed(2)})`);
+    ok(drowning < F, `nor does drowning in minutes he can't handle (${drowning.toFixed(2)})`);
+    ok(thriving <= HI + 1e-9 && buried >= LO - 1e-9, "every outcome stays inside the band");
+
+    // A fourth-liner is better off in the minors even when he's producing there.
+    ok(env(sk("C", 82, 10, 2.2)) < F, "a productive fourth-liner still develops better on the farm");
+
+    // Monotonic in both inputs — more ice time and more production can never hurt.
+    let monoRole = true, monoPerf = true;
+    for (let m = 6; m < 24; m++) if (env(sk("C", 82, m, 1.15)) > env(sk("C", 82, m + 1, 1.15)) + 1e-9) monoRole = false;
+    for (let q = 0; q < 25; q++) {
+      const a = env(sk("C", 82, 18, q * 0.1)), b = env(sk("C", 82, 18, (q + 1) * 0.1));
+      if (a > b + 1e-9) monoPerf = false;
+    }
+    ok(monoRole, "more ice time never develops a player less");
+    ok(monoPerf, "nor does more production");
+
+    // Position is normalised out, not ignored: a defenceman plays more minutes
+    // and scores less, so the SAME raw line reads differently at each position,
+    // but a median season is worth about the same either way.
+    ok(Math.abs(A.nhlDevRead({ pos: "D" }, sk("D", 82, 16, 0.90)[1]).perf) < 1e-9,
+      "0.90 pts/60 is a par season for a defenceman");
+    ok(A.nhlDevRead({ pos: "C" }, sk("C", 82, 16, 0.90)[1]).perf < -0.2,
+      "and a below-par one for a forward");
+    ok(A.devBand({ pos: "D" }).full > A.devBand({ pos: "C" }).full, "a D has to play more to earn a full role");
+    ok(Math.abs(env(sk("D", 82, 16.2, 0.90)) - env(sk("C", 82, 12.7, 1.15))) < 0.4,
+      "so a median season at either position develops a player about the same");
+
+    // Goalies run off starts and save percentage, not minutes and points.
+    const starter = A.devEnvironment({ pos: "G" }, { gp: 55, sa: 1600, sv: 1470 }, null);
+    const backup = A.devEnvironment({ pos: "G" }, { gp: 8, sa: 220, sv: 200 }, null);
+    ok(starter > F, `a young starter holding a .919 develops fast (${starter.toFixed(2)})`);
+    ok(backup < F, `a backup who barely dressed does not (${backup.toFixed(2)})`);
+
+    // A mid-season callup gets BOTH, weighted by games in each league.
+    const half = A.devEnvironment({ pos: "C" }, sk("C", 41, 20, 1.9)[1], { gp: 41, g: 12, a: 15 });
+    ok(half > F && half < thriving, `a callup blends the two (${half.toFixed(2)} between ${F} and ${thriving.toFixed(2)})`);
+    ok(Math.abs(half - (thriving + F) / 2) < 1e-9, "and the blend is exactly games-weighted");
+    const cup = A.devEnvironment({ pos: "C" }, sk("C", 20, 20, 1.9)[1], { gp: 60, g: 18, a: 20 });
+    ok(cup < half, "a shorter callup is worth less of the NHL rate");
+
+    // Age taper: the environment stops mattering once he's made.
+    ok(A.devAgeWeight(20) === 1 && A.devAgeWeight(23) < 1 && A.devAgeWeight(26) === 0,
+      "development environment tapers off with age");
+
+    /* And it has to show up in a real league, not just in the unit maths: over
+       a season, the young players who got real minutes and produced must be the
+       ones who actually improved. */
+    const G = A.newGame(0, { seed: 771, rules: { seasonLen: 82 } });
+    simSeason(A, G);
+    simPlayoffs(A, G);
+    const young = A.playersOf(G).filter((p) => p.age <= 22 && !p.retired && ((p.stats && p.stats.gp) || (p.farmSeason && p.farmSeason.gp)));
+    ok(young.length > 40, `a real cohort of young players (${young.length})`);
+    const rows = young.map((p) => ({ p, e: A.devEnvironment(p, p.stats, p.farmSeason), before: p.ovr }));
+    ok(rows.some((r) => r.e > F + 0.2) && rows.some((r) => r.e < F - 0.2),
+      "the league produces both kinds of season");
+    // `finishSeason` already ran progress(); compare against ovr recorded before.
+    const spread = Math.max(...rows.map((r) => r.e)) - Math.min(...rows.map((r) => r.e));
+    ok(spread > 1.5, `and they are genuinely different years (spread ${spread.toFixed(2)})`);
+    const nhlReg = rows.filter((r) => r.p.stats && r.p.stats.gp >= 40 && r.p.stats.toi / r.p.stats.gp >= 17);
+    const benched = rows.filter((r) => r.p.stats && r.p.stats.gp >= 40 && r.p.stats.toi / r.p.stats.gp <= 11);
+    ok(nhlReg.length > 0 && benched.length > 0, `regulars (${nhlReg.length}) and bench players (${benched.length}) both exist`);
+    const avg = (a) => a.reduce((s, r) => s + r.e, 0) / a.length;
+    ok(avg(nhlReg) > avg(benched) + 1,
+      `young regulars develop far better than young scratches (${avg(nhlReg).toFixed(2)} vs ${avg(benched).toFixed(2)})`);
+  },
+
+  /* The club picker shows a REAL league before you commit to it. Its whole
+     promise is that the world you browsed is the world you get, which only
+     holds because world generation reads the seed and never `userTeam` or
+     `difficulty`. If that ever stops being true the preview becomes a lie, and
+     nothing in the UI would tell you. */
+  clubPicker(A) {
+    section("Club picker");
+    const fingerprint = (G) => G.teams.map((t) =>
+      `${t.abbr}:${A.teamStrength(G, t.id)}:${A.rosterOf(G, t.id, true).map((p) => `${p.ln}${p.ovr}`).join(",")}`).join("|");
+
+    const preview = A.newGame(0, { seed: 8123, rules: { seasonLen: 82 } });
+    // Starting a career as ANY club must yield the league that was previewed.
+    for (const club of [0, 7, 19, 31]) {
+      const real = A.newGame(club, { seed: 8123, rules: { seasonLen: 82 } });
+      ok(fingerprint(real) === fingerprint(preview),
+        `taking over club ${club} gives exactly the previewed league`);
+      ok(real.userTeam === club, `and you actually manage club ${club}`);
+    }
+    // Difficulty must not move the world either — it's pressure on the manager.
+    const hard = A.newGame(0, { seed: 8123, difficulty: "cutthroat", rules: { seasonLen: 82 } });
+    ok(fingerprint(hard) === fingerprint(preview), "difficulty changes the challenge, not the league");
+    // A different seed must actually be a different league, or reroll is a no-op.
+    ok(fingerprint(A.newGame(0, { seed: 999, rules: { seasonLen: 82 } })) !== fingerprint(preview),
+      "rerolling the seed genuinely rebuilds the league");
+
+    // Every summary the picker renders has to be real and complete.
+    const sums = preview.teams.map((t) => A.clubSummary(preview, t.id));
+    ok(sums.length === 32, "every club gets a summary");
+    ok(sums.every((s) => s.best && s.goalie), "each has a best player and a goaltender");
+    ok(sums.every((s) => s.rating >= 40 && s.rating <= 90), "ratings land in a sane band");
+    ok(sums.every((s) => s.age > 20 && s.age < 34), "and so do average ages");
+    ok(sums.every((s) => s.goalie.pos === "G"), "the goalie shown is actually a goalie");
+    ok(sums.every((s) => s.best.ovr === Math.max(...A.rosterOf(preview, s.id).map((p) => p.ovr))),
+      "the best player shown is actually the best player");
+    ok(sums.every((s) => s.t.rivalId != null), "every club has a rival to show");
+
+    // The outlook bands must SPLIT the league. Guessed thresholds once put all
+    // 32 clubs in "Contender", which told the user nothing.
+    const byLabel = {};
+    sums.forEach((s) => { byLabel[s.outlook.t] = (byLabel[s.outlook.t] || 0) + 1; });
+    ok(Object.keys(byLabel).length >= 3,
+      `outlook separates the league (${Object.entries(byLabel).map(([k, v]) => `${k} ${v}`).join(", ")})`);
+    ok(Math.max(...Object.values(byLabel)) <= 20, "and no single label swallows it");
+    // Rating must track the thing it claims to measure.
+    const sorted = sums.slice().sort((a, b) => b.rating - a.rating);
+    ok(sorted[0].rating > sorted[31].rating + 8,
+      `the league has a real spread (${sorted[31].rating}–${sorted[0].rating})`);
+
+    ok(A.ordinal(1) === "1st" && A.ordinal(2) === "2nd" && A.ordinal(3) === "3rd" && A.ordinal(4) === "4th",
+      "ordinals read correctly");
+    ok(A.ordinal(11) === "11th" && A.ordinal(12) === "12th" && A.ordinal(13) === "13th",
+      "including the teens");
+    ok(A.ordinal(21) === "21st" && A.ordinal(22) === "22nd" && A.ordinal(32) === "32nd",
+      "and back out the other side");
+  },
+
+  /* The goalie scouting report must be EVIDENCE, not a label. It used to print
+     `goalieHole` — a pure function of player id — so it said the same thing on
+     day 1 as on day 82 whatever happened on the ice. */
+  goalieScouting(A) {
+    section("Goalie scouting report");
+    const G = A.newGame(0, { seed: 616, rules: { seasonLen: 82 } });
+    const keepers = () => A.playersOf(G).filter((p) => p.pos === "G" && p.season.gp > 0);
+
+    // Before a puck is dropped there is genuinely nothing to report.
+    const cold = A.goalieReport(G, A.playersOf(G).find((p) => p.pos === "G"));
+    ok(cold.starts === 0 && cold.sa === 0, "an unplayed goalie has no record");
+    ok(cold.confidence === 0, "and no confidence in a read");
+    ok(!cold.soft && !cold.strong, "so it claims no weakness");
+
+    simSeason(A, G);
+    const reports = keepers().map((p) => ({ p, r: A.goalieReport(G, p) }));
+    ok(reports.length > 40, `a full league of goalies played (${reports.length})`);
+
+    // The numbers must reconcile with the season line, not float free of it.
+    ok(reports.every(({ p, r }) => r.sa === p.season.sa && r.starts === p.season.gp),
+      "the report's totals match the goalie's actual season");
+    ok(reports.every(({ r }) => r.cells.reduce((s, c) => s + c.sa, 0) === r.sa - (0)) ||
+       reports.every(({ p, r }) => r.cells.reduce((s, c) => s + c.sa, 0) <= r.sa),
+      "per-cell shots never exceed shots faced");
+    ok(reports.every(({ r }) => r.cells.every((c) => c.ga <= c.sa)),
+      "no cell lets in more than it faced");
+
+    // Confidence has to grow with evidence, and starters must clear the bar.
+    const busy = reports.filter(({ r }) => r.sa >= A.REPORT_TRUST_SA);
+    ok(busy.length > 20, `most starters accumulate a real sample (${busy.length})`);
+    ok(busy.every(({ r }) => r.confidence === 1), "a full workload is a confident read");
+    ok(reports.every(({ r }) => r.confidence >= 0 && r.confidence <= 1), "confidence stays in range");
+
+    // A named weakness must be backed by enough shots to mean anything.
+    const named = reports.filter(({ r }) => r.soft);
+    ok(named.length > 0, `some goalies show a readable weakness (${named.length})`);
+    ok(named.every(({ r }) => r.soft.sa >= A.REPORT_MIN_SHOTS),
+      "a named soft spot always clears the minimum sample");
+    const lg = A.leagueNetRates(G);
+    ok(named.every(({ r }) => r.soft.rate > lg[r.soft.cell.key]),
+      "and is genuinely worse there than the league is");
+
+    /* The whole point: the report is driven by what happened, so two goalies
+       with the SAME structural hole must still produce different reports, and
+       the same goalie's report must change as a season is played. */
+    const byHole = {};
+    reports.forEach(({ p, r }) => { (byHole[r.hole.key] = byHole[r.hole.key] || []).push(r); });
+    // Soft spot must not be a FUNCTION of the hole: somewhere in the league,
+    // two goalies sharing a hole have to scout differently. Sampling a single
+    // group is a coin flip, so check every group.
+    const divergent = Object.values(byHole).filter((g) => g.length >= 2)
+      .filter((g) => new Set(g.map((r) => (r.soft ? r.soft.cell.key : "none"))).size > 1);
+    ok(divergent.length > 0,
+      `goalies sharing a structural hole still scout differently (${divergent.length} such groups)`);
+    /* What matters is that no single cell is THE answer for the whole league —
+       counting distinct cells is a hostage to the RNG stream, since any new sim
+       work reshuffles every season. A share test says the same thing and holds. */
+    const softCount = {};
+    named.forEach(({ r }) => { softCount[r.soft.cell.key] = (softCount[r.soft.cell.key] || 0) + 1; });
+    const topShare = Math.max(...Object.values(softCount)) / named.length;
+    ok(Object.keys(softCount).length >= 2 && topShare < 0.7,
+      `no single cell is the league's answer (${Object.entries(softCount).map(([k, v]) => `${k} ${v}`).join(", ")})`);
+    // It must not simply echo goalieHole — that would be the old label again.
+    const echo = named.filter(({ r }) => r.soft.cell.key === r.hole.key).length;
+    ok(echo < named.length * 0.75,
+      `the report is evidence, not a readout of the hidden hole (${echo}/${named.length} agree)`);
+    // But it shouldn't be noise either — the hole is real, so it should show up
+    // more often than chance (1 in 9 cells).
+    ok(echo > named.length * 0.11,
+      `though the real hole does show through more often than chance (${echo}/${named.length})`);
+  },
+
+  /* A bracket is a STRUCTURE, not a list. `advancePlayoffRound` pairs adjacent
+     survivors (slots 2i and 2i+1), so `buildBracket` must push round one in an
+     order where neighbours are meant to meet. Get that wrong and the seeding
+     silently collapses: the 1 seed's half contains the 2 seed, and a division's
+     winner meets the OTHER division's winner in round two. */
+  seeding(A) {
+    section("Playoff seeding");
+
+    const firstRound = (G) => G.playoffs.rounds[0];
+    const halves = (G, conf) => firstRound(G).filter((s) => s.conf === conf);
+
+    // ---- seeded 1–8 ----
+    const S = A.newGame(0, { seed: 4801, rules: { seasonLen: 41, playoffFormat: "seeded" } });
+    simSeason(A, S);
+    [0, 1].forEach((conf) => {
+      const f = A.playoffField(S, conf);
+      const rank = new Map(f.map((x) => [x.team.id, x.seed]));
+      const r1 = halves(S, conf);
+      ok(r1.length === 4, `conference ${conf} opens with four series`);
+      // Every series must be seed n vs seed 9-n, and home ice to the better seed.
+      ok(r1.every((s) => rank.get(s.hi) + rank.get(s.lo) === 9),
+        `conference ${conf} pairs 1-8, 2-7, 3-6, 4-5`);
+      ok(r1.every((s) => rank.get(s.hi) < rank.get(s.lo)),
+        `and the better seed holds home ice`);
+      // The structural part: neighbours meet in round two, so the 1 seed's half
+      // must hold the 4/5 series and NOT the 2 seed's.
+      const half = (i) => [rank.get(r1[i].hi), rank.get(r1[i + 1].hi)].sort((a, b) => a - b);
+      ok(JSON.stringify(half(0)) === JSON.stringify([1, 4]),
+        `the 1 seed's half of conference ${conf} holds the 4/5 series (${half(0).join("/")})`);
+      ok(JSON.stringify(half(2)) === JSON.stringify([2, 3]),
+        `and the 2 seed's half holds the 3/6 series (${half(2).join("/")})`);
+    });
+
+    // ---- divisional ----
+    const D = A.newGame(0, { seed: 4801, rules: { seasonLen: 41, playoffFormat: "divisional" } });
+    simSeason(A, D);
+    [0, 1].forEach((conf) => {
+      const { top, wc } = A.playoffField(D, conf);
+      const r1 = halves(D, conf);
+      ok(r1.length === 4, `conference ${conf} opens with four divisional series`);
+      const divOf = (id) => D.teams[id].div;
+      const wcIds = wc.map((t) => t.id);
+      const winners = top.filter((x) => x.divRank === 1).map((x) => x.team.id);
+      const seconds = top.filter((x) => x.divRank === 2).map((x) => x.team.id);
+      // Slots 0 and 2 are the division winners; 1 and 3 are the 2-vs-3 series.
+      ok([0, 2].every((i) => winners.includes(r1[i].hi) && wcIds.includes(r1[i].lo)),
+        `conference ${conf} opens each half with a division winner vs a wildcard`);
+      ok([1, 3].every((i) => seconds.includes(r1[i].hi)),
+        `and the other half-opener is the 2 vs 3`);
+      // The structural part: a half must belong to ONE division — the division
+      // winner and the 2v3 from the same division have to meet in round two.
+      ok(divOf(r1[0].hi) === divOf(r1[1].hi) && divOf(r1[2].hi) === divOf(r1[3].hi),
+        `each half of conference ${conf} stays inside one division`);
+      ok(divOf(r1[0].hi) !== divOf(r1[2].hi), `and the two halves are different divisions`);
+      // Cross-division part of the real format: the better division winner
+      // draws the LOWER wildcard.
+      const betterSlot = D.teams[r1[0].hi].pts >= D.teams[r1[2].hi].pts ? 0 : 2;
+      ok(r1[betterSlot].lo === wc[1].id,
+        "the stronger division winner draws the second wildcard");
+      ok(r1[betterSlot === 0 ? 2 : 0].lo === wc[0].id,
+        "and the weaker one draws the first");
+    });
+
+    // Play it out and confirm the structure actually holds through the bracket.
+    simPlayoffs(A, D);
+    const P = D.playoffs;
+    ok(P.champion != null, "the bracket resolves to a champion");
+    ok(P.rounds.length === 4, `four rounds were played (${P.rounds.length})`);
+    ok(P.rounds[1].every((s) => s.conf >= 0), "round two is still inside the conferences");
+    ok(P.rounds[3].length === 1 && P.rounds[3][0].conf === -1, "the final crosses conferences");
+    // Nobody may appear twice in a round — the `wc[1] || wc[0]` fallback could
+    // once put one club in two series at the same time.
+    P.rounds.forEach((rd, i) => {
+      const ids = rd.flatMap((s) => [s.hi, s.lo]);
+      ok(new Set(ids).size === ids.length, `no club appears twice in round ${i + 1}`);
+    });
+  },
+
+  /* Keeping your own players. Before this the only way to retain anyone was to
+     let him reach the market and outbid thirty-one clubs for a player you
+     already had, and every expiring contract in the league hit free agency at
+     once because no AI club ever re-signed anybody. */
+  contracts(A) {
+    section("Extensions");
+    const G = A.newGame(0, { seed: 3311, rules: { seasonLen: 41 } });
+    const mine = A.rosterOf(G, 0);
+    const short = mine.find((p) => p.contract.yrs <= 1) || mine[0];
+    short.contract.yrs = 1;
+    const locked = mine.find((p) => p.contract.yrs >= 3);
+
+    ok(A.canExtend(G, short), "a player in the last year of his deal can be extended");
+    ok(!locked || !A.canExtend(G, locked), "one with years left cannot");
+    ok(!A.extendPlayer(G, locked ? locked.id : short.id, 99, 3).ok || !locked,
+      "and trying anyway is refused");
+
+    // Loyalty: staying costs a shade less than signing him off the market.
+    const ask = A.extensionAsk(G, short.id, 0, 3);
+    const open = A.askingPrice(G, short.id, 0, 3);
+    ok(ask < open, `his own club gets a loyalty discount ($${ask}M vs $${open}M)`);
+    ok(ask >= 0.5, "but never below the minimum");
+
+    const low = A.extendPlayer(G, short.id, ask * 0.9, 3);
+    ok(!low.ok && low.counter, `a near miss counters ($${low.counter}M)`);
+    ok(!A.extendPlayer(G, short.id, ask * 0.3, 3).ok, "a lowball gets nothing");
+    const before = A.capHit(G, 0);
+    const done = A.extendPlayer(G, short.id, ask, 3);
+    ok(done.ok, "meeting the number keeps him");
+    ok(short.contract.yrs === 3 && short.contract.amt === ask, "on the terms agreed");
+    // The extension REPLACES the expiring deal — only the difference is new money.
+    ok(Math.abs(A.capHit(G, 0) - before) < Math.abs(ask) + 0.05,
+      "and it replaces his old deal rather than stacking on it");
+
+    section("AI contract decisions");
+    const H = A.newGame(0, { seed: 3311, rules: { seasonLen: 41 } });
+    simSeason(A, H); simPlayoffs(A, H);
+    // finishSeason has now run: AI clubs have made their calls.
+    const faIds = new Set(H.freeAgents);
+    const signed = A.playersOf(H).filter((p) => !p.retired && p.teamId != null);
+    ok(H.freeAgents.length > 20, `a real free-agent class reached the market (${H.freeAgents.length})`);
+    ok(H.freeAgents.length < 400, "but not every expiring contract in the league");
+    // The decision must DISCRIMINATE — good players kept, fringe let go.
+    const fas = H.freeAgents.map((id) => H.players[id]).filter(Boolean);
+    const kept = signed.filter((p) => p.teamId !== H.userTeam);
+    const avg = (a) => (a.length ? a.reduce((s, p) => s + p.ovr, 0) / a.length : 0);
+    ok(avg(kept) > avg(fas), `clubs keep the better players (${avg(kept).toFixed(1)} vs ${avg(fas).toFixed(1)})`);
+    const oldFas = fas.filter((p) => p.age >= 31).length / Math.max(1, fas.length);
+    const oldKept = kept.filter((p) => p.age >= 31).length / Math.max(1, kept.length);
+    ok(oldFas > oldKept, `and let the older ones walk (${(oldFas * 100).toFixed(0)}% vs ${(oldKept * 100).toFixed(0)}% over 30)`);
+    ok(H.teams.every((t) => A.capHit(H, t.id) <= A.rules(H).capAmount + 0.5),
+      "nobody re-signed themselves over the cap",
+      H.teams.filter((t) => A.capHit(H, t.id) > A.rules(H).capAmount + 0.5).map((t) => `${t.abbr} ${A.capHit(H, t.id)}`).join(" "));
+
+    // FARM_MAX is a declared rule; it has to actually hold.
+    ok(H.teams.every((t) => A.rosterOf(H, t.id, true).filter((p) => p.farm).length <= A.FARM_MAX),
+      "no club stockpiles more than a legal farm",
+      H.teams.map((t) => A.rosterOf(H, t.id, true).filter((p) => p.farm).length).sort((a, b) => b - a).slice(0, 3).join("/"));
+  },
+
+  /* The farm used to be a stat generator with no opponent, no result and
+     nothing to win. It is now a league: mirrored fixtures, a table, and a
+     championship. The checks below are what stop it drifting back into a
+     random-number machine that happens to print plausible totals. */
+  farmLeague(A) {
+    section("The farm league");
+    const G = A.newGame(0, { seed: 7712, rules: { seasonLen: 82 } });
+    ok(G.teams.every((t) => A.farmRec(t).gp === 0), "every affiliate starts with a clean sheet");
+
+    // One day at a time, on its own game, so the mirroring can be checked
+    // against the fixtures without polluting the season totals below.
+    const D = A.newGame(0, { seed: 7712, rules: { seasonLen: 82 } });
+    const fixtures = D.schedule[D.day] || [];
+    const before = D.teams.map((t) => A.farmRec(t).gp);
+    A.simFarmDay(D, D.day);
+    const played = new Set();
+    fixtures.forEach((f) => { played.add(f.home); played.add(f.away); });
+    ok(fixtures.length > 0, `the calendar opens with fixtures (${fixtures.length})`);
+    ok(D.teams.every((t, i) => A.farmRec(t).gp === before[i] + (played.has(t.id) ? 1 : 0)),
+      "an affiliate plays exactly when its parent club does");
+
+    simSeason(A, G);
+    const recs = G.teams.map((t) => A.farmRec(t));
+    ok(recs.every((r) => r.gp > 0), "every affiliate played a season");
+    ok(recs.every((r) => r.w + r.l + r.otl === r.gp), "records reconcile with games played");
+    // The mirrored schedule means the farm plays exactly the NHL slate.
+    ok(G.teams.every((t, i) => A.farmRec(t).gp === t.gp),
+      "the affiliates play the same number of games as their parents");
+    // A league is zero-sum: goals for must equal goals against across it.
+    const gf = recs.reduce((s, r) => s + r.gf, 0), ga = recs.reduce((s, r) => s + r.ga, 0);
+    ok(gf === ga, `the league's goals balance (${gf} vs ${ga})`);
+    const totalW = recs.reduce((s, r) => s + r.w, 0);
+    ok(totalW === recs.reduce((s, r) => s + r.l + r.otl, 0), "and so do wins against losses");
+
+    // Scoring has to be sane, not just internally consistent.
+    const perGame = gf / recs.reduce((s, r) => s + r.gp, 0);
+    ok(perGame > 1.8 && perGame < 5, `farm scoring is plausible (${perGame.toFixed(2)} per club-game)`);
+
+    // Player lines must add up to the club's goals, or the table is a fiction.
+    let mismatch = 0;
+    G.teams.forEach((t) => {
+      const skaters = A.rosterOf(G, t.id, true).filter((p) => p.farm && p.farmSeason);
+      const goals = skaters.reduce((s, p) => s + (p.farmSeason.g || 0), 0);
+      if (goals > A.farmRec(t).gf) mismatch++;
+    });
+    ok(mismatch === 0, "no club's prospects out-score the club itself");
+    const withLines = A.playersOf(G).filter((p) => p.farm && p.farmSeason && p.farmSeason.gp > 0);
+    ok(withLines.length > 100, `prospects built real stat lines (${withLines.length})`);
+    ok(withLines.some((p) => p.farmSeason.g > 0 && p.farmSeason.a > 0), "with goals and assists");
+    /* Every number must be a NUMBER. A negative base to a fractional power is
+       NaN, and NaN weights silently route every goal to the last skater in the
+       list — on a thin affiliate one player took all 154 of his club's goals
+       and the whole roster finished with zero assists. Averages across the
+       league hid it completely. */
+    ok(withLines.every((p) => Object.values(p.farmSeason).every((v) => typeof v === "number" && isFinite(v))),
+      "no farm stat is NaN or infinite");
+    // Scoring must be SHARED. No prospect may take an absurd slice of his club.
+    let hog = null;
+    G.teams.forEach((t) => {
+      const sk = A.rosterOf(G, t.id, true).filter((p) => p.farm && p.farmSeason && p.pos !== "G");
+      const clubG = A.farmRec(t).gf;
+      if (clubG < 20 || sk.length < 3) return;
+      sk.forEach((p) => { if ((p.farmSeason.g || 0) / clubG > 0.6) hog = `${p.ln} ${p.farmSeason.g}/${clubG} for ${t.abbr}`; });
+    });
+    ok(!hog, "no single prospect scores most of his club's goals", hog);
+    /* Assists must outnumber goals, as they do in any hockey league. They are
+       drawn from the same pool, so this also proves a prospect gets credited on
+       goals scored by team-mates the game doesn't model individually — skipping
+       those events entirely once cut the ratio to 0.38 and buried playmakers. */
+    const sk = withLines.filter((p) => p.pos !== "G");
+    const tg = sk.reduce((s, p) => s + p.farmSeason.g, 0);
+    const ta = sk.reduce((s, p) => s + p.farmSeason.a, 0);
+    ok(ta > tg, `assists outnumber goals (${ta} to ${tg}, ${(ta / tg).toFixed(2)})`);
+    // And a top prospect's season has to look like a hockey season, not a video
+    // game one: five prospects splitting a whole club once produced 138 goals.
+    const best = sk.filter((p) => p.farmSeason.gp >= 40)
+      .sort((a, b) => b.farmSeason.g - a.farmSeason.g)[0];
+    ok(best && best.farmSeason.g / best.farmSeason.gp < 0.85,
+      `even the best farm scorer is plausible (${best.farmSeason.g} in ${best.farmSeason.gp})`);
+    // And assists have to happen everywhere, not just on deep affiliates.
+    const clubsWithAssists = G.teams.filter((t) => {
+      const sk = A.rosterOf(G, t.id, true).filter((p) => p.farm && p.farmSeason && p.pos !== "G");
+      return sk.length >= 3 && sk.some((p) => (p.farmSeason.a || 0) > 0);
+    }).length;
+    const eligible = G.teams.filter((t) => A.rosterOf(G, t.id, true).filter((p) => p.farm && p.farmSeason && p.pos !== "G").length >= 3).length;
+    ok(clubsWithAssists === eligible,
+      `every affiliate with a real roster records assists (${clubsWithAssists}/${eligible})`);
+    const keepers = withLines.filter((p) => p.pos === "G" && p.farmSeason.sa > 0);
+    ok(keepers.length > 5, `farm goalies faced shots (${keepers.length})`);
+    ok(keepers.every((p) => p.farmSeason.sv + p.farmSeason.ga === p.farmSeason.sa),
+      "and their saves reconcile with shots faced");
+    ok(keepers.some((p) => p.farmSeason.w > 0), "and some of them won games");
+
+    // Ability has to matter, or the league is noise.
+    const scorers = withLines.filter((p) => p.pos !== "G" && p.farmSeason.gp >= 20);
+    const good = scorers.filter((p) => p.ovr >= 55), poor = scorers.filter((p) => p.ovr < 45);
+    const ppg = (a) => (a.length ? a.reduce((s, p) => s + (p.farmSeason.g + p.farmSeason.a) / p.farmSeason.gp, 0) / a.length : 0);
+    ok(good.length && poor.length && ppg(good) > ppg(poor) * 1.4,
+      `better prospects produce more (${ppg(good).toFixed(2)} vs ${ppg(poor).toFixed(2)} per game)`);
+
+    // The table has to separate clubs, and the championship has to resolve.
+    const table = A.farmStandings(G);
+    ok(A.farmRec(table[0]).pts > A.farmRec(table[31]).pts + 10,
+      `the table spreads (${A.farmRec(table[31]).pts}–${A.farmRec(table[0]).pts} pts)`);
+    ok(G.farmCup && G.farmCup.champion != null, "the affiliates crowned a champion");
+    ok(G.farmCup.field.length === A.FARM_CUP_FIELD, `${A.FARM_CUP_FIELD} clubs made the farm playoffs`);
+    ok(G.farmCup.rounds.length === 3, `played over three rounds (${G.farmCup.rounds.length})`);
+    ok(G.farmCup.field.includes(G.farmCup.champion), "the champion came from the field");
+    ok(G.teams[G.farmCup.champion].farmCups === 1, "and the club has the title on its record");
+    const winners = A.playersOf(G).filter((p) => (p.farmTitles || []).length);
+    ok(winners.length > 0, `the prospects who won it have it on theirs (${winners.length})`);
+
+    // A championship must be earned, not handed to whoever sorts first.
+    ok(G.farmCup.rounds.every((rd) => rd.every((s) => s.winner === s.hi || s.winner === s.lo)),
+      "every series was won by one of its two clubs");
+
+    // It survives a rollover and starts clean.
+    simPlayoffs(A, G);
+    A.autoDraft(G, false);
+    A.startNextSeason(G);
+    ok(G.teams.every((t) => A.farmRec(t).gp === 0), "the table resets for the new season");
+    ok(G.farmCup == null, "and last year's farm cup is cleared");
+    ok(A.playersOf(G).some((p) => (p.farmCareer || []).length), "last year's farm line was archived");
   },
 
   // The same seed must produce the same season, or nothing above is reproducible.

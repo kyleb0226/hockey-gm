@@ -549,7 +549,12 @@ function marketValue(G, p) {
 const MAX_RETAINED = 3;
 const RETAIN_MAX_PCT = 0.5;
 const retainedBy = (G, teamId) => (G.retained || []).filter((r) => r.from === teamId);
-const retainedOn = (G, pid) => (G.retained || []).filter((r) => r.pid === pid);
+/* Dead money from a release is carried by the club that cut him, but it must
+   NOT follow the player — otherwise signing him somewhere else would come with
+   a discount his new club never negotiated. `retainedBy` still sees it, because
+   that's the half that hits the cap. */
+const retainedOn = (G, pid) => (G.retained || []).filter((r) => r.pid === pid && !r.dead);
+const retainedTraded = (G, teamId) => retainedBy(G, teamId).filter((r) => !r.dead);
 // What a player actually costs the club that rosters him.
 function effectiveCap(G, p) {
   return Math.max(0, round1(p.contract.amt - retainedOn(G, p.id).reduce((s, r) => s + r.amt, 0)));
@@ -921,7 +926,10 @@ function migrate(G) {
     if (p.fatigue == null) p.fatigue = 0;
     if (!p.shoots) p.shoots = (p.id % 100) < 62 ? "L" : "R";
     const kind = p.pos === "G" ? "G" : "S";
-    [p.stats, p.season].forEach((s) => {
+    // Only the LIVE season carries shot buckets; an older save that put them on
+    // `p.stats` too gets that space back here.
+    if (p.stats) { delete p.stats.z; delete p.stats.net; }
+    [p.season].forEach((s) => {
       if (!s) return;
       if (!s.z) s.z = blankZones(kind);
       if (!s.net) s.net = blankNet(kind);
@@ -1649,7 +1657,8 @@ function simDay(G) {
   });
   playedToday.forEach((tid) => { G.lastPlayed[tid] = G.day; });
   processWaivers(G);
-  playedToday.forEach((tid) => simFarmDay(G, tid));
+  // The affiliates play the mirrored fixtures, so every farm game has a real opponent.
+  simFarmDay(G, G.day);
   checkMilestones(G);
   // Clubs ring about listed players every few days rather than instantly.
   if ((G.block || []).length && G.day % 5 === 0) generateOffers(G);
@@ -1709,22 +1718,35 @@ function buildBracket(G) {
   const rounds = [];
   const matchups = [];
   [0, 1].forEach((conf) => {
+    /* ORDER IS THE BRACKET. `advancePlayoffRound` pairs adjacent survivors —
+       slots 0-1 and 2-3 — so round one has to be pushed with the series that
+       are meant to meet sitting next to each other. Pushing them in any other
+       order silently ruins the seeding: listing all four 1-vs-8 style openers
+       first put the 1 and 2 seeds in the SAME half, so they met in round two
+       instead of the conference final. */
     if (R === "seeded") {
       const f = playoffField(G, conf);
-      for (let i = 0; i < 4; i++) matchups.push(mkSeries(G, f[i].team.id, f[7 - i].team.id, conf));
+      // 1/8 with 4/5, 2/7 with 3/6 — so the 1 seed's half is the soft one.
+      [[0, 7], [3, 4], [1, 6], [2, 5]].forEach(([a, b]) => {
+        if (f[a] && f[b]) matchups.push(mkSeries(G, f[a].team.id, f[b].team.id, conf));
+      });
     } else {
       const { top, wc, divs } = playoffField(G, conf);
-      // Each division's winner meets a wildcard; 2 vs 3 inside the division.
-      const winners = divs.map((d) => top.find((x) => x.div === d && x.divRank === 1).team);
-      const better = winners[0].pts >= winners[1].pts ? 0 : 1;
-      const pairs = [
-        [winners[better], wc[1] || wc[0]],
-        [winners[1 - better], wc[0]],
-      ];
-      pairs.forEach(([a, b]) => { if (a && b) matchups.push(mkSeries(G, a.id, b.id, conf)); });
+      const winnerOf = (d) => (top.find((x) => x.div === d && x.divRank === 1) || {}).team;
+      const winners = divs.map(winnerOf);
+      // The cross-division part of the format: the conference's stronger
+      // division winner draws the LOWER wildcard, the weaker one the higher.
+      const better = winners[0] && winners[1] && winners[0].pts >= winners[1].pts ? 0 : 1;
+      const wcFor = {};
+      wcFor[divs[better]] = wc[1] || wc[0];
+      wcFor[divs[1 - better]] = wc[0];
+      // Each division's two series go in ADJACENT slots, so their winners meet
+      // in round two — that's what makes it a divisional bracket at all.
       divs.forEach((d) => {
+        const one = winnerOf(d), w = wcFor[d];
         const two = top.find((x) => x.div === d && x.divRank === 2);
         const three = top.find((x) => x.div === d && x.divRank === 3);
+        if (one && w) matchups.push(mkSeries(G, one.id, w.id, conf));
         if (two && three) matchups.push(mkSeries(G, two.team.id, three.team.id, conf));
       });
     }
@@ -1842,6 +1864,8 @@ function endRegularSeason(G) {
   G.phase = "playoffs";
   updateRecords(G);
   computeAwards(G);
+  // The affiliates settle their own championship before the Cup gets going.
+  runFarmPlayoffs(G);
   buildBracket(G);
   const field = new Set();
   G.playoffs.rounds[0].forEach((s) => { field.add(s.hi); field.add(s.lo); });
@@ -2075,7 +2099,12 @@ function finishSeason(G) {
       }
     }
     p.stints = null;
-    p.stats = p.season;
+    /* Last season's line is kept for the UI, but WITHOUT the nine net cells and
+       three ice zones — the shot maps are a current-season view and nothing
+       reads `p.stats.z` or `p.stats.net`. Carrying them was ~240 bytes on every
+       player in the league for a year, for data no screen ever showed. */
+    const { z: _lz, net: _ln, ...lastYear } = p.season;
+    p.stats = lastYear;
     p.season = blankStats(p.pos);
     // A playoff run used to be thrown away at the rollover, which meant a
     // twenty-year career had no postseason record at all. Keep the running
@@ -2119,6 +2148,18 @@ function finishSeason(G) {
       return;
     }
     if (p.contract.yrs <= 0) {
+      // The club that has him gets first refusal, exactly as it does in life.
+      // The user makes his own call — his expiring players reach the market and
+      // he can re-sign them there, or extend them before they ever get that far.
+      if (p.teamId !== G.userTeam) {
+        const offer = aiExtensionOffer(G, p);
+        if (offer && rnd(G) < offer.want) {
+          p.contract = { amt: offer.ask, yrs: offer.yrs };
+          p.ntc = eligibleForNtc(p) && offer.yrs >= 3 && rnd(G) < 0.55;
+          p.ntcWaived = false;
+          return;
+        }
+      }
       p.teamId = null; p.farm = false;
       if (!G.freeAgents.includes(p.id)) G.freeAgents.push(p.id);
     }
@@ -2161,11 +2202,17 @@ function finishSeason(G) {
     if (!nothingToShow) return;
     // A prospect old enough to have shown something who hasn't.
     const stalled = p.farm && p.teamId != null && p.age >= 23 && p.ovr < 49 && p.pot < 57;
+    /* Career farm filler. The pool cap only ever reached players nobody had
+       signed, so once clubs started re-signing their own, depth bodies could
+       stay under contract forever and never be pruned — a couple of hundred
+       extra dead records a decade. A 26-year-old on a farm roster who has never
+       played an NHL game and isn't good enough to is done. */
+    const filler = p.farm && p.teamId != null && p.age >= 26 && p.ovr < 50;
     // And the bigger leak: an entry-level deal expires, nobody signs him, and
     // he sits in the free-agent pool forever. Most of a seven-round class ends
     // up here, which is a thousand dead records a decade.
     const unwanted = p.teamId == null && p.age >= 22 && p.ovr < 53;
-    if (!stalled && !unwanted) return;
+    if (!stalled && !unwanted && !filler) return;
     if (stalled && p.teamId === G.userTeam && p.draft && p.draft.round <= 2) {
       news(G, `${fullName(p)} never developed and has been released.`, "bad");
     }
@@ -2179,6 +2226,23 @@ function finishSeason(G) {
      retirement, so the free-agent list grows without bound whatever the quality
      bar. Everyone who can't get a contract eventually leaves the sport; here
      the ones with nothing on their record leave first. */
+  /* FARM_MAX was declared but never actually enforced — nothing stopped a club
+     from stockpiling prospects it would never dress. It only became visible
+     once clubs started re-signing their own players: farms drifted to sixteen
+     apiece and every one of those contracts was shielded from the pool cap
+     below, which only ever reached players nobody had signed. A club now keeps
+     its best twelve and lets the rest go to the market like anyone else. */
+  G.teams.forEach((t) => {
+    const farm = rosterOf(G, t.id, true).filter((p) => p.farm && !p.retired);
+    if (farm.length <= FARM_MAX) return;
+    farm.sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5))
+      .slice(FARM_MAX).forEach((p) => {
+        p.teamId = null; p.farm = false;
+        if (!G.freeAgents.includes(p.id)) G.freeAgents.push(p.id);
+      });
+    t.lines = null;
+  });
+
   if (G.freeAgents.length > FA_POOL_MAX) {
     const ranked = G.freeAgents.map((id) => G.players[id]).filter(Boolean)
       .sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5));
@@ -2561,9 +2625,9 @@ function evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts) {
   };
   const aRetain = aOut.reduce((s, p) => s + retainAmt(p, aId), 0);
   const bRetain = bOut.reduce((s, p) => s + retainAmt(p, bId), 0);
-  if (aRetain > 0 && retainedBy(G, aId).length + aOut.filter((p) => retain[p.id]).length > MAX_RETAINED)
+  if (aRetain > 0 && retainedTraded(G, aId).length + aOut.filter((p) => retain[p.id]).length > MAX_RETAINED)
     return { ok: false, why: `${G.teams[aId].abbr} can only retain ${MAX_RETAINED} contracts` };
-  if (bRetain > 0 && retainedBy(G, bId).length + bOut.filter((p) => retain[p.id]).length > MAX_RETAINED)
+  if (bRetain > 0 && retainedTraded(G, bId).length + bOut.filter((p) => retain[p.id]).length > MAX_RETAINED)
     return { ok: false, why: `${G.teams[bId].abbr} can only retain ${MAX_RETAINED} contracts` };
 
   const aSalOut = aOut.reduce((s, p) => s + effectiveCap(G, p), 0) - aRetain;
@@ -2652,6 +2716,71 @@ function nextOpponent(G) {
   };
 }
 
+/* A real scouting report reads what a goalie has ACTUALLY conceded, not a
+   constant derived from his id. `goalieHole` is permanent and genuinely bends
+   `pickCell`, but printing it directly meant the note said the same thing on
+   day 1 as on day 82 no matter what happened on the ice — a label, not a
+   report. This reads his per-cell record from `p.season.net`, which the engine
+   already fills in for every goalie and nothing ever surfaced.
+ *
+ * The evidence CORRELATES with the hole rather than equalling it, which is the
+ * point: you infer where he's soft from what he's given up, and early in the
+ * season you genuinely don't know yet. `confidence` is how much of the read to
+ * trust, so the UI can say "too early to tell" instead of inventing certainty. */
+const REPORT_MIN_SHOTS = 12;    // per cell, before a rate means anything
+const REPORT_TRUST_SA = 250;    // total shots faced for a confident read
+/* What the whole league concedes in each of the nine cells this season — the
+   baseline a single goalie is judged against. Recomputed on demand rather than
+   stored: it's derived from data already in the save, and a stale copy would
+   quietly skew every report. */
+function leagueNetRates(G) {
+  const tot = {};
+  NET_KEYS.forEach((k) => { tot[k] = { sa: 0, ga: 0 }; });
+  playersOf(G).forEach((p) => {
+    if (p.pos !== "G" || !p.season || !p.season.net) return;
+    NET_KEYS.forEach((k) => {
+      const n = p.season.net[k];
+      if (n) { tot[k].sa += n.sa || 0; tot[k].ga += n.ga || 0; }
+    });
+  });
+  const out = {};
+  NET_KEYS.forEach((k) => { if (tot[k].sa >= 50) out[k] = tot[k].ga / tot[k].sa; });
+  return out;
+}
+function goalieReport(G, p) {
+  const s = p.season || {};
+  const net = s.net;
+  const cells = NET_CELLS.map((c) => {
+    const n = (net && net[c.key]) || { sa: 0, ga: 0 };
+    return { cell: c, sa: n.sa, ga: n.ga, rate: n.sa ? n.ga / n.sa : 0, thin: n.sa < REPORT_MIN_SHOTS };
+  });
+  const seen = cells.filter((c) => !c.thin);
+  /* Rank against what EVERY goalie concedes in that cell, not against his own
+     average. Measuring a cell against his own overall rate just rediscovers
+     that top corners are lethal for everybody — glove high came back as the
+     "weakness" of three goalies in four, which is a fact about the net, not
+     about the man in it. Against the league baseline it means what it says:
+     he is worse here than his peers are. */
+  const lg = leagueNetRates(G);
+  seen.forEach((c) => { c.edge = c.rate - (lg[c.cell.key] != null ? lg[c.cell.key] : c.rate); });
+  const ranked = seen.slice().sort((a, b) => b.edge - a.edge);
+  return {
+    starts: s.gp || 0,
+    sa: s.sa || 0,
+    sv: svPct(s),
+    gaa: gaa(s),
+    fresh: Math.round(100 - (p.fatigue || 0)),
+    // Enough evidence to say anything at all?
+    confidence: clamp((s.sa || 0) / REPORT_TRUST_SA, 0, 1),
+    soft: ranked[0] && ranked[0].edge > 0.02 ? ranked[0] : null,
+    strong: ranked.length > 1 && ranked[ranked.length - 1].edge < -0.02 ? ranked[ranked.length - 1] : null,
+    cells,
+    // Kept so the shot maps can still outline the true hole — that chart is a
+    // record of what happened, not a claim about what a scout knows.
+    hole: goalieHole(p),
+  };
+}
+
 function setBlock(G, pid, on) {
   G.block = G.block || [];
   const i = G.block.indexOf(pid);
@@ -2724,19 +2853,108 @@ function nhlGames(p) {
 function needsWaivers(G, p) {
   return !p.farm && p.age >= 22 && nhlGames(p) >= WAIVER_EXEMPT_GAMES;
 }
+/* Moving a player between your own NHL roster and your own farm is a roster
+   decision, not a transaction — it costs nothing and exposes him to nobody.
+   Waivers used to gate this, which made shuffling depth players a gamble; they
+   now exist for RELEASES, where the risk actually belongs. */
 function sendDown(G, pid) {
   const p = G.players[pid];
   if (!p || p.teamId == null) return { ok: false, why: "not on your roster" };
   if (p.farm) return { ok: false, why: "already on the farm" };
-  if (!needsWaivers(G, p)) {
-    p.farm = true;
-    G.teams[p.teamId].lines = null;
-    return { ok: true, waivers: false };
-  }
+  const org = rosterOf(G, p.teamId, true).length, nhl = rosterOf(G, p.teamId).length;
+  if (org - nhl >= FARM_MAX) return { ok: false, why: "the farm is full" };
+  p.farm = true;
+  G.teams[p.teamId].lines = null;
+  return { ok: true, waivers: false };
+}
+
+/* Cutting a player loose. He goes on waivers first — anyone can take him and
+   the contract with him, worst club first — and if nobody does he's a free
+   agent and you carry a share of what's left as dead cap. That's the cost that
+   makes releasing a real decision rather than a free undo. */
+const RELEASE_DEAD_PCT = 1 / 3;
+function releaseCost(G, pid) {
+  const p = G.players[pid];
+  if (!p) return 0;
+  return round1(p.contract.amt * RELEASE_DEAD_PCT);
+}
+function releasePlayer(G, pid) {
+  const p = G.players[pid];
+  if (!p || p.teamId == null) return { ok: false, why: "not on your roster" };
+  if (hasNtc(p)) return { ok: false, why: "his no-trade clause protects him — ask for a waiver first" };
   G.waivers = G.waivers || [];
   if (G.waivers.some((w) => w.pid === pid)) return { ok: false, why: "already on waivers" };
-  G.waivers.push({ pid, from: p.teamId, day: G.day, year: G.year });
-  return { ok: true, waivers: true };
+  G.waivers.push({ pid, from: p.teamId, day: G.day, year: G.year, release: true });
+  return { ok: true, dead: releaseCost(G, pid), yrs: Math.max(1, p.contract.yrs) };
+}
+
+/* Re-signing your own. A club gets first refusal on a player in the last year
+   of his deal, and he'd rather stay than move — that's the loyalty discount.
+   Without this the only way to keep anyone was to let him hit the market and
+   outbid thirty-one other clubs for a player you already had. */
+const EXTEND_LOYALTY = 0.94;
+function canExtend(G, p) {
+  return p && p.teamId != null && !p.retired && p.contract.yrs <= 1;
+}
+function extensionAsk(G, pid, teamId, yrs) {
+  return round1(Math.max(MIN_SALARY, askingPrice(G, pid, teamId, yrs) * EXTEND_LOYALTY));
+}
+function extendPlayer(G, pid, amt, yrs) {
+  const p = G.players[pid];
+  if (!p) return { ok: false, why: "no such player" };
+  if (!canExtend(G, p)) return { ok: false, why: "he isn't in the last year of his deal" };
+  const R = rules(G);
+  const want = extensionAsk(G, pid, p.teamId, yrs);
+  if (amt < want * 0.82) return { ok: false, want, why: "not interested at that number" };
+  if (amt < want) return { ok: false, counter: want, counterYrs: yrs, why: `he wants $${want}M × ${yrs}` };
+  // The extension replaces his expiring deal, so only the DIFFERENCE is new money.
+  if (R.hardCap && capHit(G, p.teamId) - effectiveCap(G, p) + amt > R.capAmount)
+    return { ok: false, why: "no cap space for that" };
+  p.contract = { amt: round1(amt), yrs };
+  p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
+  p.ntcWaived = false;
+  return { ok: true, want };
+}
+
+/* What an AI club does with its own expiring players. It is not a blanket
+   "re-sign everyone": a rebuilding side lets its thirty-somethings walk, a
+   contender pays to keep its core, and nobody signs a player they can't fit.
+   The result is a free-agent class that reflects thirty-two actual decisions
+   rather than every expiring contract in the league landing on the market. */
+function aiExtensionOffer(G, p) {
+  const t = G.teams[p.teamId];
+  if (!t) return null;
+  const squad = rosterOf(G, p.teamId).slice().sort((a, b) => b.ovr - a.ovr);
+  const depth = squad.findIndex((x) => x.id === p.id);
+  // Where he sits in his own room, and whether he's still going up or coming down.
+  const core = depth >= 0 && depth < 9;
+  const past = p.age >= 31;
+  const rising = p.pot - p.ovr >= 4 && p.age <= 25;
+  // Whether the club can even field a side without him. Only players already
+  // signed for NEXT year count — everyone else is in the same boat he is.
+  const kept = rosterOf(G, p.teamId, true).filter((x) => x.id !== p.id && x.contract.yrs > 0).length;
+  /* The baseline is deliberately LOW. A fringe player gets replaced, not
+     re-signed — that's what makes a roster churn and a free-agent class worth
+     reading. Starting from a coin flip meant clubs quietly kept everybody, and
+     since a signed player never enters the free-agent pool he also never gets
+     pruned: eight seasons put five hundred extra bodies in the save. */
+  let want = 0.1;
+  if (core) want += 0.45;
+  if (rising) want += 0.35;
+  if (kept < 18) want += 0.25;
+  if (past) want -= 0.3;
+  if (p.age >= 35) want -= 0.3;
+  if (p.ovr < 52) want -= 0.35;
+  // A club going nowhere sells the future short at its own peril, but it does
+  // stop paying veterans to be mediocre.
+  const pos = standings(G).findIndex((x) => x.id === p.teamId);
+  if (pos > 20 && past) want -= 0.2;
+  if (pos < 8 && core) want += 0.12;
+  if (want <= 0) return null;
+  const yrs = rising ? ri(G, 3, 5) : past ? ri(G, 1, 2) : ri(G, 2, 4);
+  const ask = extensionAsk(G, p.id, p.teamId, yrs);
+  if (rules(G).hardCap && capHit(G, p.teamId) - effectiveCap(G, p) + ask > rules(G).capAmount) return null;
+  return { want, ask, yrs };
 }
 function recall(G, pid) {
   const p = G.players[pid];
@@ -2769,7 +2987,20 @@ function processWaivers(G) {
       if (t.id === G.userTeam) news(G, `Claimed ${fullName(p)} on waivers.`, "good");
       return;
     }
-    // Cleared.
+    // Cleared. A release that nobody takes leaves the club holding dead money
+    // for the rest of the term; anything else simply reports to the farm.
+    if (w.release) {
+      const yrs = Math.max(1, p.contract.yrs);
+      G.retained = G.retained || [];
+      G.retained.push({ pid: p.id, from: w.from, amt: releaseCost(G, p.id), yrs, dead: true });
+      p.teamId = null; p.farm = false;
+      if (!G.freeAgents.includes(p.id)) G.freeAgents.push(p.id);
+      G.teams[w.from].lines = null;
+      if (w.from === G.userTeam) {
+        news(G, `${fullName(p)} cleared waivers and was released — $${releaseCost(G, p.id)}M dead for ${yrs} year${yrs === 1 ? "" : "s"}.`, "bad");
+      }
+      return;
+    }
     p.farm = true;
     G.teams[w.from].lines = null;
     if (w.from === G.userTeam) news(G, `${fullName(p)} cleared waivers and reported to the farm.`, "info");
@@ -2816,22 +3047,210 @@ function negotiate(G, pid, teamId, amt, yrs) {
 const FARM_READY = 4;   // within this of his ceiling, he's knocking on the door
 function isProspect(p) { return !!p.farm && p.age <= 23 && !p.retired; }
 function prospectReady(G, p) {
-  return p.farm && (p.ovr >= 58 || p.pot - p.ovr <= FARM_READY);
+  if (!p.farm) return false;
+  // Now that the farm is a real league, dominating it is itself a signal — a
+  // prospect outscoring the affiliate is telling you he's finished learning
+  // there, whatever his rating says.
+  const f = p.farmSeason;
+  const tearing = f && f.gp >= 20 && p.pos !== "G"
+    && ((f.g || 0) + (f.a || 0)) / f.gp >= 0.85;
+  const stealing = f && f.gp >= 15 && p.pos === "G" && f.sa >= 300 && f.sv / f.sa >= 0.915;
+  return p.ovr >= 58 || p.pot - p.ovr <= FARM_READY || !!tearing || !!stealing;
 }
-// Farm production, worked out once per game day rather than simulated shift by
-// shift — the farm is a development track, not a league you manage.
-function simFarmDay(G, teamId) {
-  rosterOf(G, teamId, true).filter((p) => p.farm && p.pos !== "G" && p.inj <= 0).forEach((p) => {
-    if (!p.farmSeason) p.farmSeason = { gp: 0, g: 0, a: 0 };
-    p.farmSeason.gp++;
-    const rate = clamp((p.ovr - 30) / 100, 0.05, 0.95);
-    if (rnd(G) < rate * 0.32) p.farmSeason.g++;
-    if (rnd(G) < rate * 0.46) p.farmSeason.a++;
+/* ------------------------------- the farm league ---------------------------
+ * Prospects used to accumulate a stat line in a vacuum: no opponent, no result,
+ * nothing to win. Every club's affiliate now plays a real league with a table
+ * and a championship.
+ *
+ * The affiliates MIRROR the parent schedule — when Hartford visit Boston, so do
+ * their farm clubs. That's a deliberate simplification and it buys a lot: no
+ * second calendar to build, store or keep in sync, no chance of the two drifting
+ * apart, and every farm game still has a genuine opponent and a genuine result.
+ *
+ * The sim itself is deliberately coarse — a strength-vs-strength scoreline, not
+ * the line-matchup engine. The farm is a development track you watch, not a
+ * bench you set, and running the full engine 1,300 extra times a season would
+ * cost more than it tells anyone. For the same reason a farm line carries no
+ * zone or net buckets: those are what push a save past the storage ceiling.
+ * ------------------------------------------------------------------------- */
+
+const FARM_ROSTER_FLOOR = 6;   // below this a club ices borrowed depth
+const FARM_DRESSED = 14;       // skaters an affiliate actually ices
+const FARM_FILLER_OVR = 42;    // the affiliate's own depth, modelled as weight only
+function blankFarmLine(pos) {
+  return pos === "G"
+    ? { gp: 0, w: 0, l: 0, sa: 0, sv: 0, ga: 0, so: 0 }
+    : { gp: 0, g: 0, a: 0, pim: 0, pm: 0 };
+}
+function farmLine(p) {
+  if (!p.farmSeason) p.farmSeason = blankFarmLine(p.pos);
+  // An older save carries the slim {gp,g,a} shape; fill in the rest.
+  const want = blankFarmLine(p.pos);
+  Object.keys(want).forEach((k) => { if (p.farmSeason[k] == null) p.farmSeason[k] = want[k]; });
+  return p.farmSeason;
+}
+const blankFarmRec = () => ({ w: 0, l: 0, otl: 0, pts: 0, gf: 0, ga: 0, gp: 0, l10: [] });
+function farmRec(t) { if (!t.farmRec) t.farmRec = blankFarmRec(); return t.farmRec; }
+function farmRoster(G, teamId) {
+  return rosterOf(G, teamId, true).filter((p) => p.farm && !p.retired && p.inj <= 0);
+}
+/* How good the affiliate is. A club that has called everyone up ices a thin
+   side rather than a phantom one — the floor keeps a short roster from
+   producing absurd scorelines without pretending players exist. */
+function farmStrength(G, teamId) {
+  const r = farmRoster(G, teamId).filter((p) => p.pos !== "G").sort((a, b) => b.ovr - a.ovr).slice(0, 12);
+  if (!r.length) return 38;
+  const sum = r.reduce((s, p) => s + p.ovr, 0);
+  return sum / Math.max(FARM_ROSTER_FLOOR, r.length);
+}
+function farmStarter(G, teamId) {
+  return farmRoster(G, teamId).filter((p) => p.pos === "G").sort((a, b) => b.ovr - a.ovr)[0] || null;
+}
+
+function simFarmGame(G, home, away) {
+  const hs = farmStrength(G, home), as = farmStrength(G, away);
+  const hg0 = farmStarter(G, home), ag0 = farmStarter(G, away);
+  // Goaltending swings a farm game more than anything else, because half these
+  // clubs don't have one.
+  const keep = (g) => (g ? clamp((g.ovr - 45) / 100, -0.1, 0.4) : -0.18);
+  const rate = (off, defKeep) => clamp(2.9 * (off / 52) * (1 - defKeep * 0.7) + 0.25, 0.6, 7);
+  const goals = (mu) => { let n = 0, l = Math.exp(-mu), p = 1; do { p *= rnd(G); n++; } while (p > l); return n - 1; };
+  let hgls = goals(rate(hs, keep(ag0)) * 1.045);   // home ice
+  let agls = goals(rate(as, keep(hg0)));
+  let ot = false, so = false;
+  if (hgls === agls) {
+    ot = true;
+    if (rnd(G) < 0.62) { if (rnd(G) < 0.5 + (hs - as) * 0.012) hgls++; else agls++; }
+    else { so = true; if (rnd(G) < 0.5 + (hs - as) * 0.012) hgls++; else agls++; }
+  }
+  return { home, away, hg: hgls, ag: agls, ot, so };
+}
+
+/* Turn a scoreline into stat lines. Scorers are drawn by ability, so the best
+   prospect on the roster leads the club — which is the whole point of giving
+   them a league in the first place. */
+function applyFarmGame(G, res) {
+  const rec = (id, gf, ga, win, otl) => {
+    const r = farmRec(G.teams[id]);
+    r.gp++; r.gf += gf; r.ga += ga;
+    if (win) { r.w++; r.pts += 2; } else if (otl) { r.otl++; r.pts += ruleValue(G, "otLoserPoint") ? 1 : 0; } else r.l++;
+    r.l10 = (r.l10 || []).concat([win ? "W" : otl ? "O" : "L"]).slice(-10);
+  };
+  const decided = res.ot || res.so;
+  const homeWon = res.hg > res.ag;
+  rec(res.home, res.hg, res.ag, homeWon, !homeWon && decided);
+  rec(res.away, res.ag, res.hg, !homeWon, homeWon && decided);
+
+  [[res.home, res.hg, res.ag], [res.away, res.ag, res.hg]].forEach(([id, gf, ga]) => {
+    const skaters = farmRoster(G, id).filter((p) => p.pos !== "G");
+    skaters.forEach((p) => { farmLine(p).gp++; });
+    const keeper = farmStarter(G, id);
+    if (keeper) {
+      const k = farmLine(keeper);
+      const shots = 22 + Math.round(rnd(G) * 16) + ga;
+      k.gp++; k.sa += shots; k.ga += ga; k.sv += shots - ga;
+      const won = gf > ga;
+      if (won) k.w++; else k.l++;
+      if (ga === 0) k.so++;
+    }
+    if (!skaters.length) return;
+    /* Weighted draw by ability — a 70 prospect scores far more than a 45.
+       The base MUST be clamped at zero before the exponent: a negative number
+       to a fractional power is NaN, which poisons the total, makes every
+       comparison false, and quietly hands the whole draw to the last skater in
+       the list. On a thin affiliate that gave one player all 154 of his club's
+       goals and nobody a single assist. */
+    const weight = (p) => 1 + Math.pow(Math.max(0, p.ovr - 32), 1.6);
+    /* An affiliate ices a full side, but only the parent club's prospects are
+       modelled as players — a club carries two to five of them. The rest of the
+       bench is the affiliate's own signed depth, which we account for as
+       PHANTOM weight rather than as records: giving each club ten more player
+       objects would put three hundred dead rows back in the save for nobody's
+       benefit. Without them, five prospects split every goal their club scored
+       and the best of them finished on 138 in 82 games. A goal drawn to a
+       phantom simply belongs to a player we don't track. */
+    const real = skaters.reduce((s, p) => s + weight(p), 0);
+    const phantomEach = 1 + Math.pow(FARM_FILLER_OVR - 32, 1.6);
+    const phantoms = Math.max(0, FARM_DRESSED - skaters.length);
+    const total = real + phantoms * phantomEach;
+    const draw = () => {
+      let r = rnd(G) * total;
+      for (const p of skaters) { r -= weight(p); if (r <= 0) return p; }
+      return null;   // one of the affiliate's own, not a prospect we follow
+    };
+    for (let i = 0; i < gf; i++) {
+      const scorer = draw();
+      // A goal scored by an untracked team-mate is still a goal a prospect can
+      // assist on — skipping the whole event when the scorer was a phantom cut
+      // league assists to a third of goals and quietly buried every playmaker.
+      if (scorer) farmLine(scorer).g++;
+      const helpers = rnd(G) < 0.82 ? (rnd(G) < 0.55 ? 2 : 1) : 0;
+      const used = new Set(scorer ? [scorer.id] : []);
+      for (let a = 0; a < helpers; a++) {
+        const h = draw();
+        if (!h || used.has(h.id)) continue;   // an untracked team-mate assisted
+        used.add(h.id);
+        farmLine(h).a++;
+      }
+    }
+    // A little discipline, so the line isn't only offence.
+    skaters.forEach((p) => { if (rnd(G) < 0.06) farmLine(p).pim += 2; });
+    const swing = gf - ga;
+    skaters.slice(0, 12).forEach((p) => { if (rnd(G) < 0.5) farmLine(p).pm += swing > 0 ? 1 : swing < 0 ? -1 : 0; });
   });
-  rosterOf(G, teamId, true).filter((p) => p.farm && p.pos === "G" && p.inj <= 0).forEach((p) => {
-    if (!p.farmSeason) p.farmSeason = { gp: 0, g: 0, a: 0 };
-    if (rnd(G) < 0.5) p.farmSeason.gp++;
+  return G;
+}
+
+// Every affiliate whose parent club plays today plays the mirrored fixture.
+function simFarmDay(G, day) {
+  (G.schedule[day] || []).forEach((fx) => { applyFarmGame(G, simFarmGame(G, fx.home, fx.away)); });
+  return G;
+}
+
+function farmStandings(G, filterFn) {
+  return G.teams.filter(filterFn || (() => true)).slice().sort((a, b) => {
+    const x = farmRec(a), y = farmRec(b);
+    return y.pts - x.pts || y.w - x.w || (y.gf - y.ga) - (x.gf - x.ga) || y.gf - x.gf;
   });
+}
+
+/* The affiliates play for something too. Eight clubs, best-of-three, three
+   rounds — enough to be a real trophy without a second postseason to sit
+   through. It resolves in one go at the end of the regular season. */
+const FARM_CUP_FIELD = 8;
+function runFarmPlayoffs(G) {
+  const field = farmStandings(G).filter((t) => farmRec(t).gp > 0).slice(0, FARM_CUP_FIELD);
+  if (field.length < 2) return G;
+  const rounds = [];
+  let alive = field.map((t) => t.id);
+  let guard = 0;
+  while (alive.length > 1 && guard++ < 5) {
+    const pairs = [];
+    for (let i = 0; i < Math.floor(alive.length / 2); i++) pairs.push([alive[i], alive[alive.length - 1 - i]]);
+    const survivors = [];
+    pairs.forEach(([hi, lo]) => {
+      let hw = 0, lw = 0, g = 0;
+      while (hw < 2 && lw < 2 && g++ < 5) {
+        const r = simFarmGame(G, g % 2 === 1 ? hi : lo, g % 2 === 1 ? lo : hi);
+        const hiWon = (g % 2 === 1) === (r.hg > r.ag);
+        if (hiWon) hw++; else lw++;
+      }
+      survivors.push(hw > lw ? hi : lo);
+    });
+    rounds.push(pairs.map(([hi, lo], i) => ({ hi, lo, winner: survivors[i] })));
+    alive = survivors;
+  }
+  const champ = alive[0];
+  G.farmCup = { year: G.year, champion: champ, rounds, field: field.map((t) => t.id) };
+  const t = G.teams[champ];
+  t.farmCups = (t.farmCups || 0) + 1;
+  // The players who won it get it on their record, the same as a Cup ring.
+  farmRoster(G, champ).forEach((p) => {
+    p.farmTitles = (p.farmTitles || []).concat([G.year]);
+  });
+  if (champ === G.userTeam) news(G, `Your affiliate won the farm championship.`, "good");
+  else news(G, `${t.city}'s affiliate won the farm championship.`, "info");
+  return G;
 }
 
 /* ----------------------------- deadline trading ---------------------------
@@ -2865,6 +3284,66 @@ function aiDeadlineMoves(G) {
   return G;
 }
 
+/* ------------------------------ development -------------------------------
+ * What a season actually taught a young player. NHL minutes are the best
+ * teacher the sport has — but only when he's genuinely playing them and holding
+ * his own. A nineteen-year-old stapled to the fourth line learns less than he
+ * would driving a farm team, and one thrown in over his head learns least of
+ * all. The farm is the safe middle: steady, unspectacular, always positive.
+ *
+ * This used to be a flat "+1.5 if he's on the farm", which made the answer the
+ * same for every prospect. Now it's a judgement call: a kid who can hold down
+ * real minutes is better off in the NHL, and a kid who can't is better off
+ * playing them somewhere else.
+ *
+ * A player who moves mid-season gets both, weighted by games in each league, so
+ * a December callup is worth exactly the share of the year it covered.
+ * ------------------------------------------------------------------------- */
+const DEV_FARM = 1.5;      // a full season of top farm minutes
+const DEV_NHL_HI = 3.4;    // thriving in a real NHL role
+const DEV_NHL_LO = 0;      // dressed, but buried — the year taught him nothing
+// Minutes that count as no role at all and as a full one, plus the production a
+// regular at the position is expected to post. These are MEASURED off the sim,
+// not invented: forwards run ~12.7 min a night at ~1.15 pts/60, defencemen
+// ~16.2 and ~0.90, and goalies ~.907. Re-measure before retuning them.
+const DEV_BANDS = {
+  F: { floor: 9, full: 19, mid: 1.15, spread: 0.80 },
+  D: { floor: 12, full: 22, mid: 0.90, spread: 0.50 },
+  G: { floor: 5, full: 40, mid: 0.907, spread: 0.020 },
+};
+const devBand = (p) => (p.pos === "G" ? DEV_BANDS.G : p.pos === "D" ? DEV_BANDS.D : DEV_BANDS.F);
+
+/* How an NHL season went, as two normalised numbers: was he playing (`role`,
+   0–1) and did he hold his own (`perf`, -1–1). Null if he never dressed. */
+function nhlDevRead(p, st) {
+  if (!st || !st.gp) return null;
+  const b = devBand(p);
+  const role = (v) => clamp((v - b.floor) / (b.full - b.floor), 0, 1);
+  if (p.pos === "G") {
+    const sv = st.sa ? st.sv / st.sa : 0;
+    return { role: role(st.gp), perf: clamp((sv - b.mid) / b.spread, -1, 1) };
+  }
+  const p60 = st.toi > 0 ? ((st.g + st.a) * 60) / st.toi : 0;
+  return { role: role(st.toi / st.gp), perf: clamp((p60 - b.mid) / b.spread, -1, 1) };
+}
+
+/* The environment term, before the age taper: what this season was worth to
+   him. Role GATES the whole thing — playing badly still teaches something, but
+   not playing at all teaches nothing, so ice time is the part you can't fake.
+   The two combine so that beating the farm takes roughly top-nine minutes AND
+   above-average production; a fourth-liner is better off in the minors even if
+   he's scoring there. */
+function devEnvironment(p, st, farm) {
+  const nGp = (st && st.gp) || 0;
+  const fGp = (farm && farm.gp) || 0;
+  if (!nGp && !fGp) return 0;                       // played nowhere, learned nothing
+  const r = nhlDevRead(p, st);
+  const nhl = r ? DEV_NHL_LO + (DEV_NHL_HI - DEV_NHL_LO) * r.role * (0.3 + 0.7 * ((r.perf + 1) / 2)) : 0;
+  return (nhl * nGp + DEV_FARM * fGp) / (nGp + fGp);
+}
+// Where he plays stops mattering once he's made. Ages are post-birthday.
+function devAgeWeight(age) { return age <= 21 ? 1 : age <= 23 ? 0.75 : age <= 25 ? 0.4 : 0; }
+
 /* ------------------------------ the rollover ------------------------------ */
 
 function progress(G, p) {
@@ -2874,10 +3353,11 @@ function progress(G, p) {
   if (p.age < peak) delta = gauss(G, 2.6 + (p.pot - p.ovr) * 0.09, 1.7);
   else if (p.age < peak + 4) delta = gauss(G, 0.2, 1.4);
   else delta = gauss(G, -(p.age - peak - 3) * 0.95, 1.5);
-  // A young player developing on the farm improves faster than one riding an
-  // NHL bench for eight minutes a night — and a coach who develops players is
-  // worth real progression on top of that.
-  if (p.farm && p.age <= 23) delta += 1.5;
+  // Where he played and how it went. `p.stats` is the season that just ended —
+  // `p.season` has already been blanked by this point in the rollover — and
+  // `p.farmSeason` is still intact until it's archived further down.
+  delta += devEnvironment(p, p.stats, p.farmSeason) * devAgeWeight(p.age);
+  // A coach who develops players is worth real progression on top of that.
   if (p.age <= 24 && p.teamId != null) {
     delta += (coachOf(G.teams[p.teamId]).dev - 55) * 0.035;
   }
@@ -2904,8 +3384,10 @@ function startNextSeason(G) {
   // Reset the league.
   G.teams.forEach((t) => {
     t.w = 0; t.l = 0; t.otl = 0; t.pts = 0; t.gf = 0; t.ga = 0; t.gp = 0; t.streak = 0; t.l10 = [];
+    t.farmRec = blankFarmRec();
     t.lines = null;
   });
+  G.farmCup = null;
   G.results = [];
   G.playoffs = null;
   G.awards = null;
@@ -3486,7 +3968,7 @@ function NetGrid({ net, mode, hole, view, extra, seed, shots, teams }) {
         <span className="tnum">{mode === "G" ? `${scored} allowed on ${faced}` : `${scored} goals on ${faced}`}</span>
       </div>
       {hole ? (
-        <div className="text-xs text-amber-400 px-1">Scouting report: beatable {hole.label}.</div>
+        <div className="text-xs text-amber-400 px-1">Weak spot: {hole.label} (outlined).</div>
       ) : null}
     </div>
   );
@@ -3619,6 +4101,51 @@ function TrophyCase({ G, p }) {
 
 /* ------------------------------- player page ------------------------------ */
 
+/* What a scout could actually tell you about the man in the other net: how he's
+   playing, how hard he's been worked, and — only once there's enough evidence to
+   say so — where the pucks have been going in. */
+function GoalieReport({ G, p }) {
+  const r = goalieReport(G, p);
+  const pct = (v) => `${(v * 100).toFixed(1)}`;
+  const cellNote = (c, verb, tone) => (
+    <span className={tone}>
+      {verb} <b>{c.cell.label}</b>
+      <span className="text-slate-500"> ({c.ga} on {c.sa}, {pct(c.rate)}%)</span>
+    </span>
+  );
+  return (
+    <div className="space-y-1.5">
+      <div className="text-sm">
+        <span className="text-slate-400">Likely starter </span>
+        {fullName(p)}
+        <span className="text-slate-500"> ({p.ovr} ovr, {r.fresh}% fresh)</span>
+      </div>
+      {r.starts ? (
+        <div className="text-xs text-slate-400 flex flex-wrap gap-x-3 gap-y-1">
+          <span>{r.starts} start{r.starts === 1 ? "" : "s"}</span>
+          <span className="tnum">{pct(r.sv)} SV%</span>
+          <span className="tnum">{r.gaa.toFixed(2)} GAA</span>
+          <span className="tnum">{r.sa} shots faced</span>
+        </div>
+      ) : (
+        <div className="text-xs text-slate-500">Hasn't played yet this season — nothing to go on.</div>
+      )}
+      {r.confidence < 0.4 && r.starts ? (
+        <div className="text-xs text-slate-500">
+          Too early to read him — {r.sa} shots isn't a pattern yet.
+        </div>
+      ) : r.soft || r.strong ? (
+        <div className="text-xs space-y-0.5">
+          {r.soft ? <div>{cellNote(r.soft, "Beaten most", "text-amber-300")}</div> : null}
+          {r.strong ? <div>{cellNote(r.strong, "Rarely beaten", "text-emerald-300")}</div> : null}
+        </div>
+      ) : r.starts ? (
+        <div className="text-xs text-slate-500">No clear weakness in the numbers — he's been even all over.</div>
+      ) : null}
+    </div>
+  );
+}
+
 function RatingBar({ label, v }) {
   return (
     <div className="flex items-center gap-2">
@@ -3628,6 +4155,67 @@ function RatingBar({ label, v }) {
       </div>
       <div className="w-7 text-right tnum text-xs text-slate-300">{v}</div>
     </div>
+  );
+}
+
+/* A young player's season is either developing him or wasting him, and until
+   this existed the only way to find out was to hit the rollover and compare
+   ratings — by which point the year is gone. This says it while there is still
+   time to send him down or give him the minutes. */
+function DevelopmentNote({ G, p }) {
+  const weight = devAgeWeight(p.age);
+  if (weight <= 0 || p.retired) return null;
+  const nGp = (p.season && p.season.gp) || 0;
+  const fGp = (p.farmSeason && p.farmSeason.gp) || 0;
+  // A prospect who hasn't dressed anywhere while his club plays on is the
+  // loudest case of all, so don't go quiet on him — only stay quiet before the
+  // season has actually started.
+  const clubGp = p.teamId != null && G.teams[p.teamId] ? G.teams[p.teamId].gp : 0;
+  if (!nGp && !fGp && !clubGp) return null;
+  const env = devEnvironment(p, p.season, p.farmSeason);
+  const read = nhlDevRead(p, p.season);
+  const band =
+    env >= DEV_FARM * 1.5 ? { t: "Thriving", bar: "bg-emerald-500", tone: "text-emerald-300" } :
+    env >= DEV_FARM ? { t: "Developing well", bar: "bg-sky-500", tone: "text-sky-300" } :
+    env >= DEV_FARM * 0.5 ? { t: "Getting by", bar: "bg-amber-500", tone: "text-amber-300" } :
+    { t: "Going to waste", bar: "bg-rose-500", tone: "text-rose-300" };
+  // Why it reads the way it does, in the terms the player actually controls.
+  const why = [];
+  if (nGp) {
+    const mins = p.season.toi / nGp;
+    why.push(p.pos === "G"
+      ? `${nGp} start${nGp === 1 ? "" : "s"} at ${(svPct(p.season) * 100).toFixed(1)} SV%`
+      : `${nGp} NHL game${nGp === 1 ? "" : "s"} at ${mins.toFixed(1)} min`);
+  }
+  if (fGp) why.push(`${fGp} on the farm`);
+  if (!nGp && !fGp) why.push(`no games · his club has played ${clubGp}`);
+  // Order matters: "in over his head" is only true of a player drowning in BIG
+  // minutes. A third-liner who isn't scoring is a different problem, and telling
+  // the user to cut his ice time would be the wrong call.
+  const advice = !nGp && !fGp
+      ? "He hasn't dressed all season — that's a year of his development gone. Play him or send him down."
+    : !nGp ? "Farm minutes are steady, if unspectacular."
+    : read.role < 0.35 ? "He isn't playing enough to learn anything — more ice time, or send him down."
+    : read.perf < -0.35 && read.role >= 0.7 ? "He's in over his head at these minutes."
+    : read.perf < -0.35 ? "He isn't holding his own in this role — he'd learn more on the farm."
+    : env >= DEV_FARM ? "These are the minutes that make a player."
+    : "A bigger role would be worth more to him than this.";
+  return (
+    <Section title="Development" className="p-3 space-y-2"
+      right={<span className={`text-xs ${band.tone}`}>{band.t}</span>}>
+      <div className="pt-1 space-y-2">
+        <div className="h-2 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
+          <div className={`h-full ${band.bar}`} style={{ width: `${clamp((env / DEV_NHL_HI) * 100, 2, 100)}%` }} />
+        </div>
+        <div className="text-xs text-slate-400">{why.join(" · ")}</div>
+        <div className="text-xs text-slate-300">{advice}</div>
+        {weight < 1 ? (
+          <div className="text-[11px] text-slate-500">
+            At {p.age} this matters less than it used to — development is mostly settled by 26.
+          </div>
+        ) : null}
+      </div>
+    </Section>
   );
 }
 
@@ -3664,6 +4252,12 @@ function PlayerModal({ G, pid, onClose, onGo }) {
               {keys.map((k) => p.r[k] != null ? <RatingBar key={k} label={k} v={p.r[k]} /> : null)}
             </div>
           </Section>
+          <DevelopmentNote G={G} p={p} />
+          {p.pos === "G" ? (
+            <Section title="Scouting report" className="p-3">
+              <div className="pt-1"><GoalieReport G={G} p={p} /></div>
+            </Section>
+          ) : null}
           <TrophyCase G={G} p={p} />
         </div>
 
@@ -3790,11 +4384,54 @@ function PlayerModal({ G, pid, onClose, onGo }) {
             </Section>
           ) : null}
           {p.farmSeason ? (
-            <Section title="On the farm" className="p-3">
+            <Section title="On the farm"
+              right={(p.farmTitles || []).length
+                ? <span className="text-xs text-amber-300">{p.farmTitles.length}× farm champion</span> : null}
+              className="p-3">
               <div className="text-sm pt-1 text-slate-300">
-                {p.farmSeason.gp} games · {p.farmSeason.g}G {p.farmSeason.a}A
+                {p.pos === "G" ? (
+                  <span>
+                    {p.farmSeason.gp} games · {p.farmSeason.w || 0}-{p.farmSeason.l || 0}
+                    {p.farmSeason.sa ? ` · ${((p.farmSeason.sv / p.farmSeason.sa) * 100).toFixed(1)} SV%` : ""}
+                    {p.farmSeason.so ? ` · ${p.farmSeason.so} SO` : ""}
+                  </span>
+                ) : (
+                  <span>
+                    {p.farmSeason.gp} games · {p.farmSeason.g}G {p.farmSeason.a}A
+                    <b className="ml-1">{p.farmSeason.g + p.farmSeason.a}P</b>
+                    {p.farmSeason.gp ? <span className="text-slate-500"> · {((p.farmSeason.g + p.farmSeason.a) / p.farmSeason.gp).toFixed(2)}/gm</span> : null}
+                  </span>
+                )}
                 {prospectReady(G, p) ? <span className="ml-2 text-emerald-400">ready for a call-up</span> : null}
               </div>
+              {p.teamId != null ? (
+                <div className="text-xs text-slate-500 mt-1">
+                  {G.teams[p.teamId].city} affiliate: {farmRec(G.teams[p.teamId]).w}-{farmRec(G.teams[p.teamId]).l}-{farmRec(G.teams[p.teamId]).otl}
+                  {" · "}{ordinal(farmStandings(G).findIndex((t) => t.id === p.teamId) + 1)} of {G.teams.length}
+                </div>
+              ) : null}
+            </Section>
+          ) : null}
+          {(p.farmCareer || []).length ? (
+            <Section title="Farm record">
+              <SortTable min={320} initial="year" asc rowKey={(c) => c.year}
+                rows={p.farmCareer}
+                cols={p.pos === "G" ? [
+                  { key: "year", label: "Year", get: (c) => c.year },
+                  { key: "gp", label: "GP", get: (c) => c.gp || 0 },
+                  { key: "w", label: "W", get: (c) => c.w || 0 },
+                  { key: "l", label: "L", get: (c) => c.l || 0 },
+                  { key: "sv", label: "SV%", get: (c) => (c.sa ? c.sv / c.sa : 0),
+                    cell: (c) => (c.sa ? ((c.sv / c.sa) * 100).toFixed(1) : "—") },
+                  { key: "so", label: "SO", get: (c) => c.so || 0 },
+                ] : [
+                  { key: "year", label: "Year", get: (c) => c.year },
+                  { key: "gp", label: "GP", get: (c) => c.gp || 0 },
+                  { key: "g", label: "G", get: (c) => c.g || 0 },
+                  { key: "a", label: "A", get: (c) => c.a || 0 },
+                  { key: "p", label: "P", get: (c) => (c.g || 0) + (c.a || 0), cell: (c) => <b>{(c.g || 0) + (c.a || 0)}</b> },
+                  { key: "pim", label: "PIM", get: (c) => c.pim || 0 },
+                ]} />
             </Section>
           ) : null}
           {career.length ? (
@@ -3863,14 +4500,135 @@ function SlotCard({ slot, meta, onLoad, onDelete }) {
   );
 }
 
+/* Picking a club used to be the one decision in the game made with no
+   information at all — a dropdown of thirty-two names. This shows the actual
+   league you're about to manage.
+ *
+ * It is a REAL league, not a mock-up: `newGame` never reads `userTeam` or
+ * `difficulty` while generating the world, only the seed, so a preview built on
+ * seed S is exactly the league you get when you start a career on seed S. The
+ * seed is threaded through to `onStart` to keep that promise — change that and
+ * the preview becomes a lie. */
+// 1st/2nd/3rd/4th … and the teens, which are the case a naive version gets
+// wrong: 11th, 12th, 13th, and then 21st again.
+function ordinal(n) {
+  const rem100 = n % 100, rem10 = n % 10;
+  const suffix = rem100 >= 11 && rem100 <= 13 ? "th"
+    : rem10 === 1 ? "st" : rem10 === 2 ? "nd" : rem10 === 3 ? "rd" : "th";
+  return `${n}${suffix}`;
+}
+
+function clubSummary(G, teamId) {
+  const nhl = rosterOf(G, teamId);
+  const org = rosterOf(G, teamId, true);
+  const sorted = nhl.slice().sort((a, b) => b.ovr - a.ovr);
+  const young = org.filter((p) => p.age <= 23);
+  const rating = teamStrength(G, teamId);
+  return {
+    t: G.teams[teamId], id: teamId, rating,
+    best: sorted[0],
+    goalie: nhl.filter((p) => p.pos === "G").sort((a, b) => b.ovr - a.ovr)[0],
+    age: nhl.length ? nhl.reduce((s, p) => s + p.age, 0) / nhl.length : 0,
+    space: capSpace(G, teamId),
+    // The gap between what a club is now and what's coming is what separates a
+    // rebuild worth taking from a contender about to fall off a cliff.
+    prospects: young.length,
+    future: young.length ? Math.round(young.reduce((s, p) => s + p.pot, 0) / young.length) : 0,
+    coach: coachOf(G.teams[teamId]),
+    // Quartiles MEASURED off generated worlds (256 clubs over 8 seeds): the
+    // spread runs 47–80 with a median of 65 and quartiles at 60/65/69. Guessed
+    // thresholds had every club in the league reading "Contender".
+    outlook: rating >= 69 ? { t: "Contender", c: "text-emerald-300" }
+      : rating >= 65 ? { t: "Playoff side", c: "text-sky-300" }
+      : rating >= 60 ? { t: "Bubble", c: "text-slate-300" }
+      : { t: "Rebuild", c: "text-amber-300" },
+  };
+}
+
+function ClubRosterPreview({ G, teamId, openPlayer }) {
+  const org = rosterOf(G, teamId, true).slice().sort((a, b) => (a.farm ? 1 : 0) - (b.farm ? 1 : 0) || b.ovr - a.ovr);
+  return (
+    <SortTable min={560} rowKey={(p) => p.id} onRow={openPlayer ? (p) => openPlayer(p.id) : undefined}
+      cols={[
+        { key: "n", label: "Player", get: (p) => fullName(p),
+          cell: (p) => <span className="whitespace-nowrap">{fullName(p)}{p.farm ? <span className="text-[10px] text-slate-500 ml-1">farm</span> : null}</span> },
+        { key: "pos", label: "Pos", get: (p) => p.pos, cell: (p) => <PosBadge pos={p.pos} /> },
+        { key: "age", label: "Age", get: (p) => p.age, asc: true },
+        { key: "ovr", label: "Ovr", get: (p) => p.ovr, cell: (p) => <b>{p.ovr}</b> },
+        { key: "pot", label: "Pot", get: (p) => p.pot, cls: "text-slate-400" },
+        { key: "cap", label: "Cap", get: (p) => p.contract.amt, cell: (p) => `$${p.contract.amt}M` },
+        { key: "yrs", label: "Yrs", get: (p) => p.contract.yrs },
+      ]}
+      rows={org} initial="ovr" />
+  );
+}
+
+function ClubPicker({ G, value, onPick, openPlayer }) {
+  const rows = useMemo(() => {
+    const rs = G.teams.map((t) => clubSummary(G, t.id));
+    // Rank reads better than a bare number — "4th of 32" says more than "70".
+    rs.slice().sort((a, b) => b.rating - a.rating).forEach((r, i) => { r.rank = i + 1; });
+    return rs;
+  }, [G]);
+  const sel = rows.find((r) => r.id === value) || rows[0];
+  return (
+    <div className="space-y-3">
+      <Section className="overflow-hidden">
+        <SortTable min={760} rowKey={(r) => r.id} onRow={(r) => onPick(r.id)}
+          rowCls={(r) => (r.id === value ? "bg-sky-950/50" : "")}
+          cols={[
+            { key: "club", label: "Club", get: (r) => `${r.t.city} ${r.t.name}`,
+              cell: (r) => <span className="whitespace-nowrap">{r.id === value ? "› " : ""}{r.t.city} {r.t.name}</span> },
+            { key: "div", label: "Division", get: (r) => `${CONFS[r.t.conf]} / ${DIVS[r.t.div]}`,
+              cls: "text-slate-400 text-xs" },
+            { key: "rating", label: "Rating", get: (r) => r.rating, cell: (r) => <b>{r.rating}</b> },
+            { key: "outlook", label: "Outlook", get: (r) => r.rating,
+              cell: (r) => <span className={`text-xs ${r.outlook.c}`}>{r.outlook.t}</span> },
+            { key: "best", label: "Best player", get: (r) => (r.best ? r.best.ovr : 0),
+              cell: (r) => r.best ? <span className="whitespace-nowrap text-xs">{fullName(r.best)} <span className="text-slate-400">{r.best.pos} {r.best.ovr}</span></span> : "—" },
+            { key: "age", label: "Age", get: (r) => r.age, asc: true, cell: (r) => r.age.toFixed(1) },
+            { key: "future", label: "Prospects", get: (r) => r.future,
+              cell: (r) => <span className="text-xs">{r.prospects} <span className="text-slate-400">· {r.future} pot</span></span> },
+            { key: "space", label: "Cap space", get: (r) => r.space, cell: (r) => `$${r.space}M` },
+            { key: "mkt", label: "Market", get: (r) => r.t.mkt, cell: (r) => "$".repeat(Math.max(1, r.t.mkt)) },
+          ]}
+          rows={rows} initial="rating" />
+      </Section>
+
+      {sel ? (
+        <Section title={`${sel.t.city} ${sel.t.name}`}
+          right={<span className={`text-xs ${sel.outlook.c}`}>{sel.outlook.t} · rating {sel.rating} · {ordinal(sel.rank)} of {rows.length}</span>}
+          className="p-3 space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+            <Stat label="Cap space" value={`$${sel.space}M`} sub={`budget $${sel.t.budget}M`} />
+            <Stat label="Avg age" value={sel.age.toFixed(1)} sub={`${sel.prospects} under 24`} />
+            <Stat label="In goal" value={sel.goalie ? sel.goalie.ovr : "—"} sub={sel.goalie ? fullName(sel.goalie) : ""} />
+            <Stat label="Coach" value={sel.coach.dev} sub={`${SYSTEMS[sel.coach.system].label} · develops`} />
+          </div>
+          <div className="text-xs text-slate-400">
+            Rivals: {sel.t.rivalId != null ? `${G.teams[sel.t.rivalId].city} ${G.teams[sel.t.rivalId].name}` : "none"}
+          </div>
+          <ClubRosterPreview G={G} teamId={sel.id} openPlayer={openPlayer} />
+        </Section>
+      ) : null}
+    </div>
+  );
+}
+
 function Splash({ onStart }) {
   const [team, setTeam] = useState(0);
   const [difficulty, setDifficulty] = useState("normal");
   const [seasonLen, setSeasonLen] = useState(82);
   const [tick, setTick] = useState(0);
+  // The league you're browsing IS the league you'll get — same seed in, same
+  // world out. Rerolling picks a new one. Math.random is fine here: this is
+  // choosing a seed, not engine randomness.
+  const [seed, setSeed] = useState(() => Math.floor(Math.random() * 1e9));
   const slots = [0, 1, 2].map((s) => ({ slot: s, meta: slotMeta(s) }));
+  // Generating 32 rosters is cheap, but not cheap enough to redo every render.
+  const preview = useMemo(() => newGame(0, { seed, rules: { seasonLen } }), [seed, seasonLen]);
   return (
-    <div className="max-w-3xl mx-auto p-4 sm:p-6 space-y-5">
+    <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-5">
       <div>
         <h1 className="text-2xl sm:text-3xl font-bold">Pocket GM <span className="text-sky-400">Hockey</span></h1>
         <p className="text-slate-400 text-sm mt-1">32 clubs, a hard cap, four lines and a Cup.</p>
@@ -3888,14 +4646,6 @@ function Splash({ onStart }) {
 
       <Section title="New career" className="p-4">
         <div className="space-y-4 pt-1">
-          <div>
-            <div className="text-xs text-slate-400 mb-1">Club</div>
-            <select className={`${inputCls} w-full`} value={team} onChange={(e) => setTeam(+e.target.value)}>
-              {TEAMS.map((t, i) => (
-                <option key={i} value={i}>{t.city} {t.name} — {CONFS[t.conf]} / {DIVS[t.div]}</option>
-              ))}
-            </select>
-          </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
               <div className="text-xs text-slate-400 mb-1">Difficulty</div>
@@ -3912,8 +4662,18 @@ function Splash({ onStart }) {
               </select>
             </div>
           </div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs text-slate-400">
+              Pick a club below. This is the real league — the one you're looking at is the one you'll manage.
+            </div>
+            <button className={`${btnGhost} text-xs px-2 py-1 whitespace-nowrap`}
+              onClick={() => setSeed(Math.floor(Math.random() * 1e9))}>Reroll league</button>
+          </div>
+          <ClubPicker G={preview} value={team} onPick={setTeam} />
           <button className={`${btnPri} w-full py-2`}
-            onClick={() => onStart({ team, difficulty, rules: { seasonLen } })}>Start career</button>
+            onClick={() => onStart({ team, difficulty, rules: { seasonLen }, seed })}>
+            Take over the {TEAMS[team].city} {TEAMS[team].name}
+          </button>
         </div>
       </Section>
     </div>
@@ -3981,16 +4741,7 @@ function HomeTab({ G, setG, go, openPlayer }) {
                   {scout.rest === 0 ? "on a back-to-back" : `${scout.rest} days rest`}
                 </span>
               </div>
-              {scout.starter ? (
-                <div className="text-sm">
-                  <span className="text-slate-400">Likely starter </span>
-                  {fullName(scout.starter)}
-                  <span className="text-slate-500"> ({scout.starter.ovr} ovr, {Math.round(100 - scout.starter.fatigue)}% fresh)</span>
-                  {scout.hole ? (
-                    <span className="text-amber-300"> — beatable {scout.hole.label}.</span>
-                  ) : null}
-                </div>
-              ) : null}
+              {scout.starter ? <GoalieReport G={G} p={scout.starter} /> : null}
             </div>
           </Section>
         );
@@ -4076,6 +4827,118 @@ function HotCold({ G, p }) {
   return null;
 }
 
+/* The affiliate as a club you follow rather than a spreadsheet that ticks over:
+   where it sits, who's carrying it, and what it's playing for. */
+function FarmLeaguePanel({ G, openPlayer }) {
+  const [view, setView] = useState("squad");
+  const mine = G.teams[G.userTeam];
+  const rec = farmRec(mine);
+  const table = farmStandings(G);
+  const rank = table.findIndex((t) => t.id === G.userTeam) + 1;
+  const squad = rosterOf(G, G.userTeam, true).filter((p) => p.farm);
+  const pts = (p) => (p.farmSeason ? (p.farmSeason.g || 0) + (p.farmSeason.a || 0) : 0);
+  // League-wide, so you can see whether your prospect is actually any good or
+  // just the best of a bad affiliate.
+  const leaders = playersOf(G)
+    .filter((p) => p.farm && p.farmSeason && p.farmSeason.gp > 0 && p.pos !== "G")
+    .sort((a, b) => pts(b) - pts(a) || b.farmSeason.g - a.farmSeason.g).slice(0, 10);
+  const cup = G.farmCup;
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Affiliate" value={`${rec.w}-${rec.l}-${rec.otl}`} sub={`${rec.pts} pts`} />
+        <Stat label="In the table" value={rank ? ordinal(rank) : "—"} sub={`of ${G.teams.length}`} />
+        <Stat label="Goals" value={`${rec.gf}–${rec.ga}`} sub={rec.gp ? `${(rec.gf / rec.gp).toFixed(2)} per game` : "no games yet"} />
+        <Stat label="Farm titles" value={mine.farmCups || 0}
+          sub={cup && cup.champion === G.userTeam ? "champions this year" : "all time"} />
+      </div>
+
+      {cup ? (
+        <Section title={`${cup.year} farm championship`}
+          right={<span className={`text-xs ${cup.champion === G.userTeam ? "text-emerald-300" : "text-slate-400"}`}>
+            {G.teams[cup.champion].city} {G.teams[cup.champion].name}
+          </span>} className="p-3">
+          <div className="pt-1 space-y-1">
+            {cup.rounds.map((rd, i) => (
+              <div key={i} className="text-xs text-slate-400">
+                <span className="text-slate-500">{["Quarter-finals", "Semi-finals", "Final"][i] || `Round ${i + 1}`}: </span>
+                {rd.map((s) => `${G.teams[s.winner].abbr} over ${G.teams[s.winner === s.hi ? s.lo : s.hi].abbr}`).join(" · ")}
+              </div>
+            ))}
+          </div>
+        </Section>
+      ) : null}
+
+      <div className="flex gap-2 flex-wrap">
+        {[["squad", "Your prospects"], ["table", "Farm table"], ["leaders", "Scoring leaders"]].map(([k, label]) => (
+          <button key={k} className={view === k ? btnPri : btnGhost} onClick={() => setView(k)}>{label}</button>
+        ))}
+      </div>
+
+      {view === "squad" ? (
+        <Section title="Prospect development" className="p-3">
+          <div className="space-y-1 pt-1">
+            {squad.length ? squad.slice().sort((a, b) => b.pot - a.pot).map((p) => (
+              <div key={p.id} className="flex items-center gap-2 text-sm cursor-pointer hover:text-sky-300"
+                onClick={() => openPlayer(p.id)}>
+                <PosBadge pos={p.pos} />
+                <span className="flex-1 truncate">{shortName(p)} <span className="text-slate-500">({p.age})</span></span>
+                <span className="tnum text-slate-400">{p.ovr} → {p.pot}</span>
+                <span className="tnum text-slate-500 w-28 text-right">
+                  {!p.farmSeason ? "—" : p.pos === "G"
+                    ? `${p.farmSeason.w || 0}-${p.farmSeason.l || 0}${p.farmSeason.sa ? ` ${((p.farmSeason.sv / p.farmSeason.sa) * 100).toFixed(1)}` : ""}`
+                    : `${p.farmSeason.gp}gp ${p.farmSeason.g}G ${p.farmSeason.a}A`}
+                </span>
+                {prospectReady(G, p) ? <span className="text-emerald-400 text-xs">ready</span> : null}
+              </div>
+            )) : <div className="text-sm text-slate-500">Nobody on the farm.</div>}
+          </div>
+        </Section>
+      ) : view === "table" ? (
+        <Section>
+          {/* keyed per view: React reuses one SortTable across these branches,
+              and its remembered sort column carried over to a table that has no
+              such column — which silently fell back to sorting by name. */}
+          <SortTable key="farm-table" min={620} rowKey={(t) => t.id} rows={table} initial="pts"
+            rowCls={(t) => (t.id === G.userTeam ? "bg-sky-950/50" : "")}
+            cols={[
+              { key: "club", label: "Affiliate", get: (t) => `${t.city} ${t.name}`,
+                cell: (t) => <span className="whitespace-nowrap">{t.city} {t.name}</span> },
+              { key: "gp", label: "GP", get: (t) => farmRec(t).gp },
+              { key: "w", label: "W", get: (t) => farmRec(t).w },
+              { key: "l", label: "L", get: (t) => farmRec(t).l },
+              { key: "otl", label: "OTL", get: (t) => farmRec(t).otl },
+              { key: "pts", label: "Pts", get: (t) => farmRec(t).pts, cell: (t) => <b>{farmRec(t).pts}</b> },
+              { key: "gf", label: "GF", get: (t) => farmRec(t).gf },
+              { key: "ga", label: "GA", get: (t) => farmRec(t).ga },
+              { key: "diff", label: "Diff", get: (t) => farmRec(t).gf - farmRec(t).ga,
+                cell: (t) => { const d = farmRec(t).gf - farmRec(t).ga; return <span className={d > 0 ? "text-emerald-400" : d < 0 ? "text-rose-400" : ""}>{d > 0 ? "+" : ""}{d}</span>; } },
+            ]} empty="The farm season hasn't started." />
+        </Section>
+      ) : (
+        <Section>
+          <SortTable key="farm-leaders" min={560} rowKey={(p) => p.id} rows={leaders} initial="p"
+            onRow={(p) => openPlayer(p.id)}
+            rowCls={(p) => (p.teamId === G.userTeam ? "bg-sky-950/50" : "")}
+            cols={[
+              { key: "n", label: "Player", get: (p) => fullName(p),
+                cell: (p) => <span className="whitespace-nowrap">{fullName(p)}</span> },
+              { key: "tm", label: "Affiliate", get: (p) => (p.teamId != null ? G.teams[p.teamId].abbr : ""),
+                cls: "text-slate-400" },
+              { key: "pos", label: "Pos", get: (p) => p.pos, cell: (p) => <PosBadge pos={p.pos} /> },
+              { key: "age", label: "Age", get: (p) => p.age, asc: true },
+              { key: "gp", label: "GP", get: (p) => p.farmSeason.gp },
+              { key: "g", label: "G", get: (p) => p.farmSeason.g },
+              { key: "a", label: "A", get: (p) => p.farmSeason.a },
+              { key: "p", label: "P", get: (p) => pts(p), cell: (p) => <b>{pts(p)}</b> },
+            ]} empty="No scoring yet." />
+        </Section>
+      )}
+    </div>
+  );
+}
+
 function RosterTab({ G, setG, openPlayer, notify }) {
   const [showFarm, setShowFarm] = useState(false);
   const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); const r = fn(g2); setG(g2); return r; };
@@ -4089,11 +4952,29 @@ function RosterTab({ G, setG, openPlayer, notify }) {
       notify(r.ok ? `${fullName(p)} recalled.` : r.why);
     } else {
       const r = upd((g) => sendDown(g, p.id));
-      notify(!r.ok ? r.why : r.waivers
-        ? `${fullName(p)} has been placed on waivers.`
-        : `${fullName(p)} sent to the farm.`);
+      notify(!r.ok ? r.why : `${fullName(p)} sent to the farm.`);
     }
   };
+
+  const cut = (p) => {
+    const cost = releaseCost(G, p.id);
+    if (!window.confirm(
+      `Release ${fullName(p)}?\n\nHe goes on waivers first — another club can claim him and take the contract. `
+      + `If he clears, he's a free agent and you carry $${cost}M in dead cap for ${Math.max(1, p.contract.yrs)} more year`
+      + `${Math.max(1, p.contract.yrs) === 1 ? "" : "s"}.`)) return;
+    const r = upd((g) => releasePlayer(g, p.id));
+    notify(r.ok ? `${fullName(p)} placed on waivers for release.` : r.why);
+  };
+
+  // Re-signing your own. The ask is the loyalty-discounted number, so this is
+  // simply "meet it" — haggling lives in the negotiation screen for free agents.
+  const resign = (p, yrs) => {
+    const ask = extensionAsk(G, p.id, G.userTeam, yrs);
+    const r = upd((g) => extendPlayer(g, p.id, ask, yrs));
+    notify(r.ok ? `${fullName(p)} re-signed — $${ask}M × ${yrs}.` : (r.why || "he said no"));
+  };
+  const expiring = rosterOf(G, G.userTeam, true).filter((p) => canExtend(G, p))
+    .sort((a, b) => b.ovr - a.ovr);
 
   const cols = [
     { key: "name", label: "Player", get: (p) => p.ln, min: 1,
@@ -4128,6 +5009,12 @@ function RosterTab({ G, setG, openPlayer, notify }) {
         {p.farm ? "Recall" : "Send down"}
       </button>
     ) },
+    { key: "cut", label: "", get: () => 0, cell: (p) => (
+      <button className={`${btnGhost} text-xs px-2 py-1 text-rose-300 hover:text-rose-200`}
+        onClick={(e) => { e.stopPropagation(); cut(p); }}>
+        Release
+      </button>
+    ) },
   ];
 
   return (
@@ -4146,10 +5033,37 @@ function RosterTab({ G, setG, openPlayer, notify }) {
             ? ` · ${rosterOf(G, G.userTeam, true).filter((p) => p.farm && prospectReady(G, p)).length} ready` : ""}
         </button>
       </div>
+      {expiring.length ? (
+        <Section title="Expiring contracts"
+          right={<span className="text-xs text-slate-400">{expiring.length} in their last year</span>}
+          className="p-3">
+          <div className="space-y-1.5 pt-1">
+            <div className="text-xs text-slate-500">
+              Re-sign them now and they stay. Let them run out and they hit the market with everyone else.
+            </div>
+            {expiring.map((p) => (
+              <div key={p.id} className="flex items-center gap-2 text-sm flex-wrap">
+                <PosBadge pos={p.pos} />
+                <span className="cursor-pointer hover:text-sky-300" onClick={() => openPlayer(p.id)}>
+                  {shortName(p)} <span className="text-slate-500">({p.age}, {p.ovr})</span>
+                </span>
+                {p.farm ? <span className="text-[10px] text-slate-500">farm</span> : null}
+                <span className="flex-1" />
+                {[2, 4, 6].map((y) => (
+                  <button key={y} className={`${btnGhost} text-xs px-2 py-1 whitespace-nowrap`}
+                    onClick={() => resign(p, y)}>
+                    {y}y · ${extensionAsk(G, p.id, G.userTeam, y)}M
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        </Section>
+      ) : null}
       {dead.length ? (
         <div className={`${card} p-3 text-sm`}>
-          <span className="text-slate-400">Retained salary: </span>
-          {dead.map((r) => `${G.players[r.pid] ? shortName(G.players[r.pid]) : "?"} $${r.amt}M (${r.yrs}y)`).join(" · ")}
+          <span className="text-slate-400">Money owed to players elsewhere: </span>
+          {dead.map((r) => `${G.players[r.pid] ? shortName(G.players[r.pid]) : "?"} $${r.amt}M (${r.yrs}y${r.dead ? ", released" : " retained"})`).join(" · ")}
         </div>
       ) : null}
       <Section>
@@ -4158,24 +5072,7 @@ function RosterTab({ G, setG, openPlayer, notify }) {
           rowCls={(p) => (prospectReady(G, p) && p.farm ? "bg-emerald-950/30" : "")}
           empty={showFarm ? "Nobody on the farm." : "No players."} />
       </Section>
-      {showFarm ? (
-        <Section title="Prospect development" className="p-3">
-          <div className="space-y-1 pt-1">
-            {rosterOf(G, G.userTeam, true).filter((p) => p.farm).sort((a, b) => b.pot - a.pot).map((p) => (
-              <div key={p.id} className="flex items-center gap-2 text-sm cursor-pointer hover:text-sky-300"
-                onClick={() => openPlayer(p.id)}>
-                <PosBadge pos={p.pos} />
-                <span className="flex-1">{shortName(p)} <span className="text-slate-500">({p.age})</span></span>
-                <span className="tnum text-slate-400">{p.ovr} → {p.pot}</span>
-                <span className="tnum text-slate-500 w-24 text-right">
-                  {p.farmSeason ? `${p.farmSeason.g}G ${p.farmSeason.a}A` : "—"}
-                </span>
-                {prospectReady(G, p) ? <span className="text-emerald-400 text-xs">ready</span> : null}
-              </div>
-            ))}
-          </div>
-        </Section>
-      ) : null}
+      {showFarm ? <FarmLeaguePanel G={G} openPlayer={openPlayer} /> : null}
     </div>
   );
 }
@@ -5826,7 +6723,9 @@ function App() {
       Promise.resolve(loadGame(opts.load)).then((g) => { if (g) { setSlot(opts.load); setG(g); } });
       return;
     }
-    const g = newGame(opts.team, { difficulty: opts.difficulty, rules: opts.rules });
+    // The seed comes from the club picker, so the league he previewed is the
+    // league he gets. Without it the preview would be a different world.
+    const g = newGame(opts.team, { difficulty: opts.difficulty, rules: opts.rules, seed: opts.seed });
     const free = [0, 1, 2].find((s) => !slotMeta(s));
     setSlot(free != null ? free : 0);
     setG(g);

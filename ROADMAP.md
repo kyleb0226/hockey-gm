@@ -50,8 +50,6 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   offseason screen.
 - **L** — An international tournament in the break, using the All-Star selection logic to build
   national squads from `FIRST`/`LAST` name origin.
-- **M** — Farm standings. Farm players produce a stat line but play in a vacuum — give the farm a
-  table and a champion so prospects have something to win.
 - **S** — Player comparison. Two players side by side with their ratings bars and shot rinks
   overlaid; the `ShotRink` component already takes any zone object.
 - **S** — Scout the opposing goalie. `goalieHole` gives every goalie a permanent weak spot and the
