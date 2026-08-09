@@ -3591,6 +3591,48 @@ function runFarmPlayoffs(G) {
  * the race move expiring veterans to contenders for picks.
  * ------------------------------------------------------------------------- */
 
+/* Where the league stands as the deadline comes. Buyers, sellers, and the
+   players actually available — which the engine already decides internally in
+   `aiDeadlineMoves` and never showed anyone, so the deadline arrived as a line
+   in the news feed rather than as a window you could work. */
+const RENTAL_MIN_OVR = 62;
+function deadlineBoard(G) {
+  const table = standings(G);
+  const cut = Math.floor(G.teams.length / 2);
+  const buyers = new Set(table.slice(0, cut).map((t) => t.id));
+  const isRental = (p) => p.contract.yrs <= 1 && p.age >= 27 && p.ovr >= RENTAL_MIN_OVR;
+  /* What a contender would give up. The AI pays a first for a genuine top-line
+     rental and a second for the rest, which is exactly the trade it makes in
+     `aiDeadlineMoves` — so the price shown here is the price you'd actually
+     face rather than a decorative estimate. */
+  const priceOf = (p) => (p.ovr >= 72 ? 1 : 2);
+  const rentals = [];
+  G.teams.forEach((t) => {
+    if (buyers.has(t.id)) return;
+    rosterOf(G, t.id)
+      .filter((p) => isRental(p) && p.teamId !== G.userTeam)
+      .sort((a, b) => b.ovr - a.ovr)
+      .slice(0, 2)
+      .forEach((p) => rentals.push({ p, from: t.id, round: priceOf(p), blocked: hasNtc(p) }));
+  });
+  rentals.sort((a, b) => b.p.ovr - a.p.ovr);
+  const mine = G.teams[G.userTeam];
+  const myRank = table.findIndex((t) => t.id === G.userTeam) + 1;
+  return {
+    buyers: table.filter((t) => buyers.has(t.id)).map((t) => t.id),
+    sellers: table.filter((t) => !buyers.has(t.id)).map((t) => t.id),
+    rentals,
+    // Which side of it you are on, which is the only question that matters.
+    youBuy: buyers.has(G.userTeam),
+    myRank,
+    myRentals: rosterOf(G, G.userTeam).filter(isRental)
+      .sort((a, b) => b.ovr - a.ovr)
+      .map((p) => ({ p, round: priceOf(p), blocked: hasNtc(p) })),
+    days: daysToDeadline(G),
+    open: tradesOpen(G),
+  };
+}
+
 function aiDeadlineMoves(G) {
   const table = standings(G);
   const cut = Math.floor(G.teams.length / 2);
@@ -7078,6 +7120,100 @@ function RulesModal({ G, setG, onClose }) {
 
 /* ----------------------------- command palette ---------------------------- */
 
+/* The deadline as a window you can work, rather than a line in the news feed
+   after it has already happened. Everything here is what the engine actually
+   decides — buyers and sellers come from the same split `aiDeadlineMoves` uses,
+   and the asking price is the pick it genuinely pays. */
+function DeadlineTab({ G, go, openPlayer, openTeam }) {
+  if (G.phase !== "regular") {
+    return (
+      <div className={`${card} p-4 text-sm text-slate-400`}>
+        The deadline only means anything during the season.
+      </div>
+    );
+  }
+  const b = deadlineBoard(G);
+  const nm = (id) => `${G.teams[id].city} ${G.teams[id].name}`;
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Deadline" value={b.days > 0 ? `${b.days}d` : "passed"}
+          sub={b.open ? "trades open" : "trades shut"}
+          tone={b.days > 0 && b.days <= 10 ? "text-amber-300" : b.open ? "" : "text-rose-400"} />
+        <Stat label="You are" value={b.youBuy ? "Buying" : "Selling"}
+          sub={`${ordinal(b.myRank)} in the league`}
+          tone={b.youBuy ? "text-emerald-300" : "text-amber-300"} />
+        <Stat label="On the market" value={b.rentals.length} sub="rentals available" />
+        <Stat label="Your rentals" value={b.myRentals.length} sub="expiring, 27+" />
+      </div>
+
+      <div className={`${card} p-3 text-sm text-slate-300`}>
+        {b.youBuy
+          ? "You're in the race. A rental costs a pick and walks in July — you're buying months, not years."
+          : "You're out of it. The men below are worth more to a contender in March than they are to you in October."}
+      </div>
+
+      <Section title={b.youBuy ? "Available — what a contender pays" : "Available around the league"}
+        right={<span className="text-xs text-slate-400">asking price is the pick the AI actually pays</span>}>
+        <SortTable key="deadline-rentals" min={720} rowKey={(r) => r.p.id} rows={b.rentals}
+          initial="ovr" onRow={(r) => openPlayer(r.p.id)}
+          empty="Nobody worth renting is available."
+          cols={[
+            { key: "n", label: "Player", get: (r) => fullName(r.p),
+              cell: (r) => <span className="whitespace-nowrap">{fullName(r.p)}{r.blocked
+                ? <span className="ml-1 text-[10px] px-1 rounded bg-amber-900 text-amber-200">NTC</span> : null}</span> },
+            { key: "from", label: "From", get: (r) => G.teams[r.from].abbr,
+              cell: (r) => <button className="text-xs text-slate-400 hover:text-sky-300"
+                onClick={(e) => { e.stopPropagation(); openTeam(r.from); }}>{G.teams[r.from].abbr}</button> },
+            { key: "pos", label: "Pos", get: (r) => r.p.pos, cell: (r) => <PosBadge pos={r.p.pos} /> },
+            { key: "age", label: "Age", get: (r) => r.p.age, asc: true },
+            { key: "ovr", label: "Ovr", get: (r) => r.p.ovr, cell: (r) => <b>{r.p.ovr}</b> },
+            { key: "pts", label: "Pts", get: (r) => pts(r.p.season) },
+            { key: "cap", label: "Cap", get: (r) => r.p.contract.amt, cell: (r) => `$${r.p.contract.amt}M` },
+            { key: "ask", label: "Asking", get: (r) => -r.round,
+              cell: (r) => <span className={r.round === 1 ? "text-rose-300" : "text-slate-300"}>
+                {r.blocked ? "won't waive" : `${ordinal(r.round)}-round pick`}</span> },
+          ]} />
+      </Section>
+
+      {b.myRentals.length ? (
+        <Section title="Yours, expiring"
+          right={<span className="text-xs text-slate-400">what you could get for them</span>} className="p-3">
+          <div className="space-y-1 pt-1 text-sm">
+            {b.myRentals.map((r) => (
+              <div key={r.p.id} className="flex items-center gap-2 flex-wrap cursor-pointer hover:text-sky-300"
+                onClick={() => openPlayer(r.p.id)}>
+                <PosBadge pos={r.p.pos} />
+                <span className="flex-1">{shortName(r.p)} <span className="text-slate-500">({r.p.age}, {r.p.ovr})</span></span>
+                <span className="text-xs text-slate-400">${r.p.contract.amt}M · {r.p.contract.yrs}y left</span>
+                <span className="text-xs">{r.blocked ? <span className="text-amber-300">no-trade clause</span>
+                  : <span className="text-emerald-300">worth a {ordinal(r.round)}</span>}</span>
+              </div>
+            ))}
+          </div>
+          <button className={`${btnGhost} mt-2`} onClick={() => go("trade")}>Open the trade screen</button>
+        </Section>
+      ) : null}
+
+      <div className="grid sm:grid-cols-2 gap-3">
+        {[["Buyers", b.buyers, "text-emerald-300"], ["Sellers", b.sellers, "text-amber-300"]].map(([label, ids, tone]) => (
+          <Section key={label} title={label}
+            right={<span className={`text-xs ${tone}`}>{ids.length} clubs</span>} className="p-3">
+            <div className="space-y-0.5 pt-1 text-xs">
+              {ids.map((id) => (
+                <div key={id} className={`flex gap-2 ${id === G.userTeam ? "text-sky-300" : "text-slate-300"}`}>
+                  <button className="flex-1 text-left hover:text-sky-300" onClick={() => openTeam(id)}>{nm(id)}</button>
+                  <span className="tnum text-slate-500">{G.teams[id].pts} pts</span>
+                </div>
+              ))}
+            </div>
+          </Section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const TABS = [
   { key: "home", label: "Home", group: "Club" },
   { key: "roster", label: "Roster", group: "Club" },
@@ -7091,6 +7227,7 @@ const TABS = [
   { key: "playoffs", label: "Playoffs", group: "League" },
   { key: "allstar", label: "All-Star", group: "League" },
   { key: "trade", label: "Trade", group: "Market" },
+  { key: "deadline", label: "Deadline", group: "Market" },
   { key: "fa", label: "Free agents", group: "Market" },
   { key: "offseason", label: "Offseason", group: "Market" },
   { key: "records", label: "Records", group: "History" },
@@ -7317,6 +7454,7 @@ function App() {
         {tab === "playoffs" && <PlayoffsTab G={G} setG={setG} openPlayer={setPlayer} />}
         {tab === "allstar" && <AllStarTab G={G} openPlayer={setPlayer} />}
         {tab === "trade" && <TradeTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
+        {tab === "deadline" && <DeadlineTab G={G} go={go} openPlayer={setPlayer} openTeam={setClub} />}
         {tab === "fa" && <FreeAgencyTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
         {tab === "offseason" && <OffseasonTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
         {tab === "records" && <RecordsTab G={G} openPlayer={setPlayer} />}

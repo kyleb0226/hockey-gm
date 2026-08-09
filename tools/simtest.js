@@ -40,7 +40,7 @@ const EXPORTS = [
   "MANDATES", "setMandate", "seasonAchievement", "hofScore", "runHallOfFame", "HOF_BAR",
   "ballot", "BALLOT_SIZE", "takeJob", "FIRING_LINE", "finishSeason",
   "setBlock", "onBlock", "generateOffers", "acceptOffer", "tradablePicks", "nextOpponent",
-  "deadlineDay", "tradesOpen", "daysToDeadline", "aiDeadlineMoves",
+  "deadlineDay", "tradesOpen", "daysToDeadline", "aiDeadlineMoves", "deadlineBoard", "RENTAL_MIN_OVR",
   "hasNtc", "eligibleForNtc", "requestNtcWaiver",
   "needsWaivers", "sendDown", "recall", "processWaivers", "nhlGames",
   "askingPrice", "negotiate", "isProspect", "prospectReady", "simFarmDay",
@@ -2624,6 +2624,53 @@ const CHECKS = {
     simSeason(A, H);
     ok(H.teams[7].gp === 41, "the next season plays out under the new club");
     ok((H.tenure || []).length === 1, "and the old spell is still on the record");
+  },
+
+  /* The deadline used to arrive as a line in the news feed after it had already
+     happened. `deadlineBoard` surfaces what the engine was deciding internally
+     all along — and it must agree with `aiDeadlineMoves`, or the screen shows a
+     market the league isn't actually trading in. */
+  deadlineScreen(A) {
+    section("The deadline board");
+    const G = A.newGame(0, { seed: 8484, rules: { seasonLen: 82 } });
+    A.simDays(G, 120);
+    const b = A.deadlineBoard(G);
+
+    ok(b.buyers.length + b.sellers.length === G.teams.length, "every club is a buyer or a seller");
+    ok(!b.buyers.some((id) => b.sellers.includes(id)), "and never both");
+    // The split has to BE the standings split, not a second opinion.
+    const table = A.standings(G);
+    ok(b.buyers.every((id) => table.findIndex((t) => t.id === id) < G.teams.length / 2),
+      "buyers are the top half of the table");
+    ok(A.standings(G)[0].id === b.buyers[0], "listed in table order");
+    ok(b.youBuy === b.buyers.includes(G.userTeam), "and it knows which side you're on");
+    ok(b.myRank >= 1 && b.myRank <= G.teams.length, `your place in the league is real (${b.myRank})`);
+
+    // Rentals must be genuine rentals, and belong to sellers.
+    ok(b.rentals.length > 0, `there is a market (${b.rentals.length} rentals)`);
+    ok(b.rentals.every((r) => r.p.contract.yrs <= 1), "every rental is in his last year");
+    ok(b.rentals.every((r) => r.p.age >= 27), "and old enough to be one");
+    ok(b.rentals.every((r) => r.p.ovr >= A.RENTAL_MIN_OVR), "and worth renting");
+    ok(b.rentals.every((r) => b.sellers.includes(r.from)), "and plays for a club that is selling");
+    ok(!b.rentals.some((r) => r.p.teamId === G.userTeam), "your own players are not on the market");
+    ok(b.rentals.every((r, i) => i === 0 || b.rentals[i - 1].p.ovr >= r.p.ovr), "best first");
+
+    /* The asking price must be the pick the AI ACTUALLY pays — a decorative
+       estimate would be worse than showing nothing. */
+    ok(b.rentals.every((r) => r.round === (r.p.ovr >= 72 ? 1 : 2)),
+      "the asking price matches what aiDeadlineMoves pays");
+    ok(b.rentals.every((r) => r.blocked === A.hasNtc(r.p)), "a no-trade clause is flagged");
+
+    // Your own expiring men, priced the same way.
+    ok(b.myRentals.every((r) => r.p.teamId === G.userTeam), "your rentals are yours");
+    ok(b.myRentals.every((r) => r.round === (r.p.ovr >= 72 ? 1 : 2)), "and priced on the same scale");
+
+    // And the window itself.
+    ok(b.open === A.tradesOpen(G), "it agrees with whether trades are open");
+    ok(b.days === A.daysToDeadline(G), "and with how long is left");
+    const G2 = A.newGame(0, { seed: 8484, rules: { seasonLen: 82 } });
+    A.simDays(G2, A.deadlineDay(G2) + 2);
+    ok(!A.deadlineBoard(G2).open, "once the deadline passes the window is shut");
   },
 
   // The same seed must produce the same season, or nothing above is reproducible.
