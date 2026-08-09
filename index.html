@@ -198,6 +198,65 @@ const PERSONALITIES = [
 ];
 const personalityOf = (p) => PERSONALITIES[(p.id * 2749) % PERSONALITIES.length];
 
+/* ------------------------------- player roles -----------------------------
+ * What a skater is FOR. Every rate stat used to come from a narrow curve around
+ * one rating, which meant nobody specialised: the league's hits leader finished
+ * on 152 and its penalty leader on 84, because a fourth-line agitator drew
+ * roughly the same numbers as a first-line centre. Real hockey concentrates
+ * these — one man leads the league in hits by a mile, another in penalty
+ * minutes, and neither of them is the scoring champion.
+ *
+ * The role is DERIVED from a player's own ratings, not stored, so it costs no
+ * save size, never drifts out of sync with his development, and an old save
+ * gets one for free. It reads as a description of a player rather than a
+ * setting, which is the point — you scout it, you don't choose it.
+ * ------------------------------------------------------------------------- */
+const ROLES = {
+  sniper:    { label: "Sniper",        blurb: "Shoots first. Give him the puck in the circle.",
+               hit: 0.72, pim: 0.80, blk: 0.70, pp: 1.45, fight: 0.25 },
+  playmaker: { label: "Playmaker",     blurb: "Sees the pass before it exists.",
+               hit: 0.70, pim: 0.85, blk: 0.75, pp: 1.40, fight: 0.20 },
+  twoWay:    { label: "Two-way",       blurb: "Trusted in every situation, loud in none.",
+               hit: 1.00, pim: 1.00, blk: 1.05, pp: 1.00, fight: 0.70 },
+  shutdown:  { label: "Shutdown",      blurb: "Plays the hard minutes and eats shots.",
+               hit: 1.20, pim: 1.10, blk: 1.15, pp: 0.45, fight: 0.90 },
+  grinder:   { label: "Grinder",       blurb: "Finishes checks, wears people down.",
+               hit: 1.70, pim: 1.45, blk: 1.15, pp: 0.35, fight: 1.60 },
+  enforcer:  { label: "Enforcer",      blurb: "On the ice to answer for things.",
+               hit: 2.30, pim: 2.90, blk: 0.90, pp: 0.15, fight: 4.00 },
+};
+const ROLE_KEYS = Object.keys(ROLES);
+
+/* Which of his attributes stands furthest above his own average — a player is
+   defined by what he does BEST relative to himself, not by raw quality, so a
+   fourth-liner gets a real identity instead of "worse forward". */
+function roleKeyOf(p) {
+  if (!p || p.pos === "G") return null;
+  const r = p.r || {};
+  const v = (k) => r[k] || 0;
+  const mean = (v("sht") + v("pss") + v("dfn") + v("phy") + v("hnd") + v("spd")) / 6;
+  const score = {
+    sniper: (v("sht") - mean) * 1.15 + (v("hnd") - mean) * 0.35,
+    playmaker: (v("pss") - mean) * 1.15 + (v("hnd") - mean) * 0.4,
+    shutdown: (v("dfn") - mean) * 1.2 + (p.pos === "D" ? 3 : 0),
+    grinder: (v("phy") - mean) * 0.95 - (v("sht") - mean) * 0.35,
+    // An enforcer is a grinder whose hands never caught up with his shoulders.
+    enforcer: (v("phy") - mean) * 1.1 - (v("sht") - mean) * 0.7 - (v("hnd") - mean) * 0.6
+      + (v("phy") >= 68 && v("sht") <= 52 ? 6 : -6),
+    twoWay: 3.4,   // the default anyone unremarkable falls back to
+  };
+  let bestKey = "twoWay", bestVal = -Infinity;
+  // Ties break on id so the answer is stable for a career, never random.
+  ROLE_KEYS.forEach((k, i) => {
+    const s = (score[k] || 0) + ((p.id * 31 + i * 7) % 5) * 0.01;
+    if (s > bestVal) { bestVal = s; bestKey = k; }
+  });
+  return bestKey;
+}
+const roleOf = (p) => ROLES[roleKeyOf(p)] || ROLES.twoWay;
+// A weight for "how likely is this player to be the one who does X".
+const roleTrait = (p, k) => (p && p.pos !== "G" ? roleOf(p)[k] : 0);
+
 /* Who deserves the letter: leadership is what he is, plus what he's done, plus
    how long he's been here. Age matters — a 21-year-old rarely gets the C. */
 function leadership(G, p) {
@@ -590,7 +649,11 @@ const teamOf = (G, teamId) => G.teams[teamId];
    lines.G : [starter, backup]
    lines.PP: 2 units of 5, lines.PK: 2 units of 4 */
 
-const LINE_TOI = [0.30, 0.27, 0.24, 0.19];   // share of even-strength forward ice time
+/* Share of even-strength forward ice time. Steepening this toward the real
+   first-line-to-fourth-line ratio was tried and made scoring WORSE, not better
+   — the 20-goal count held while the top inflated, which says the overage is
+   in the shape of the shooter draw, not in how minutes are split. */
+const LINE_TOI = [0.30, 0.27, 0.24, 0.19];
 const PAIR_TOI = [0.38, 0.34, 0.28];
 // At home the top line is steered toward the soft pair. Pre-normalised so the
 // shift lengths still add to a full game.
@@ -1089,7 +1152,9 @@ function shooterFrom(G, ids, dBias) {
   const ps = ids.map((id) => G.players[id]).filter(Boolean);
   if (!ps.length) return null;
   const bias = dBias == null ? 0.55 : dBias;
-  const wts = ps.map((p) => Math.pow(Math.max(1, p.r.sht * 0.7 + p.r.hnd * 0.3 - 20), 1.6) * (p.pos === "D" ? bias : 1));
+  // The exponent sets how concentrated scoring is. At 1.6 the league produced
+  // 76-goal seasons, which the NHL has not seen since 1988.
+  const wts = ps.map((p) => Math.pow(Math.max(1, p.r.sht * 0.7 + p.r.hnd * 0.3 - 20), 1.42) * (p.pos === "D" ? bias : 1));
   const tot = wts.reduce((a, b) => a + b, 0);
   let x = rnd(G) * tot;
   for (let i = 0; i < ps.length; i++) { x -= wts[i]; if (x <= 0) return ps[i]; }
@@ -1169,7 +1234,15 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
     sh.att++;
     const roll = rnd(G);
     if (roll < pBlock) {
-      const b = blockers[Math.floor(rnd(G) * blockers.length)];
+      // Whose block it is. Uniform among whoever was on the ice made blocks a
+      // pure function of ice time; a shot-blocking specialist should stand out.
+      /* Role nudges who blocks, but the block LEADER is set by ice time, not by
+         this: neutralising the weighting entirely still left the leader at 342.
+         That is the top-pair-minutes problem, not a shot-blocking one. */
+      let bw = blockers.map((x) => Math.max(0.2, roleTrait(x, "blk") * (1 + ((x.r.dfn || 50) - 50) * 0.005)));
+      const bTot = bw.reduce((a, c) => a + c, 0);
+      let bx = rnd(G) * bTot, b = blockers[blockers.length - 1];
+      for (let i = 0; i < blockers.length; i++) { bx -= bw[i]; if (bx <= 0) { b = blockers[i]; break; } }
       if (ctx.oppBox.players[b.id]) { sh.blkd++; ctx.oppBox.players[b.id].blk++; rec("b", null); }
       else { sh.miss++; rec("m", null); }
       continue;
@@ -1294,8 +1367,14 @@ function simGame(G, homeId, awayId, opts) {
   if (R.fighting && rnd(G) < (rivalNight ? 0.38 : 0.22)) {
     const enforcer = (tid) => {
       const pool = activeRoster(G, tid).filter((p) => p.pos !== "G")
-        .sort((x, y) => y.r.phy - x.r.phy).slice(0, 5);
-      return pool.length ? pool[Math.floor(rnd(G) * pool.length)] : null;
+        .sort((x, y) => y.r.phy * roleTrait(y, "fight") - x.r.phy * roleTrait(x, "fight")).slice(0, 5);
+      if (!pool.length) return null;
+      // Weighted even inside the shortlist — the enforcer answers most nights.
+      const fw = pool.map((x) => Math.max(0.1, roleTrait(x, "fight")));
+      const fTot = fw.reduce((a, c) => a + c, 0);
+      let fx = rnd(G) * fTot;
+      for (let i = 0; i < pool.length; i++) { fx -= fw[i]; if (fx <= 0) return pool[i]; }
+      return pool[pool.length - 1];
     };
     const hf = enforcer(homeId), af = enforcer(awayId);
     if (hf && af && home.players[hf.id] && away.players[af.id]) {
@@ -1378,8 +1457,18 @@ function simGame(G, homeId, awayId, opts) {
     side.opp.pim += drawn * 2;
     side.box.pp += drawn;
     const skaters = activeRoster(G, side.opp.teamId).filter((p) => p.pos !== "G");
+    /* Who takes the penalty. This used to be a uniform draw, which is why the
+       league's penalty-minute leader finished on 84 — everyone took the same
+       number. Weighting it by role gives a club its repeat offenders. */
+    const boxWt = skaters.map((p) => Math.max(0.15, roleTrait(p, "pim")));
+    const boxTot = boxWt.reduce((a, b) => a + b, 0);
+    const drawOffender = () => {
+      let x = rnd(G) * boxTot;
+      for (let i = 0; i < skaters.length; i++) { x -= boxWt[i]; if (x <= 0) return skaters[i]; }
+      return skaters[skaters.length - 1];
+    };
     for (let i = 0; i < drawn && skaters.length; i++) {
-      const off = skaters[Math.floor(rnd(G) * skaters.length)];
+      const off = drawOffender();
       if (side.opp.players[off.id]) side.opp.players[off.id].pim += 2;
       if (ev) ev.push({ t: rnd(G) * 60, kind: "penalty", team: side.opp.teamId, pid: off.id });
     }
@@ -1423,7 +1512,9 @@ function simGame(G, homeId, awayId, opts) {
     activeRoster(G, side.box.teamId).filter((p) => p.pos !== "G").forEach((p) => {
       // Tuned to the NHL's ~21 hits a team a night. The clamp at zero pulls the
       // mean up, so the divisor is larger than the target rate implies.
-      const h = Math.round(Math.max(0, gauss(G, p.r.phy / 52, 1)));
+      // The divisor absorbs the role multipliers, whose league-wide weighted mean
+      // is about 1.19 — scaling hits by role without it inflated the league rate.
+      const h = Math.round(Math.max(0, gauss(G, (p.r.phy / 62) * roleTrait(p, "hit"), 1)));
       side.box.players[p.id].hit += h;
       side.box.hits += h;
     });
@@ -4292,7 +4383,12 @@ function PlayerModal({ G, pid, onClose, onGo }) {
             <Stat label="Cap hit" value={`$${effectiveCap(G, p)}M`} sub={`${p.contract.yrs} yr${p.contract.yrs === 1 ? "" : "s"} left`} />
             <Stat label="Condition" value={`${Math.round(100 - p.fatigue)}%`} sub={p.farm ? "on the farm" : "on the roster"} />
           </div>
-          <Section title="Ratings" className="p-3 space-y-1.5">
+          <Section title="Ratings"
+            right={p.pos !== "G" ? <span className="text-xs text-sky-300">{roleOf(p).label}</span> : null}
+            className="p-3 space-y-1.5">
+            {p.pos !== "G" ? (
+              <div className="text-xs text-slate-400 pt-1">{roleOf(p).blurb}</div>
+            ) : null}
             <div className="space-y-1.5 pt-1">
               {keys.map((k) => p.r[k] != null ? <RatingBar key={k} label={k} v={p.r[k]} /> : null)}
             </div>
