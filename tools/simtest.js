@@ -2254,6 +2254,80 @@ const CHECKS = {
     ok(A.playersOf(G).some((p) => (p.farmCareer || []).length), "last year's farm line was archived");
   },
 
+  /* Does a finished season LOOK like a hockey season? Individual mechanics can
+     each be right while the league they add up to is wrong — shots, shooting
+     percentage and save percentage were all in band while the product of them
+     produced 2.77 goals a night and 239 shutouts. These are the season-end
+     numbers a reader would actually check, pinned against real NHL ranges. */
+  realism(A) {
+    section("Season-end realism");
+    /* Two full seasons pooled. One 82-game season swings enough on its own that
+       a rate sitting mid-band can read outside it on the wrong seed — goals a
+       night varied from 2.79 to 3.05 across seeds at a single setting. */
+    const runs = [8801, 9902].map((seed) => {
+      const g = A.newGame(0, { seed, rules: { seasonLen: 82 } });
+      simSeason(A, g);
+      return g;
+    });
+    const G = runs[0];
+    const sk = runs.flatMap((g) => A.playersOf(g).filter((p) => p.pos !== "G" && !p.farm && p.season.gp > 0));
+    const go = runs.flatMap((g) => A.playersOf(g).filter((p) => p.pos === "G" && p.season.gp > 0));
+    const teamGames = runs.reduce((s, g) => s + g.teams.reduce((x, t) => x + t.gp, 0), 0);
+    const sum = (arr, f) => arr.reduce((s, p) => s + f(p), 0);
+    const best = (arr, f) => Math.max(...arr.map(f));
+    const band = (label, v, lo, hi, fmt) =>
+      ok(v >= lo && v <= hi, `${label} — ${fmt ? fmt(v) : v.toFixed(2)} (nhl ${lo}–${hi})`);
+    /* RATES pool across seasons; LEADERS do not — the best of 64 goalie-seasons
+       is not the same statistic as the best of 32, and a count of 100-point
+       scorers over two years is not a season's worth. Take each season's figure
+       and average them. */
+    const perSeason = (f) => runs.reduce((s2, g) => s2 + f(g), 0) / runs.length;
+    const skOf = (g) => A.playersOf(g).filter((p) => p.pos !== "G" && !p.farm && p.season.gp > 0);
+    const goOf = (g) => A.playersOf(g).filter((p) => p.pos === "G" && p.season.gp > 0);
+
+    // Scoring: the product of shots and finishing, which is what a reader sees.
+    band("goals per team-game", runs.reduce((s2, g) => s2 + sum(g.teams, (t) => t.gf), 0) / teamGames, 2.85, 3.40);
+    band("shots on goal per team-game", sum(sk, (p) => p.season.sog) / teamGames, 27.5, 33);
+    band("league shooting %", sum(sk, (p) => p.season.g) / sum(sk, (p) => p.season.sog) * 100, 8.6, 10.8);
+    band("league save %", sum(go, (p) => p.season.sv) / sum(go, (p) => p.season.sa) * 100, 89.3, 91.2);
+
+    /* Assists must outnumber goals by about 1.7 to 1 — most goals carry two.
+       At 1.14 the league's assist leader finished BELOW its goal leader and
+       nobody reached a hundred points, which is not a hockey season. */
+    band("assists per goal", sum(sk, (p) => p.season.a) / sum(sk, (p) => p.season.g), 1.55, 1.85);
+    band("Art Ross winner", perSeason((g) => best(skOf(g), (p) => p.season.g + p.season.a)), 90, 160, (v) => `${v.toFixed(0)} pts`);
+    band("goals leader", perSeason((g) => best(skOf(g), (p) => p.season.g)), 40, 72, (v) => v.toFixed(0));
+    band("assists leader", perSeason((g) => best(skOf(g), (p) => p.season.a)), 55, 105, (v) => v.toFixed(0));
+    ok(runs.every((g) => best(skOf(g), (p) => p.season.a) > best(skOf(g), (p) => p.season.g)),
+      "the assists leader outscores the goals leader, as he does in life");
+    band("100-point scorers", perSeason((g) => skOf(g).filter((p) => p.season.g + p.season.a >= 100).length), 1, 14, (v) => v.toFixed(1));
+
+    /* Game-winning goals were declared in `blankStats`, listed in the record
+       book, and never once incremented — every leaderboard read zero. */
+    const gwTotal = sum(sk, (p) => p.season.gwg);
+    const decisive = runs.reduce((s2, g) => s2 + g.results.filter((r) => !r.playoff && !r.so && r.hg !== r.ag).length, 0);
+    ok(gwTotal === decisive,
+      `every decisive non-shootout game has a game-winning goal (${gwTotal} of ${decisive})`);
+    band("game-winning goals leader", perSeason((g) => best(skOf(g), (p) => p.season.gwg)), 7, 16, (v) => v.toFixed(1));
+
+    // Physical play and goaltending.
+    band("hits per team-game", sum(sk, (p) => p.season.hit) / teamGames, 17, 26);
+    band("blocks per team-game", sum(sk, (p) => p.season.blk) / teamGames, 11, 18);
+    band("shutouts per season", sum(go, (p) => p.season.so) / runs.length, 80, 205, (v) => `${v.toFixed(0)}`);
+    band("goalie starts leader", perSeason((g) => best(goOf(g), (p) => p.season.gp)), 52, 70, (v) => v.toFixed(1));
+
+    // The table has to look like a table: a real top, a real bottom, no runaway.
+    const table = A.standings(G);
+    band("points, first place", perSeason((g) => A.standings(g)[0].pts), 100, 142, (v) => v.toFixed(0));
+    band("points, last place", perSeason((g) => A.standings(g)[31].pts), 40, 78, (v) => v.toFixed(0));
+    ok(table[0].pts - table[31].pts < 100,
+      `the table isn't absurdly stretched (${table[31].pts}–${table[0].pts})`);
+    // Home ice is worth something, but not everything.
+    const decided = runs.flatMap((g) => g.results.filter((r) => !r.playoff));
+    const homeWins = decided.filter((r) => r.hg > r.ag).length;
+    band("home win %", homeWins / decided.length * 100, 48, 60);
+  },
+
   // The same seed must produce the same season, or nothing above is reproducible.
   determinism(A) {
     section("Determinism");

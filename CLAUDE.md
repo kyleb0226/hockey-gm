@@ -267,7 +267,41 @@ a flat "+1.5 if he's on the farm", which gave every prospect the same answer.
   monotonicity in both inputs, the games-weighted blend, and that young regulars in a real simmed
   league develop far better than young scratches.
 
+## Season-end realism
+The `realism` check in `tools/simtest.js` pins what a finished season LOOKS like, pooled over two
+82-game seasons because one swings too much on its own. It exists because **every individual
+mechanic can be in band while the league they add up to is wrong**: shots (29.3), shooting
+percentage (9.5%) and save percentage (90.7%) were each realistic while their product gave 2.77
+goals a night and 239 shutouts a season.
+
+Things that were wrong and are now pinned:
+- **Assists ran 1.14 per goal against a real 1.70.** `assistsFrom` used a 24/38/38 split for
+  0/1/2 assists; the NHL is about 3/27/70. The league's assist leader finished *below* its goal
+  leader and nobody ever reached a hundred points.
+- **`gwg` was never incremented.** Game-winning goals were declared in `blankStats`, listed in the
+  record book, and always read zero. `applyGame` now credits the winner's `(loser's total + 1)`-th
+  goal from `box.scorers`; a shootout winner is credited to nobody by design, so nobody gets it.
+- **Hits ran 31.7 a team-game against a real ~21.**
+- **Base save percentage** is the lever that sets scoring, since goals = SOG × (1 − SV%). Moving
+  it changes shutouts, GAA and the standings spread at the same time — re-run the audit, don't
+  tune it in isolation.
+- **Team tier spread** (`gauss(56, 4.4)`) sets how far apart clubs are. It was wide enough that
+  the bottom club finished on 43 points against a real floor near 55, and the blowouts inflated
+  shutouts and 30-goal counts. **Re-measure the club picker's outlook quartiles whenever this
+  changes** — narrowing it moved every one of them.
+
+Known and still out of band (a future pass): too many 20/30-goal scorers, no hit/PIM specialists
+(leaders too low) while blocks over-concentrate (leader too high), top-pair ice time reaching 33
+minutes, empty-net goals low, and home-ice advantage effectively nil (~50% against a real 52–55%).
+
 ## Point shares
+**The three constants move together.** `GOALS_PER_POINT` divides everything except
+`DEF_POINTS_PER_MIN`, so raising one without scaling the other silently re-weights skaters against
+goalies — that alone pushed a .931 goalie from 3rd in the league to 18th. `REPL_SV` must sit about
+.022 below league save percentage, so it has to be re-solved whenever scoring moves. Check all
+three against the `pointShares` assertions (sum ≈ league points, leader 15–18, a goalie in the top
+15) rather than one at a time.
+
 `pointShares(G, p, line)` is hockey's Win Shares — the closest thing the sport has to WAR that a
 box score can produce — split into `ops` / `dps` / `gps` and measured in **standings points**.
 It is a Point Shares-*style* estimate, not Hockey Reference's exact formula (that needs league

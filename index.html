@@ -502,10 +502,18 @@ const shortName = (p) => `${p.fn[0]}. ${p.ln}`;
  * something. The harness pins that sum.
  * ------------------------------------------------------------------------- */
 
-const GOALS_PER_POINT = 4.7;     // solved so the league sums to its standings points
-const REPL_SV = 0.895;           // a replacement goalie's save percentage
+const GOALS_PER_POINT = 5.5;   // solved so the league's shares sum to the points handed out
+/* A replacement goalie. The margin between him and the league (~.014) is what
+   all goaltending value is measured against, so it has to be re-solved whenever
+   league save percentage moves — and scaled with GOALS_PER_POINT, because a
+   skater's defensive shares come from a flat per-minute term that doesn't
+   divide by it. Get this wrong and a .931 goalie ranks 18th in the league. */
+const REPL_SV = 0.880;
 const REPL_GC_PER_MIN = 0.0072;  // goals created a minute by a replacement skater
-const DEF_POINTS_PER_MIN = 0.00135;
+/* Scaled WITH GOALS_PER_POINT. Everything else in this file divides by that
+   constant; this term doesn't, so raising it left skaters' defensive shares
+   proportionally too high and pushed goalies off the leaderboard entirely. */
+const DEF_POINTS_PER_MIN = 0.001154;
 
 function pointShares(G, p, line) {
   const s = line || p.season;
@@ -584,6 +592,9 @@ const teamOf = (G, teamId) => G.teams[teamId];
 
 const LINE_TOI = [0.30, 0.27, 0.24, 0.19];   // share of even-strength forward ice time
 const PAIR_TOI = [0.38, 0.34, 0.28];
+// At home the top line is steered toward the soft pair. Pre-normalised so the
+// shift lengths still add to a full game.
+const HOME_TOP_LINE_MIX = [0.293, 0.353, 0.354];
 
 function autoLines(G, teamId) {
   const r = activeRoster(G, teamId).slice().sort((a, b) => b.ovr - a.ovr);
@@ -817,7 +828,12 @@ function newGame(userTeam, opts) {
   }));
 
   // Roster generation. Team tier spreads the league from contender to lottery.
-  const tiers = G.teams.map(() => clamp(gauss(G, 56, 6), 42, 70));
+  /* How far apart the clubs are. A wide spread reads as exciting but it makes
+     the league unrecognisable: the bottom club finished on 43 points against a
+     real-world floor around 55, and the resulting blowouts inflated everything
+     downstream — shutouts, 30-goal scorers, +/- extremes. Real NHL rosters sit
+     closer together than instinct suggests. */
+  const tiers = G.teams.map(() => clamp(gauss(G, 56, 4.4), 44, 68));
   G.teams.forEach((t, i) => {
     const tier = tiers[i];
     Object.entries(ROSTER_SHAPE).forEach(([pos, count]) => {
@@ -1013,7 +1029,7 @@ function emptyBox(G, teamId) {
   rosterOf(G, teamId, true).forEach((p) => {
     box.players[p.id] = p.pos === "G"
       ? { sa: 0, sv: 0, ga: 0, toi: 0, sosa: 0, sosv: 0, starts: 0, z: blankZones("G"), net: blankNet("G") }
-      : { g: 0, a: 0, sog: 0, pim: 0, hit: 0, blk: 0, toi: 0, pm: 0, fow: 0, fol: 0, ppg: 0, shg: 0,
+      : { g: 0, a: 0, sog: 0, pim: 0, hit: 0, blk: 0, toi: 0, pm: 0, fow: 0, fol: 0, ppg: 0, shg: 0, gwg: 0,
           eng: 0, fights: 0, sos: 0, soa: 0, att: 0, miss: 0, blkd: 0,
           z: blankZones("S"), net: blankNet("S") };
   });
@@ -1085,7 +1101,12 @@ function assistsFrom(G, ids, scorerId) {
   const out = [];
   if (!ps.length) return out;
   const roll = rnd(G);
-  const n = roll < 0.24 ? 0 : roll < 0.62 ? 1 : 2;
+  /* How many assists a goal carries. The NHL runs about 1.70 assists per goal:
+     roughly 3% of goals are unassisted, a quarter carry one, and about seventy
+     per cent carry two. The old 24/38/38 split averaged 1.14, which is why the
+     league's assist leader finished BELOW its goal leader and nobody ever
+     reached a hundred points. */
+  const n = roll < 0.03 ? 0 : roll < 0.30 ? 1 : 2;
   const pool = ps.slice();
   for (let i = 0; i < n && pool.length; i++) {
     const wts = pool.map((p) => Math.pow(Math.max(1, p.r.pss - 15), 1.7));
@@ -1106,7 +1127,11 @@ function resolveShots(G, ctx, shots, offIds, defIds, gid, strength) {
   // actually looks like.
   const gp = G.players[gid];
   const tired = gp ? clamp(gp.fatigue, 0, 100) / 100 : 0;
-  let base = 0.9032 + (gq - 55) * 0.0016 - tired * 0.015;
+  /* Goals per team-game is SOG x (1 - SV%), and all three have to land together.
+     At .9032 the league produced 2.77 goals a night against a real 3.0-3.1 —
+     shots and shooting percentage were both in band, but their product was low,
+     which showed up as 239 shutouts a season against an NHL 90-190. */
+  let base = 0.8948 + (gq - 55) * 0.0016 - tired * 0.015;
   if (strength === "pp") base -= 0.028;
   const gBox = ctx.gBox, sBox = ctx.sBox;
   if (!gBox.players[gid]) return;   // no dressed goaltender — nothing to resolve against
@@ -1312,8 +1337,10 @@ function simGame(G, homeId, awayId, opts) {
       const oppMix = matchupMix(G, side, li, oppT);
       // Last change: at home, the top line sees soft pairs more often.
       side.oppLines.D.forEach((pair, pi) => {
+        // Last change bends WHICH pair a line sees, but the shares still have to
+        // sum to one — scaling them raw handed the home side extra minutes.
         let share = PAIR_TOI[pi];
-        if (side.isHome) share *= li === 0 ? (pi === 2 ? 1.28 : pi === 1 ? 1.05 : 0.78) : 1;
+        if (side.isHome && li === 0) share = HOME_TOP_LINE_MIX[pi];
         const m = mins * share;
         // Draw the opposing forward line from the matchup distribution.
         let ox = rnd(G), oi = oppMix.length - 1;
@@ -1394,7 +1421,9 @@ function simGame(G, homeId, awayId, opts) {
     // real shot attempts in resolveShots, so a shot-blocking defenceman's total
     // reflects shots that were actually taken at him.
     activeRoster(G, side.box.teamId).filter((p) => p.pos !== "G").forEach((p) => {
-      const h = Math.round(Math.max(0, gauss(G, p.r.phy / 34, 1)));
+      // Tuned to the NHL's ~21 hits a team a night. The clamp at zero pulls the
+      // mean up, so the divisor is larger than the target rate implies.
+      const h = Math.round(Math.max(0, gauss(G, p.r.phy / 52, 1)));
       side.box.players[p.id].hit += h;
       side.box.hits += h;
     });
@@ -1491,6 +1520,18 @@ function applyGame(G, res, opts) {
   const homeWon = res.hg > res.ag;
   const tie = res.hg === res.ag;
 
+  /* The game-winning goal: the one that put the winner ahead for good — his
+     (loser's total + 1)-th goal, which is exactly how the NHL scores it. The
+     field has existed since the first build, is listed in the record book, and
+     was never once incremented, so every club's GWG leader read zero forever.
+     A shootout winner is deliberately credited to nobody, so nobody gets it. */
+  if (!tie && !res.so) {
+    const winId = homeWon ? res.home : res.away;
+    const lost = homeWon ? res.ag : res.hg;
+    const gw = (res.boxes[winId].scorers || [])[lost];
+    if (gw && res.boxes[winId].players[gw.id]) res.boxes[winId].players[gw.id].gwg = 1;
+  }
+
   [res.home, res.away].forEach((tid) => {
     const t = G.teams[tid];
     const box = res.boxes[tid];
@@ -1533,7 +1574,7 @@ function applyGame(G, res, opts) {
         } else {
           d.g += s.g; d.a += s.a; d.sog += s.sog; d.pim += s.pim;
           d.hit += s.hit; d.blk += s.blk; d.pm += s.pm;
-          d.fow += s.fow; d.fol += s.fol; d.ppg += s.ppg; d.shg += s.shg;
+          d.fow += s.fow; d.fol += s.fol; d.ppg += s.ppg; d.shg += s.shg; d.gwg += s.gwg || 0;
           d.eng += s.eng || 0; d.fights += s.fights || 0;
           d.sos += s.sos || 0; d.soa += s.soa || 0;
           d.att += s.att || 0; d.miss += s.miss || 0; d.blkd += s.blkd || 0;
@@ -3160,7 +3201,11 @@ function applyFarmGame(G, res) {
        comparison false, and quietly hands the whole draw to the last skater in
        the list. On a thin affiliate that gave one player all 154 of his club's
        goals and nobody a single assist. */
-    const weight = (p) => 1 + Math.pow(Math.max(0, p.ovr - 32), 1.6);
+    /* A gentler curve than the NHL engine uses. A club fields two to five real
+       prospects among a dozen notional team-mates, so a steep exponent hands
+       the best of them an impossible share — one finished on 75 goals against
+       an AHL leader's realistic 35-40. */
+    const weight = (p) => 1 + Math.pow(Math.max(0, p.ovr - 32), 1.15);
     /* An affiliate ices a full side, but only the parent club's prospects are
        modelled as players — a club carries two to five of them. The rest of the
        bench is the affiliate's own signed depth, which we account for as
@@ -4535,12 +4580,14 @@ function clubSummary(G, teamId) {
     prospects: young.length,
     future: young.length ? Math.round(young.reduce((s, p) => s + p.pot, 0) / young.length) : 0,
     coach: coachOf(G.teams[teamId]),
-    // Quartiles MEASURED off generated worlds (256 clubs over 8 seeds): the
-    // spread runs 47–80 with a median of 65 and quartiles at 60/65/69. Guessed
-    // thresholds had every club in the league reading "Contender".
-    outlook: rating >= 69 ? { t: "Contender", c: "text-emerald-300" }
+    /* Quartiles MEASURED off generated worlds (256 clubs over 8 seeds): the
+       spread runs 50–79 with a median of 65 and quartiles at 61/65/68. Guessed
+       thresholds had every club in the league reading "Contender".
+       RE-MEASURE THESE whenever team generation changes — narrowing the tier
+       spread moved every one of them. */
+    outlook: rating >= 68 ? { t: "Contender", c: "text-emerald-300" }
       : rating >= 65 ? { t: "Playoff side", c: "text-sky-300" }
-      : rating >= 60 ? { t: "Bubble", c: "text-slate-300" }
+      : rating >= 61 ? { t: "Bubble", c: "text-slate-300" }
       : { t: "Rebuild", c: "text-amber-300" },
   };
 }
