@@ -655,9 +655,9 @@ const teamOf = (G, teamId) => G.teams[teamId];
    in the shape of the shooter draw, not in how minutes are split. */
 const LINE_TOI = [0.30, 0.27, 0.24, 0.19];
 const PAIR_TOI = [0.38, 0.34, 0.28];
-// At home the top line is steered toward the soft pair. Pre-normalised so the
-// shift lengths still add to a full game.
-const HOME_TOP_LINE_MIX = [0.293, 0.353, 0.354];
+// At home the top line is steered toward the soft pair. Applied as a bend and
+// re-normalised, so it works with whatever split the opposing coach has set.
+const HOME_TOP_LINE_BEND = [0.78, 1.05, 1.28];
 
 function autoLines(G, teamId) {
   const r = activeRoster(G, teamId).slice().sort((a, b) => b.ovr - a.ovr);
@@ -1053,6 +1053,10 @@ function normalise(arr, fallback) {
   return arr.map((v) => Math.max(0, v) / tot);
 }
 const iceTimeF = (t) => normalise(t && t.iceF, LINE_TOI);
+/* Defence pair minutes. Forwards had a coach's control over this from the
+   start; pairs were a hard-coded constant, which is odd given a top pair plays
+   more of the game than any forward line does. */
+const iceTimeD = (t) => normalise(t && t.iceD, PAIR_TOI);
 
 /* How often our line `li` sees each of their four. Line-for-line is the default
    because that's what happens when nobody is steering. With last change, the
@@ -1084,6 +1088,9 @@ function matchupMix(G, side, li, oppT) {
 
 const ES_MINUTES = 47;      // even strength
 const PP_MIN_PER = 1.7;     // ice time per power play
+// How the two special-teams units split the work, as real clubs do.
+const PP_UNIT_SPLIT = [0.65, 0.35];
+const PK_UNIT_SPLIT = [0.58, 0.42];
 
 function emptyBox(G, teamId) {
   const box = { teamId, g: 0, sog: 0, pim: 0, pp: 0, ppg: 0, hits: 0, blk: 0, fow: 0, fol: 0, players: {}, goalie: null, scorers: [] };
@@ -1407,7 +1414,7 @@ function simGame(G, homeId, awayId, opts) {
     const oppChemD = teamChemD[side.opp.teamId];
     const myT = G.teams[side.box.teamId];
     const oppT = G.teams[side.opp.teamId];
-    const fIce = iceTimeF(myT);
+    const fIce = iceTimeF(myT), myIce = iceTimeD(myT), oppIce = iceTimeD(oppT);
     side.lines.F.forEach((fLine, li) => {
       const mins = ES_MINUTES * fIce[li];
       // Which of THEIR lines this one sees. The default is line-for-line, but
@@ -1416,10 +1423,16 @@ function simGame(G, homeId, awayId, opts) {
       const oppMix = matchupMix(G, side, li, oppT);
       // Last change: at home, the top line sees soft pairs more often.
       side.oppLines.D.forEach((pair, pi) => {
-        // Last change bends WHICH pair a line sees, but the shares still have to
-        // sum to one — scaling them raw handed the home side extra minutes.
-        let share = PAIR_TOI[pi];
-        if (side.isHome && li === 0) share = HOME_TOP_LINE_MIX[pi];
+        /* Their pairs play the split THEIR coach chose. Last change bends which
+           pair our top line sees, but the shares still have to sum to one —
+           scaling them raw handed the home side extra minutes, and hard-coding
+           the bent values ignored the opposing coach entirely. */
+        let share = oppIce[pi];
+        if (side.isHome && li === 0) {
+          const bent = oppIce.map((v, k) => v * HOME_TOP_LINE_BEND[k]);
+          const bt = bent.reduce((a, b) => a + b, 0);
+          share = bt > 0 ? bent[pi] / bt : share;
+        }
         const m = mins * share;
         // Draw the opposing forward line from the matchup distribution.
         let ox = rnd(G), oi = oppMix.length - 1;
@@ -1429,7 +1442,7 @@ function simGame(G, homeId, awayId, opts) {
         // is out there is drawn by ice-time share — that's what puts defencemen
         // on the scoresheet at all, and it evens out across a season.
         let x = rnd(G), di = 0;
-        for (let k = 0; k < PAIR_TOI.length; k++) { x -= PAIR_TOI[k]; if (x <= 0) { di = k; break; } }
+        for (let k = 0; k < myIce.length; k++) { x -= myIce[k]; if (x <= 0) { di = k; break; } }
         const myPair = side.lines.D[di] || side.lines.D[0];
         const unit = fLine.concat(myPair);
         const off = lineOff(G, fLine) * (1 + chem[li] * LINE_CHEM_PER_GAME);
@@ -1472,21 +1485,45 @@ function simGame(G, homeId, awayId, opts) {
       if (side.opp.players[off.id]) side.opp.players[off.id].pim += 2;
       if (ev) ev.push({ t: rnd(G) * 60, kind: "penalty", team: side.opp.teamId, pid: off.id });
     }
-    const unit = side.lines.PP[0].length ? side.lines.PP[0] : side.lines.F[0];
-    const pkUnit = side.oppLines.PK[0].length ? side.oppLines.PK[0] : side.oppLines.D[0];
-    const m = drawn * PP_MIN_PER;
+    /* BOTH units, not just the first. Running the whole power play through PP1
+       and the whole kill through PK1 handed anyone on both an extra eleven
+       minutes a night — which is where a 33-minute top pair came from, and why
+       the league's shot-blocking leader sat 50% clear of the field. The second
+       units have always existed in `lines.PP`/`lines.PK`; nothing ever used
+       them. Real clubs split roughly 65/35 on the power play and 58/42 on the
+       kill. */
+    const ppUnits = [side.lines.PP[0], side.lines.PP[1]]
+      .filter((u) => u && u.length);
+    const pkUnits = [side.oppLines.PK[0], side.oppLines.PK[1]]
+      .filter((u) => u && u.length);
+    const ppSets = ppUnits.length ? ppUnits : [side.lines.F[0]];
+    const pkSets = pkUnits.length ? pkUnits : [side.oppLines.D[0]];
+    const ppShare = ppSets.length > 1 ? PP_UNIT_SPLIT : [1];
+    const pkShare = pkSets.length > 1 ? PK_UNIT_SPLIT : [1];
     const ppC = coachOf(G.teams[side.box.teamId]), pkC = coachOf(G.teams[side.opp.teamId]);
-    const rate = (52 / 60) * (lineOff(G, unit) / unitDef(G, pkUnit, side.oppLines.D[0]))
-      * (1 + (ppC.pp - 55) * 0.0035) * (1 - (pkC.pk - 55) * 0.0030);
-    const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)))));
-    resolveShots(G, { off: 1, ppOff: 1, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },
-      shots, unit, pkUnit, side.oppGid, "pp");
-    unit.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m; });
-    pkUnit.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m; });
+    const totalPP = drawn * PP_MIN_PER;
+    let firstPk = pkSets[0];
+    ppSets.forEach((unit, ui) => {
+      const m = totalPP * ppShare[ui];
+      if (m <= 0) return;
+      // The kill rotates on its own schedule, so pair unit i against kill unit i.
+      const pkUnit = pkSets[Math.min(ui, pkSets.length - 1)];
+      const rate = (52 / 60) * (lineOff(G, unit) / unitDef(G, pkUnit, side.oppLines.D[0]))
+        * (1 + (ppC.pp - 55) * 0.0035) * (1 - (pkC.pk - 55) * 0.0030);
+      const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)))));
+      resolveShots(G, { off: 1, ppOff: 1, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },
+        shots, unit, pkUnit, side.oppGid, "pp");
+      unit.forEach((id) => { if (side.box.players[id]) side.box.players[id].toi += m; });
+    });
+    // The kill's minutes follow its OWN split, not the power play's.
+    pkSets.forEach((pkUnit, ki) => {
+      const m = totalPP * (pkShare[ki] != null ? pkShare[ki] : 0);
+      pkUnit.forEach((id) => { if (side.opp.players[id]) side.opp.players[id].toi += m; });
+    });
     // Shorthanded chances are rare but real.
     if (rnd(G) < 0.16 * drawn) {
       resolveShots(G, { off: 1, ppOff: 1, sBox: side.opp, gBox: side.box, oppBox: side.box, events: ev, shots: shotLog },
-        1, pkUnit, unit, side.gid, "sh");
+        1, firstPk, ppSets[0], side.gid, "sh");
     }
   });
 
@@ -5304,6 +5341,37 @@ function LinesTab({ G, setG }) {
             <button className={`${btnGhost} mt-1`} onClick={() => {
               const g2 = { ...G, teams: G.teams.slice() };
               g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], iceF: null };
+              setG(g2);
+            }}>Reset to standard</button>
+          </div>
+          <div>
+            <div className="text-xs text-slate-400 mb-1">
+              Defence pair minutes. A top pair plays more of the game than any forward line —
+              lean on it and it wears down by spring.
+            </div>
+            {ensureLines(G, G.userTeam).D.map((_, i) => {
+              const ice = iceTimeD(G.teams[G.userTeam]);
+              return (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="w-8 text-xs text-slate-500">D{i + 1}</span>
+                  <input type="range" min="10" max="60" step="1" className="flex-1"
+                    value={Math.round(ice[i] * 100)}
+                    onChange={(e) => {
+                      const g2 = { ...G, teams: G.teams.slice() };
+                      const cur = iceTimeD(g2.teams[G.userTeam]).map((v) => v * 100);
+                      cur[i] = +e.target.value;
+                      g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], iceD: cur };
+                      setG(g2);
+                    }} />
+                  <span className="w-20 text-right text-xs tnum text-slate-300">
+                    {(ice[i] * ES_MINUTES).toFixed(1)} min
+                  </span>
+                </div>
+              );
+            })}
+            <button className={`${btnGhost} mt-1`} onClick={() => {
+              const g2 = { ...G, teams: G.teams.slice() };
+              g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], iceD: null };
               setG(g2);
             }}>Reset to standard</button>
           </div>

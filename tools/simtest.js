@@ -35,6 +35,7 @@ const EXPORTS = [
   "pickStarter", "runShootout", "restFor", "SHOT_ZONES", "fillRosters",
     "simPlayoffDay", "advancePlayoffRound", "simSeriesGame", "lineChemistry", "iceTimeF", "matchupMix", "normalise",
   "SYSTEMS", "genCoach", "coachOf", "systemOf", "isRivalry", "clubColour", "COLOURS",
+  "iceTimeD", "PAIR_TOI", "PP_UNIT_SPLIT", "PK_UNIT_SPLIT", "ES_MINUTES",
   "PERSONALITIES", "personalityOf", "leadership", "letters", "letterFor", "roomMorale",
   "MANDATES", "setMandate", "seasonAchievement", "hofScore", "runHallOfFame", "HOF_BAR",
   "setBlock", "onBlock", "generateOffers", "acceptOffer", "tradablePicks", "nextOpponent",
@@ -2389,6 +2390,65 @@ const CHECKS = {
       `the hits leader is a physical player (${A.roleKeyOf(hitKing)}, ${hitKing.season.hit})`);
     ok(["enforcer", "grinder"].includes(A.roleKeyOf(pimKing)),
       `so is the penalty leader (${A.roleKeyOf(pimKing)}, ${pimKing.season.pim})`);
+  },
+
+  /* Who plays how much. Forwards had a coach's control over this from the start;
+     defence pairs were a hard-coded constant, and the whole power play ran
+     through PP1 while the whole kill ran through PK1 — which handed anyone on
+     both an extra eleven minutes a night and produced 33-minute defencemen. */
+  iceTime(A) {
+    section("Deployment and ice time");
+    const G = A.newGame(0, { seed: 4477, rules: { seasonLen: 82 } });
+
+    ok(A.iceTimeD(G.teams[0]).length === A.PAIR_TOI.length, "a club with no setting plays the standard split");
+    ok(Math.abs(A.iceTimeD({ iceD: [50, 30, 20] }).reduce((s, v) => s + v, 0) - 1) < 1e-9,
+      "a custom split is normalised to a whole game");
+    ok(A.iceTimeD({ iceD: [1, 0, 0] })[0] === 1, "and an extreme one is honoured");
+    ok(A.PP_UNIT_SPLIT.reduce((s, v) => s + v, 0) === 1 && A.PK_UNIT_SPLIT.reduce((s, v) => s + v, 0) === 1,
+      "both special-teams splits account for all the minutes");
+
+    simSeason(A, G);
+    const d = A.playersOf(G).filter((p) => p.pos === "D" && !p.farm && p.season.gp >= 40);
+    const f = A.playersOf(G).filter((p) => ["C", "LW", "RW"].includes(p.pos) && !p.farm && p.season.gp >= 40);
+    const mins = (p) => p.season.toi / p.season.gp;
+    /* Measure the TYPICAL number one, not the league maximum. The max is an
+       injury tail — a club down to four healthy defencemen genuinely does
+       overplay the two it has left — and asserting on it tests roster attrition
+       rather than deployment. The median of each club's leader is the figure
+       that characterises the model. */
+    const med = (a) => { const x = a.slice().sort((p, q) => p - q); return x[Math.floor(x.length / 2)]; };
+    const clubTop = (pool) => G.teams.map((t) => {
+      const own = pool.filter((p) => p.teamId === t.id).map(mins);
+      return own.length ? Math.max(...own) : null;
+    }).filter((v) => v != null);
+    const typD = med(clubTop(d)), typF = med(clubTop(f));
+    ok(typD > 21 && typD < 27, `a typical number one defenceman logs real minutes (${typD.toFixed(1)})`);
+    ok(typF > 16 && typF < 24, `and a typical first-line forward lands where he should (${typF.toFixed(1)})`);
+    ok(typD > typF, "defencemen out-play forwards in minutes, as they do in life");
+    // The tail still has to stay inside the realm of the possible.
+    ok(Math.max(...d.map(mins)) < 33, `and nobody plays an impossible night (${Math.max(...d.map(mins)).toFixed(1)} min)`);
+
+    // Both special-teams units have to actually be used.
+    const t = G.teams[0];
+    const lines = A.ensureLines(G, 0);
+    const pp2 = (lines.PP[1] || []).filter((id) => G.players[id]);
+    ok(pp2.length > 0, "a club dresses a second power-play unit");
+    const pp2Played = pp2.some((id) => G.players[id].season.toi > 0);
+    ok(pp2Played, "and it gets minutes rather than sitting unused");
+
+    // Changing the split has to actually change who plays.
+    const H = A.newGame(0, { seed: 4477, rules: { seasonLen: 41 } });
+    H.teams[0].iceD = [90, 5, 5];
+    simSeason(A, H);
+    const hd = A.rosterOf(H, 0).filter((p) => p.pos === "D" && p.season.gp >= 20)
+      .sort((a, b) => b.season.toi / b.season.gp - a.season.toi / a.season.gp);
+    const B = A.newGame(0, { seed: 4477, rules: { seasonLen: 41 } });
+    simSeason(A, B);
+    const bd = A.rosterOf(B, 0).filter((p) => p.pos === "D" && p.season.gp >= 20)
+      .sort((a, b) => b.season.toi / b.season.gp - a.season.toi / a.season.gp);
+    ok(hd.length && bd.length, "both clubs iced a defence");
+    ok(hd[0].season.toi / hd[0].season.gp > bd[0].season.toi / bd[0].season.gp + 2,
+      `riding a pair genuinely rides it (${(hd[0].season.toi / hd[0].season.gp).toFixed(1)} vs ${(bd[0].season.toi / bd[0].season.gp).toFixed(1)} min)`);
   },
 
   // The same seed must produce the same season, or nothing above is reproducible.
