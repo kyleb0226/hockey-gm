@@ -146,6 +146,11 @@ const DIFFICULTIES = {
  * had no stated stakes. A mandate is set at the start of every year from where
  * the club actually is, and judged when the Cup is handed out.
  * ------------------------------------------------------------------------- */
+/* Below this the board stops asking and starts looking. Deliberately low: a
+   manager should be able to survive one bad year on a rebuild, and only a run
+   of them should cost him the job. */
+const FIRING_LINE = 12;
+
 const MANDATES = {
   rebuild:   { label: "Develop the young players", need: 0,  blurb: "Nobody expects the playoffs. Bring the kids along." },
   compete:   { label: "Push for a playoff spot",   need: 1,  blurb: "Be in it in March." },
@@ -154,6 +159,23 @@ const MANDATES = {
   contend:   { label: "Reach the Cup Final",       need: 3,  blurb: "This roster was built to go deep." },
   cup:       { label: "Win the Cup",               need: 4,  blurb: "It's the Cup or it's a wasted year." },
 };
+/* Taking the next job. The club you left keeps its history; you start again on
+   a fresh board with a fresh mandate, which is the whole shape of the thing —
+   a career is a sequence of tenures, not one club forever. */
+function takeJob(G, teamId) {
+  if (teamId == null || !G.teams[teamId]) return { ok: false, why: "no such club" };
+  G.userTeam = teamId;
+  G.hiredYear = G.year;
+  G.fired = null;
+  // A new board starts you around even, a touch below if you were just sacked.
+  G.boardConfidence = 55;
+  G.shotLog = {}; G.gameLog = {}; G.lastGame = null;
+  G.block = []; G.offers = [];
+  setMandate(G);
+  news(G, `You have taken over at the ${G.teams[teamId].name}.`, "good");
+  return { ok: true };
+}
+
 function setMandate(G) {
   const t = G.teams[G.userTeam];
   const strength = teamStrength(G, G.userTeam);
@@ -852,6 +874,9 @@ function newGame(userTeam, opts) {
     nextPid: 1,
     year: opts.year || 2026,
     userTeam: userTeam || 0,
+    hiredYear: opts.year || 2026,
+    tenure: [],
+    fired: null,
     difficulty: opts.difficulty || "normal",
     rules: Object.assign({}, RULES_DEFAULT, opts.rules || {}),
     pendingRules: null,
@@ -986,6 +1011,10 @@ function migrate(G) {
   if (!G.freeAgents) G.freeAgents = [];
   if (!G.draftClass) G.draftClass = [];
   if (G.boardConfidence == null) G.boardConfidence = 62;
+  // A save that predates the firing rule keeps its job and its start date.
+  if (!G.tenure) G.tenure = [];
+  if (G.fired === undefined) G.fired = null;
+  if (G.hiredYear == null) G.hiredYear = G.year - (G.teams[G.userTeam].seasons || []).length;
   if (!G.lastPlayed) G.lastPlayed = new Array((G.teams || []).length || TEAMS.length).fill(-9);
   if (!G.retained) G.retained = [];
   if (!G.waivers) G.waivers = [];
@@ -2362,6 +2391,21 @@ function finishSeason(G) {
   else news(G, `The board wanted more: ${(G.mandate && G.mandate.label) || "expectations"}.`, "bad");
   G.lastMandate = { ...(G.mandate || {}), got, met: got >= want };
   G.boardConfidence = clamp(G.boardConfidence + (swing < 0 ? swing / diff(G).patience : swing * diff(G).patience), 0, 100);
+
+  /* And the board can act on it. Confidence has been tracked and displayed
+     since the first build while nothing whatsoever depended on it, which made
+     every mandate advisory — you could miss the playoffs for a decade and keep
+     the job. Winning the Cup buys a year no matter what came before it. */
+  if (champ !== G.userTeam && G.boardConfidence <= FIRING_LINE) {
+    G.tenure = (G.tenure || []).concat([{
+      teamId: G.userTeam,
+      from: G.hiredYear != null ? G.hiredYear : G.year - (G.teams[G.userTeam].seasons || []).length + 1,
+      to: G.year,
+      cups: (G.teams[G.userTeam].cupWins || 0),
+    }]);
+    G.fired = { year: G.year, teamId: G.userTeam, mandate: (G.mandate && G.mandate.label) || "expectations" };
+    news(G, `You have been relieved of your duties by the ${G.teams[G.userTeam].name}.`, "bad");
+  }
 
   // Ageing, progression and contract expiry all happen HERE rather than at the
   // rollover, so that the offseason screens show next year's ratings and a real
@@ -4915,6 +4959,60 @@ function ClubPicker({ G, value, onPick, openPlayer }) {
   );
 }
 
+/* The end of a tenure. It reuses the club picker, which is the whole reason
+   that was built as its own component — the decision is the same one you make
+   at the start of a career, only now you make it knowing what every club in the
+   league actually looks like. */
+function FiredScreen({ G, onTake }) {
+  const [pick, setPick] = useState(() => {
+    const other = G.teams.filter((t) => t.id !== G.fired.teamId);
+    return other.length ? other[0].id : 0;
+  });
+  const old = G.teams[G.fired.teamId];
+  const spells = G.tenure || [];
+  return (
+    <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-5">
+      <div>
+        <h1 className="text-2xl sm:text-3xl font-bold">
+          The {old.name} have <span className="text-rose-400">let you go</span>
+        </h1>
+        <p className="text-slate-400 text-sm mt-1">
+          {G.fired.year} · the board wanted {G.fired.mandate.toLowerCase()}, and didn't get it.
+        </p>
+      </div>
+
+      {spells.length ? (
+        <Section title="Your record" className="p-3">
+          <div className="space-y-1 pt-1 text-sm">
+            {spells.map((sp, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <span className="flex-1">{G.teams[sp.teamId].city} {G.teams[sp.teamId].name}</span>
+                <span className="text-slate-400 text-xs">{sp.from}–{sp.to}</span>
+                <span className="text-xs tnum text-slate-400 w-20 text-right">
+                  {sp.cups ? `${sp.cups} cup${sp.cups === 1 ? "" : "s"}` : "no cups"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      ) : null}
+
+      <Section title="Somebody will always want a manager" className="p-3">
+        <div className="text-xs text-slate-400 pt-1">
+          Pick your next club. You keep the league and everything that has happened in it —
+          only the job changes.
+        </div>
+      </Section>
+
+      <ClubPicker G={G} value={pick} onPick={setPick} />
+
+      <button className={`${btnPri} w-full py-2`} onClick={() => onTake(pick)}>
+        Take the {TEAMS[pick].city} {TEAMS[pick].name} job
+      </button>
+    </div>
+  );
+}
+
 function Splash({ onStart }) {
   const [team, setTeam] = useState(0);
   const [difficulty, setDifficulty] = useState("normal");
@@ -7135,6 +7233,14 @@ function App() {
   }, [G, advance]);
 
   if (!G) return <Splash onStart={start} />;
+  // Sacked. Nothing else in the game is reachable until you take another job.
+  if (G.fired) {
+    return <FiredScreen G={G} onTake={(id) => {
+      const g2 = migrate(JSON.parse(JSON.stringify(G)));
+      takeJob(g2, id);
+      setG(g2);
+    }} />;
+  }
   const t = G.teams[G.userTeam];
   const visible = TABS.filter((x) => x.group === group);
 

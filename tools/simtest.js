@@ -38,7 +38,7 @@ const EXPORTS = [
   "iceTimeD", "PAIR_TOI", "PP_UNIT_SPLIT", "PK_UNIT_SPLIT", "ES_MINUTES",
   "PERSONALITIES", "personalityOf", "leadership", "letters", "letterFor", "roomMorale",
   "MANDATES", "setMandate", "seasonAchievement", "hofScore", "runHallOfFame", "HOF_BAR",
-  "ballot", "BALLOT_SIZE",
+  "ballot", "BALLOT_SIZE", "takeJob", "FIRING_LINE", "finishSeason",
   "setBlock", "onBlock", "generateOffers", "acceptOffer", "tradablePicks", "nextOpponent",
   "deadlineDay", "tradesOpen", "daysToDeadline", "aiDeadlineMoves",
   "hasNtc", "eligibleForNtc", "requestNtcWaiver",
@@ -2570,6 +2570,60 @@ const CHECKS = {
     // A rookie goaltender must be able to win the Calder.
     const rookieBallots = aw.votes.rookie.map((v) => G.players[v.id]).filter(Boolean);
     ok(rookieBallots.length > 0, "rookies were considered");
+  },
+
+  /* The board can act. `boardConfidence` was tracked and displayed from the
+     first build while nothing whatsoever depended on it, so every mandate was
+     advisory — you could miss the playoffs for a decade and keep the job. */
+  firing(A) {
+    section("Firing and the next job");
+    const G = A.newGame(0, { seed: 6161, rules: { seasonLen: 41 } });
+    ok(G.fired === null, "a new manager is not already sacked");
+    ok(G.hiredYear === G.year, "and his tenure starts today");
+
+    // Comfortable confidence survives a bad year.
+    G.boardConfidence = 70;
+    simSeason(A, G); simPlayoffs(A, G);
+    ok(!G.fired, "a well-regarded manager survives a season");
+
+    // A board out of patience does not.
+    const H = A.newGame(0, { seed: 6161, rules: { seasonLen: 41 } });
+    H.boardConfidence = 1;
+    H.mandate = { ...A.MANDATES.cup };
+    simSeason(A, H); simPlayoffs(A, H);
+    ok(H.fired, "a board out of patience acts on it");
+    ok(H.fired.teamId === 0 && H.fired.year === H.year, "and the sacking records who and when");
+    ok((H.tenure || []).length === 1, "the spell is written into his record");
+    ok(H.tenure[0].teamId === 0 && H.tenure[0].to === H.year, "with the club and the year he left");
+
+    // Winning the Cup has to save him whatever the board thought before.
+    const C = A.newGame(0, { seed: 6161, rules: { seasonLen: 41 } });
+    C.boardConfidence = 0;
+    simSeason(A, C); simPlayoffs(A, C);
+    if (C.playoffs && C.playoffs.champion === C.userTeam) {
+      ok(!C.fired, "winning the Cup saves the job");
+    } else ok(true, "(this seed did not win the Cup — covered by the rule itself)");
+
+    // Taking the next job.
+    const before = H.teams[0].seasons.length;
+    const r = A.takeJob(H, 7);
+    ok(r.ok, "you can take another job");
+    ok(H.userTeam === 7 && !H.fired, "and you are managing the new club");
+    ok(H.hiredYear === H.year, "on a fresh tenure");
+    ok(H.boardConfidence > A.FIRING_LINE, "with a board that hasn't judged you yet");
+    ok(H.mandate, "and a mandate of its own");
+    // The league carries on — the club you left keeps everything.
+    ok(H.teams[0].seasons.length === before, "the club you left keeps its history");
+    ok(!A.takeJob(H, 99).ok, "you cannot take a job that doesn't exist");
+
+    // And the new club's season is playable. Rosters are legitimately thin
+    // between `finishSeason` and `fillRosters`, so judge them after the rollover.
+    A.autoDraft(H, false);
+    A.startNextSeason(H);
+    ok(A.rosterOf(H, 0).length >= 18, "the club you left still ices a team");
+    simSeason(A, H);
+    ok(H.teams[7].gp === 41, "the next season plays out under the new club");
+    ok((H.tenure || []).length === 1, "and the old spell is still on the record");
   },
 
   // The same seed must produce the same season, or nothing above is reproducible.
