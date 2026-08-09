@@ -237,6 +237,69 @@ Every affiliate now plays a real league with a table and a championship.
 - `prospectReady` now also fires on farm production — a prospect outscoring the league is telling
   you he's finished learning there, whatever his rating says.
 
+## Player roles
+`roleOf(p)` derives what a skater is FOR — sniper, playmaker, two-way, shutdown, grinder,
+enforcer — from whichever of his own ratings stands furthest above his personal average, so a
+fourth-liner gets an identity rather than being "a worse forward". **Derived, never stored**, same
+pattern as `personalityOf`: no save size, never drifts out of sync with development, old saves get
+one free.
+
+It exists because every rate stat used to come from a narrow curve around one rating, so nobody
+specialised — the hits leader finished on 152 and the penalty leader on 84. Three draws that were
+**uniform random** are now weighted by it: who takes the penalty, whose block it is, and who
+answers the bell. Hits scale by role, with the divisor absorbing the league-wide weighted mean
+(~1.19) so the overall rate holds.
+
+Two things were measured and deliberately left alone. Steepening `LINE_TOI` toward the real
+first-to-fourth ratio made scoring WORSE, so the remaining 20/30-goal overage is in the shape of
+the shooter draw, not the minutes split. And the blocks leader stays high with role weighting
+neutralised entirely — that was top-pair minutes, fixed in the special-teams split below.
+
+## Deployment
+- **`iceTimeD(t)`** mirrors `iceTimeF`: defence pairs are a coaching decision, and the opposing
+  pairs play the split THEIR coach set rather than a league constant. Last change is applied as a
+  **bend that re-normalises** (`HOME_TOP_LINE_BEND`) — the pre-computed table it replaced only
+  worked for the default split, and scaling raw shares handed the home side extra minutes.
+- **Both special-teams units get used.** `lines.PP[1]` and `lines.PK[1]` existed from the first
+  build and nothing ever touched them, so the whole power play ran through PP1 and the whole kill
+  through PK1 — worth an extra eleven minutes a night to anyone on both, which is where
+  33-minute defencemen came from. `PP_UNIT_SPLIT` / `PK_UNIT_SPLIT`; the kill's split is its own.
+- Typical number one D now 23.6 min, first-line forward 20.4. **Measure the median of each club's
+  leader, not the league maximum** — the max is an injury tail and tests roster attrition instead.
+
+## Injuries and recovery
+Injuries carry a KIND (`INJURIES[i][3]`) as well as a length, naming the rating the rehab bites
+hardest. `p.rust` is the ramp back, sized to time missed via `rehabFor` and capped; **`ratingNow`
+is what the engine asks for instead of reading `p.r`** — line strength, unit defence, goaltending
+and the shooter draw all route through it, so a rusty player is worse in every phase.
+- **Rust burns off by PLAYING**, not by the calendar. Sitting him doesn't start the clock.
+- **`REHAB_DEPTH` must stay small.** It applies to every rating a returning player has, so it
+  moves league rates: at 0.16 league save percentage fell almost a full point.
+- `sharpness`, not `formOf` — that name is already the hot/cold scoring flag.
+
+## Awards
+Each trophy runs a `ballot` with vote shares; scores are shifted so fifth place sits near zero,
+or every ballot renders as a four-way tie. **The MVP is not the scoring leader** — it used to be
+literally the same id, two trophies that could never disagree.
+**Point shares are not a voting ballot.** Scoring the Hart on raw shares gave it to a goalie in
+8 seasons of 8; discounting goalies gave it to a defenceman in 5 of 8. Goalies are discounted
+(0.72) because a starter's saves-over-replacement dwarfs a forward's goals-over-replacement, and
+for skaters the ballot weights `ops` over `dps` because a defenceman's shares come mostly from ice
+time. Only drafted players carry `p.rookie`, so the opening season can never award a Calder.
+
+## The board, and getting sacked
+`boardConfidence` was tracked and displayed from the first build with nothing depending on it, so
+every mandate was advisory. Below `FIRING_LINE` the board acts; winning the Cup buys a year
+regardless. `takeJob(G, teamId)` moves you on — the club you left keeps its history, roster and
+record, and `G.tenure` holds each spell. The fired screen reuses `ClubPicker`, which is why that
+was built as a component rather than inlined into the splash.
+
+## The deadline
+`deadlineBoard(G)` surfaces what `aiDeadlineMoves` was already deciding internally. The
+buyer/seller split IS the standings split it uses, and the asking price IS the pick it pays (a
+first at 72+, else a second). The harness pins both — a decorative estimate would be worse than
+showing nothing.
+
 ## Development
 `progress(G, p)` runs **once a year, in `finishSeason`**, never in-season. The age curve (peak 26
 for skaters, 28 for goalies) is the base; the interesting part is the environment term.
@@ -456,6 +519,9 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
   Two different tables rendered at the same position in a `? :` share one component, so a sort key
   from one carried into the other, matched nothing, and fell back to sorting by name. Give each a
   distinct `key` when the columns differ.
+- **The harness never renders, and a crash on mount blanks the whole page.** `setTeam` does not
+  exist in `App` — the club-modal setter is `setClub` — and 732 checks passed while the new tab
+  threw a ReferenceError. Every UI addition needs a browser pass, without exception.
 - **In a bracket, ORDER IS THE STRUCTURE.** `advancePlayoffRound` pairs adjacent survivors (slots
   2i and 2i+1), so `buildBracket` must push round one with the series that are meant to meet
   sitting next to each other: `[1v8, 4v5, 2v7, 3v6]` seeded, and each division's two series

@@ -15,9 +15,6 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
 
 ## Coaching and tactics
 
-- **L** — Matchup control. The engine already gives the home side last change, but you can't use
-  it: `simGame` hardcodes the bias in the even-strength loop. Let the user pick a checking line
-  and a shutdown pair to chase a named opponent, and let the AI counter at home.
 - **M** — Team systems. A forecheck setting (aggressive / balanced / trap) that trades shot volume
   against shots allowed, applied as a multiplier in the same place `momentum` and `legs` are.
 - **M** — Goalie pull strategy. The last-two-minutes block uses fixed 17%/28% odds; make when to
@@ -34,8 +31,6 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   the long ones; nothing does anything with them.
 - **M** — Contract buyouts. Pay off a bad deal for a fraction over double the term, tracked in
   `G.retained` alongside retained salary since the cap plumbing is already there.
-- **M** — The trade block. Let the user list players as available, and have AI clubs open with
-  offers instead of only ever answering. `aiDeadlineMoves` has most of the valuation logic.
 - **M** — Scouting. Draft prospects should show fuzzed ratings that tighten as you spend scouting
   budget on them, so `autoDraft` picking pure `pot` stops being the optimal strategy.
 - **S** — Pick protections. `G.picks` records owner and origin but nothing else; add
@@ -45,9 +40,6 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
 
 ## Season and atmosphere
 
-- **M** — Awards voting shares. `computeAwards` picks a single winner off one stat; make it a
-  weighted ballot with the top five and their vote shares, which reads far better on the
-  offseason screen.
 - **L** — An international tournament in the break, using the All-Star selection logic to build
   national squads from `FIRST`/`LAST` name origin.
 - **S** — Player comparison. Two players side by side with their ratings bars and shot rinks
