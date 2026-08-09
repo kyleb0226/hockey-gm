@@ -47,6 +47,7 @@ const EXPORTS = [
   "farmStarter", "farmLine", "runFarmPlayoffs", "FARM_CUP_FIELD", "blankFarmRec",
   "clubSummary", "ordinal", "goalieReport", "REPORT_MIN_SHOTS", "REPORT_TRUST_SA", "leagueNetRates",
   "ROLES", "ROLE_KEYS", "roleKeyOf", "roleOf", "roleTrait",
+  "sharpness", "ratingNow", "rehabFor", "REHAB_MIN_GAMES", "REHAB_DEPTH", "REHAB_MAX", "INJURIES", "rollInjuries",
   "releasePlayer", "releaseCost", "RELEASE_DEAD_PCT", "canExtend", "extendPlayer",
   "extensionAsk", "aiExtensionOffer", "EXTEND_LOYALTY", "retainedTraded", "FARM_MAX",
   "progress", "devEnvironment", "nhlDevRead", "devAgeWeight", "devBand",
@@ -2449,6 +2450,60 @@ const CHECKS = {
     ok(hd.length && bd.length, "both clubs iced a defence");
     ok(hd[0].season.toi / hd[0].season.gp > bd[0].season.toi / bd[0].season.gp + 2,
       `riding a pair genuinely rides it (${(hd[0].season.toi / hd[0].season.gp).toFixed(1)} vs ${(bd[0].season.toi / bd[0].season.gp).toFixed(1)} min)`);
+  },
+
+  /* Coming back from a long injury is a ramp, not a switch. A player who has
+     missed two months is in the lineup before he is himself again, and that
+     fortnight is part of what the injury cost — it used to vanish the instant
+     the counter hit zero. */
+  recovery(A) {
+    section("Injury recovery");
+    ok(A.INJURIES.every((x) => x.length === 4), "every injury names the rating it bites");
+    ok(A.INJURIES.some((x) => x[3] === null), "and a concussion bites everything, so names none");
+
+    ok(A.rehabFor(0) === 0 && A.rehabFor(A.REHAB_MIN_GAMES - 1) === 0,
+      "a short knock leaves no rust behind");
+    ok(A.rehabFor(40) > 0, "a long one does");
+    ok(A.rehabFor(400) <= A.REHAB_MAX, "and the ramp is capped however long he was out");
+    ok(A.rehabFor(60) > A.rehabFor(20), "a worse injury takes longer to shake off");
+
+    // Sharpness and its effect on a rating.
+    const fit = { r: { sht: 80 } };
+    ok(A.sharpness(fit) === 1, "a fit player is fully himself");
+    ok(A.ratingNow(fit, "sht") === 80, "and plays to his rating");
+    const rusty = { r: { sht: 80, spd: 80 }, rust: 10, rustFrom: 10, rustKey: "spd" };
+    ok(A.sharpness(rusty) < 1 && A.sharpness(rusty) > 1 - A.REHAB_DEPTH - 1e-9,
+      `a rusty player is below himself (${A.sharpness(rusty).toFixed(3)})`);
+    ok(A.ratingNow(rusty, "spd") < A.ratingNow(rusty, "sht"),
+      "and the part that was hurt comes back slowest");
+    const nearly = { r: { sht: 80, spd: 80 }, rust: 1, rustFrom: 10, rustKey: "spd" };
+    ok(A.sharpness(nearly) > A.sharpness(rusty), "sharpness climbs back as the ramp runs down");
+    ok(A.ratingNow({ r: { sht: 80 }, rust: 0 }, "sht") === 80, "and a finished ramp costs nothing");
+
+    /* In a real season it has to actually happen, and then actually end. */
+    const G = A.newGame(0, { seed: 2255, rules: { seasonLen: 82, injuries: "high" } });
+    simSeason(A, G);
+    const all = A.playersOf(G);
+    const everHurt = all.filter((p) => (p.career || []).length === 0 && p.injGames != null);
+    ok(all.some((p) => p.inj > 0) || everHurt.length > 0, "players got injured");
+    // Nobody may be left permanently rusty, and nobody rusty while still hurt.
+    ok(all.every((p) => (p.rust || 0) >= 0), "rust never goes negative");
+    ok(all.every((p) => (p.rust || 0) <= A.REHAB_MAX), "and never exceeds the cap");
+    ok(all.every((p) => !(p.inj > 0 && p.rust > 0)), "nobody is rusty while still out injured");
+    ok(all.every((p) => !p.rust || p.rustFrom >= p.rust), "the ramp never counts up past where it started");
+
+    // A rusty player must genuinely be worse — that is the whole point.
+    const sample = all.find((p) => p.pos !== "G" && p.r.sht > 40);
+    const before = A.ratingNow(sample, "sht");
+    sample.rust = 8; sample.rustFrom = 8; sample.rustKey = "sht";
+    ok(A.ratingNow(sample, "sht") < before, "a returning player plays below his rating");
+    sample.rust = 0; sample.rustFrom = 0;
+
+    // And the rollover has to wipe it, like it wipes injuries.
+    simPlayoffs(A, G);
+    A.autoDraft(G, false);
+    A.startNextSeason(G);
+    ok(A.playersOf(G).every((p) => !p.rust), "a new season starts everybody fresh");
   },
 
   // The same seed must produce the same season, or nothing above is reproducible.

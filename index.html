@@ -738,19 +738,20 @@ function pairChemistry(t, lines) {
 function lineOff(G, ids) {
   const ps = ids.map((id) => G.players[id]).filter(Boolean);
   if (!ps.length) return 1;
-  const v = ps.reduce((s, p) => s + 0.44 * p.r.sht + 0.32 * p.r.pss + 0.24 * p.r.hnd, 0) / ps.length;
+  const v = ps.reduce((s, p) => s + 0.44 * ratingNow(p, "sht") + 0.32 * ratingNow(p, "pss")
+    + 0.24 * ratingNow(p, "hnd"), 0) / ps.length;
   return 0.55 + v / 110;
 }
 function unitDef(G, fIds, dIds) {
   const ps = fIds.concat(dIds).map((id) => G.players[id]).filter(Boolean);
   if (!ps.length) return 1;
-  const v = ps.reduce((s, p) => s + 0.7 * p.r.dfn + 0.3 * p.r.spd, 0) / ps.length;
+  const v = ps.reduce((s, p) => s + 0.7 * ratingNow(p, "dfn") + 0.3 * ratingNow(p, "spd"), 0) / ps.length;
   return 0.55 + v / 110;
 }
 function goalieQuality(G, id) {
   const g = G.players[id];
   if (!g) return 0.9;
-  return 0.42 * g.r.rfx + 0.4 * g.r.pos + 0.18 * g.r.reb;
+  return 0.42 * ratingNow(g, "rfx") + 0.4 * ratingNow(g, "pos") + 0.18 * ratingNow(g, "reb");
 }
 function teamStrength(G, teamId) {
   const r = rosterOf(G, teamId).slice().sort((a, b) => b.ovr - a.ovr);
@@ -1161,7 +1162,7 @@ function shooterFrom(G, ids, dBias) {
   const bias = dBias == null ? 0.55 : dBias;
   // The exponent sets how concentrated scoring is. At 1.6 the league produced
   // 76-goal seasons, which the NHL has not seen since 1988.
-  const wts = ps.map((p) => Math.pow(Math.max(1, p.r.sht * 0.7 + p.r.hnd * 0.3 - 20), 1.42) * (p.pos === "D" ? bias : 1));
+  const wts = ps.map((p) => Math.pow(Math.max(1, ratingNow(p, "sht") * 0.7 + ratingNow(p, "hnd") * 0.3 - 20), 1.42) * (p.pos === "D" ? bias : 1));
   const tot = wts.reduce((a, b) => a + b, 0);
   let x = rnd(G) * tot;
   for (let i = 0; i < ps.length; i++) { x -= wts[i]; if (x <= 0) return ps[i]; }
@@ -1714,6 +1715,10 @@ function applyGame(G, res, opts) {
       // eventually forces the backup into the net. For skaters it's minutes
       // above a normal night that wear them down; a fourth-liner recovers.
       p.fatigue = clamp(p.fatigue + (p.pos === "G" ? 14 : (s.toi - 12) / 60 * 10), 0, 100);
+      // Rust burns off by PLAYING, not by the calendar turning over — a man
+      // sitting in the press box gets no closer to being himself.
+      if (p.rust > 0 && !opts.playoff) { p.rust--; if (p.rust === 0) p.rustFrom = 0; }
+      else if (p.rust > 0) p.rust--;
     });
   });
 
@@ -1775,10 +1780,51 @@ function recordLogs(G, res, opts) {
   return G;
 }
 
+/* Injuries carry a KIND as well as a length, because they don't all cost the
+   same thing on the way back: a knee takes a skater's legs, a shoulder takes
+   his shot, a concussion takes everything for a while. The fourth field names
+   the rating the rehab bites hardest. */
 const INJURIES = [
-  ["upper body", 3, 12], ["lower body", 4, 16], ["groin", 6, 22], ["concussion", 10, 40],
-  ["shoulder", 12, 45], ["knee", 20, 70], ["broken hand", 14, 35], ["ankle", 8, 26],
+  ["upper body", 3, 12, "hnd"], ["lower body", 4, 16, "spd"], ["groin", 6, 22, "spd"],
+  ["concussion", 10, 40, null], ["shoulder", 12, 45, "sht"], ["knee", 20, 70, "spd"],
+  ["broken hand", 14, 35, "hnd"], ["ankle", 8, 26, "spd"],
 ];
+
+/* Coming back is not a switch. A player who has missed two months is in the
+   lineup before he is himself again, and the fortnight where he looks a step
+   off is part of the cost of the injury — it used to vanish the instant the
+   counter hit zero.
+
+   `p.rust` counts the GAMES of that ramp, not days, so it ticks with the same
+   clock injuries do. Effectiveness climbs back linearly across it. */
+const REHAB_MIN_GAMES = 8;      // shorter than this and he just plays
+const REHAB_RATIO = 0.42;       // rehab length as a share of time missed
+const REHAB_MAX = 22;
+/* How far below himself he starts. Keep this SMALL: it applies to every
+   rating a rusty player has, so it moves league-wide rates too — at 0.16 the
+   league's save percentage fell almost a full point because returning goalies
+   dragged the average down. */
+const REHAB_DEPTH = 0.07;
+function rehabFor(games) {
+  return games < REHAB_MIN_GAMES ? 0 : Math.min(REHAB_MAX, Math.round(games * REHAB_RATIO));
+}
+/* How much of himself he is right now, 0.84–1. Everything that reads a rating
+   in the engine goes through this, so a rusty player is worse in every phase
+   rather than only on the scoresheet. (Not `formOf` — that name is already the
+   hot/cold scoring flag, which is a different idea entirely.) */
+function sharpness(p) {
+  if (!p || !p.rust || p.rust <= 0) return 1;
+  const span = Math.max(1, p.rustFrom || p.rust);
+  return 1 - REHAB_DEPTH * (p.rust / span);
+}
+// A rating as it plays TODAY, which is what the sim should ever ask for.
+function ratingNow(p, key) {
+  const base = (p.r && p.r[key]) || 0;
+  if (!p.rust || p.rust <= 0) return base;
+  // The hurt part comes back slowest.
+  const bite = p.rustKey === key ? 1.6 : 1;
+  return base * (1 - (1 - sharpness(p)) * bite);
+}
 function rollInjuries(G, res) {
   const R = rules(G);
   const mult = ({ low: 0.55, normal: 1, high: 1.6 })[R.injuries] * diff(G).injury;
@@ -1787,9 +1833,12 @@ function rollInjuries(G, res) {
       if (p.inj > 0) return;
       const risk = 0.0022 * mult * (1 + (70 - p.r.dur) / 90) * (1 + p.fatigue / 240);
       if (rnd(G) < risk) {
-        const [desc, lo, hi] = pick(G, INJURIES);
+        const [desc, lo, hi, hurts] = pick(G, INJURIES);
         p.inj = ri(G, lo, hi);
         p.injDesc = desc;
+        p.rustKey = hurts;
+        p.injGames = p.inj;
+        p.rust = 0; p.rustFrom = 0;
         if (tid === G.userTeam) news(G, `${fullName(p)} is out ~${p.inj} games (${desc}).`, "bad");
         G.teams[tid].lines = null;
       }
@@ -1839,7 +1888,18 @@ function simDay(G) {
   playersOf(G).forEach((p) => {
     if (p.inj > 0 && p.teamId != null && playedToday.has(p.teamId)) {
       p.inj--;
-      if (p.inj === 0) { p.injDesc = ""; G.teams[p.teamId].lines = null; }
+      if (p.inj === 0) {
+        // He's available again, but a long absence leaves a ramp behind it.
+        const back = rehabFor(p.injGames || 0);
+        if (back > 0) {
+          p.rust = back; p.rustFrom = back;
+          if (p.teamId === G.userTeam) {
+            news(G, `${fullName(p)} is back, and will need a few weeks to look himself again.`, "info");
+          }
+        }
+        p.injDesc = ""; p.injGames = 0;
+        G.teams[p.teamId].lines = null;
+      }
     }
     p.fatigue = clamp(p.fatigue - (p.pos === "G" ? 4.2 : 0.8), 0, 100);
   });
@@ -2288,7 +2348,9 @@ function finishSeason(G) {
     p.po = null;
     p.rookie = false;
     p.age++;
+    // A summer is long enough to heal anything and shake off any rust.
     p.inj = 0; p.injDesc = ""; p.fatigue = 0;
+    p.rust = 0; p.rustFrom = 0; p.rustKey = null; p.injGames = 0;
     progress(G, p);
     if (p.contract.yrs > 0) p.contract.yrs--;
   });
@@ -4418,7 +4480,11 @@ function PlayerModal({ G, pid, onClose, onGo }) {
             <Stat label="Overall" value={p.ovr} sub={`ceiling ${p.pot}`} />
             <Stat label="Age" value={p.age} sub={t ? `${t.city} ${t.name}` : "free agent"} />
             <Stat label="Cap hit" value={`$${effectiveCap(G, p)}M`} sub={`${p.contract.yrs} yr${p.contract.yrs === 1 ? "" : "s"} left`} />
-            <Stat label="Condition" value={`${Math.round(100 - p.fatigue)}%`} sub={p.farm ? "on the farm" : "on the roster"} />
+            <Stat label="Condition" value={`${Math.round(100 - p.fatigue)}%`}
+              sub={p.inj > 0 ? `${p.injDesc}, ${p.inj} games`
+                : p.rust > 0 ? `back, ${p.rust} games to full sharpness`
+                : p.farm ? "on the farm" : "on the roster"}
+              tone={p.inj > 0 ? "text-rose-400" : p.rust > 0 ? "text-amber-300" : ""} />
           </div>
           <Section title="Ratings"
             right={p.pos !== "G" ? <span className="text-xs text-sky-300">{roleOf(p).label}</span> : null}
@@ -5161,6 +5227,9 @@ function RosterTab({ G, setG, openPlayer, notify }) {
       cell: (p) => (
         <span className="whitespace-nowrap">
           {fullName(p)}
+          {p.inj <= 0 && p.rust > 0
+            ? <span className="ml-1 text-[10px] text-amber-400" title={`Back from injury — ${p.rust} games to full sharpness`}>rusty</span>
+            : null}
           <HotCold G={G} p={p} />
           {hasNtc(p) ? <span className="ml-1.5 text-[10px] text-amber-300" title="no-trade clause">NTC</span> : null}
           {p.inj > 0 ? <span className="ml-1.5 text-[10px] text-rose-400">INJ {p.inj}</span> : null}
