@@ -218,6 +218,30 @@ lie that nothing in the UI would reveal.
 ## Contracts
 - **Demotion is free.** Moving a player between your own NHL roster and your own farm exposes him
   to nobody. Waivers used to gate this and made shuffling depth a gamble.
+- **Cutting is not the same as releasing, and conflating them jammed the whole league.** Waivers
+  are the right process for a player somebody else might want; they are the wrong one for the
+  bottom of an organisation. `terminateContract` ends a contract at or under `TERMINATE_MAX_CAP`
+  (1.6× the minimum) outright — no wire, the roster spot is free immediately, which is the point
+  when the reason you're cutting is that you have no room. It is deliberately limited to fringe
+  money: this clears out depth, it is not an escape hatch from a bad long-term deal. **In season
+  it costs the same third of salary a release does; at the rollover it costs nothing** (the roster
+  is being rebuilt anyway, and otherwise thirty-two clubs would accrue dead money every year for
+  ordinary housekeeping).
+- **`enforceRosterLimits` is the AI's release mechanism as well as the clean-up.** `ROSTER_MAX`
+  and `FARM_MAX` were both declared and only the farm one was ever enforced. Surplus on the
+  dressed roster reports to the farm, surplus in the ORGANISATION is released worst-first.
+  **Measured before this existed: 31 of 32 clubs sat at or past the 35-man org limit from year
+  two, some at 39, and `dead` releases league-wide over ten seasons were exactly zero** — seven
+  draftees a year arrive on three-year deals and nothing ever let them go, so fringe players stayed
+  frozen on depth charts for their whole entry deal and no club could sign anyone. Afterwards orgs
+  settle at ~31.6 with none at the limit. It runs at `finishSeason` and again at the END of
+  `startNextSeason` — after `aiFreeAgency` and `fillRosters`, because both add players and the
+  draft has just added seven more. **Demotion is position-aware** (`DRESS_MIN`, shared with
+  `fillRosters`): sorting on rating alone sends a club's second goaltender down, `fillRosters`
+  calls him straight back up, and the two undo each other every rollover.
+- `capFreeAgentPool` is split out of `finishSeason` so it can run after enforcement too —
+  otherwise the surplus of thirty-two organisations sat in the pool all season (it cost 0.12 MB
+  of save size).
 - **Waivers are for RELEASES.** `releasePlayer` puts him on the wire; another club can claim him
   and take the contract. If he clears he becomes a free agent and the club carries
   `RELEASE_DEAD_PCT` (a third) of his salary as dead cap for the remaining term.
@@ -238,8 +262,9 @@ lie that nothing in the UI would reveal.
   — and since a signed player never enters the free-agent pool, he also never hit `FA_POOL_MAX`,
   so eight seasons put ~500 extra bodies in the save. The harness pins that clubs keep the better
   players and let the older ones walk.
-- `FARM_MAX` was declared but never enforced; farms drifted past sixteen. `finishSeason` now trims
-  each org to its best twelve and sends the rest to the market.
+- `FARM_MAX` was declared but never enforced; farms drifted past sixteen. `enforceRosterLimits`
+  now trims each org to its best twelve on the farm and twenty-three above it, and sends the rest
+  to the market.
 - **`p.stats` carries no `z`/`net` buckets.** Last season's shot maps are never rendered, and
   keeping nine net cells plus three zones on every player in the league cost ~0.3 MB. `migrate`
   strips them from old saves. Only `p.season` is live.

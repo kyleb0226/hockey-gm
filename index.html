@@ -2868,35 +2868,13 @@ function finishSeason(G) {
      retirement, so the free-agent list grows without bound whatever the quality
      bar. Everyone who can't get a contract eventually leaves the sport; here
      the ones with nothing on their record leave first. */
-  /* FARM_MAX was declared but never actually enforced — nothing stopped a club
-     from stockpiling prospects it would never dress. It only became visible
-     once clubs started re-signing their own players: farms drifted to sixteen
-     apiece and every one of those contracts was shielded from the pool cap
-     below, which only ever reached players nobody had signed. A club now keeps
-     its best twelve and lets the rest go to the market like anyone else. */
-  G.teams.forEach((t) => {
-    const farm = rosterOf(G, t.id, true).filter((p) => p.farm && !p.retired);
-    if (farm.length <= FARM_MAX) return;
-    farm.sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5))
-      .slice(FARM_MAX).forEach((p) => {
-        p.teamId = null; p.farm = false;
-        if (!G.freeAgents.includes(p.id)) G.freeAgents.push(p.id);
-      });
-    t.lines = null;
-  });
+  /* Neither limit was enforced — nothing stopped a club stockpiling prospects
+     it would never dress, and nothing counted the dressed side at all. A club
+     now keeps its best twelve on the farm, its best twenty-three above it, and
+     lets the rest go to the market like anyone else. */
+  enforceRosterLimits(G);
 
-  if (G.freeAgents.length > FA_POOL_MAX) {
-    const ranked = G.freeAgents.map((id) => G.players[id]).filter(Boolean)
-      .sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5));
-    ranked.slice(FA_POOL_MAX).forEach((p) => {
-      // A career worth remembering buys a place in the record; a dozen games
-      // eight years ago does not.
-      const games = (p.career || []).reduce((s, c) => s + (c.gp || 0), 0);
-      if (p.hof != null || (p.trophies || []).length || (p.rings || []).length || games >= 200) return;
-      delete G.players[p.id];
-    });
-    G.freeAgents = G.freeAgents.filter((id) => G.players[id]);
-  }
+  capFreeAgentPool(G);
 
   runHallOfFame(G);
   buildDraftClass(G);
@@ -2905,8 +2883,14 @@ function finishSeason(G) {
 
 /* Nobody should start a season unable to ice a legal lineup. After free agency
    has run its course, any club still short is topped up with depth bodies. */
+/* What a club must be able to dress. Shared, because `enforceRosterLimits`
+   sends surplus players down and `fillRosters` calls them back up — if the two
+   disagreed about the minimums they would fight each other every rollover, and
+   the club would start the season a goaltender short. */
+const DRESS_MIN = { G: 2, D: 6, C: 4, LW: 3, RW: 3 };
+
 function fillRosters(G) {
-  const need = { G: 2, D: 6, C: 4, LW: 3, RW: 3 };
+  const need = DRESS_MIN;
   G.teams.forEach((t) => {
     // The minimums are for the DRESSED roster, not the organisation. Counting
     // the farm here once left clubs with their second goalie stuck in the minors
@@ -3713,6 +3697,129 @@ function releasePlayer(G, pid) {
   return { ok: true, dead: releaseCost(G, pid), yrs: Math.max(1, p.contract.yrs) };
 }
 
+/* --------------------------- cutting a fringe man -------------------------
+ * Waivers are the right process for a player somebody else might want. They are
+ * the WRONG process for the bottom of an organisation, and that was the whole
+ * problem: seven draftees a year arrive on three-year deals, only the farm side
+ * was ever trimmed, and nothing in the league released anybody — so every club
+ * sat jammed against the roster limit holding men no one would trade for and no
+ * one would claim. Measured over ten seasons: thirty-one of thirty-two clubs at
+ * or past the org limit from year two, some at thirty-nine, and not one release
+ * league-wide in a decade.
+ *
+ * So a contract at or below `TERMINATE_MAX_CAP` can simply be ended. It is
+ * deliberately limited to fringe money — this is a way to clear out depth, not
+ * an escape hatch from a bad long-term deal, which is what waivers and the
+ * dead-cap rule are for.
+ *
+ * IN SEASON IT COSTS; AT THE ROLLOVER IT DOESN'T. Tearing up a live contract
+ * carries the same third of the salary a release does, for the rest of the
+ * term. In the offseason the roster is being rebuilt anyway and a club simply
+ * doesn't tender him — which is also what stops thirty-two clubs accumulating
+ * dead money every single year for doing their ordinary housekeeping.
+ * ------------------------------------------------------------------------- */
+const TERMINATE_MAX_CAP = round1(MIN_SALARY * 1.6);
+
+function canTerminate(G, p) {
+  return !!(p && p.teamId != null && !p.retired && !hasNtc(p)
+    && effectiveCap(G, p) <= TERMINATE_MAX_CAP);
+}
+/* The mechanical half, with no eligibility opinion of its own: off the roster,
+   into the pool. `enforceRosterLimits` uses it too. */
+function releaseToPool(G, p) {
+  const from = p.teamId;
+  p.teamId = null; p.farm = false;
+  if (!G.freeAgents.includes(p.id)) G.freeAgents.push(p.id);
+  if (from != null && G.teams[from]) G.teams[from].lines = null;
+  return from;
+}
+function terminateContract(G, pid) {
+  const p = G.players[pid];
+  if (!p) return { ok: false, why: "no such player" };
+  if (p.teamId == null) return { ok: false, why: "he isn't on a roster" };
+  if (hasNtc(p)) return { ok: false, why: "his no-trade clause protects him — ask for a waiver first" };
+  if (!canTerminate(G, p))
+    return { ok: false, why: `only contracts at $${TERMINATE_MAX_CAP}M or under can be terminated — put him on waivers instead` };
+  const from = p.teamId;
+  const inSeason = G.phase === "regular" || G.phase === "playoffs";
+  const yrs = Math.max(1, p.contract.yrs);
+  const dead = inSeason ? releaseCost(G, pid) : 0;
+  if (dead > 0) {
+    G.retained = G.retained || [];
+    G.retained.push({ pid, from, amt: dead, yrs, dead: true });
+  }
+  releaseToPool(G, p);
+  if (from === G.userTeam) {
+    news(G, dead > 0
+      ? `${fullName(p)} was released — $${dead}M dead for ${yrs} year${yrs === 1 ? "" : "s"}.`
+      : `${fullName(p)} was let go.`, "info");
+  }
+  return { ok: true, dead, yrs };
+}
+
+/* -------------------------- a legal organisation --------------------------
+ * `ROSTER_MAX` and `FARM_MAX` were both declared and only the farm one was ever
+ * enforced, so orgs drifted well past their limit — the draft adds seven a year
+ * and nothing counted the dressed side at all.
+ *
+ * Surplus on the NHL roster reports to the farm; surplus in the ORGANISATION is
+ * released, worst first. This is the AI's release mechanism as well as the
+ * clean-up: a club that can't roster a player lets him go, which is what puts
+ * fringe players back on the market instead of leaving them frozen on a depth
+ * chart for the three years of their entry deal.
+ *
+ * Demotion is position-aware. Sorting on rating alone would send a club's
+ * second goaltender down — `fillRosters` would call him straight back up, and
+ * the two would undo each other every rollover.
+ * ------------------------------------------------------------------------- */
+/* Players who can't get a contract leave the sport. Extracted so it can run
+   after `enforceRosterLimits` as well as at the rollover — enforcement puts the
+   surplus of thirty-two organisations onto the market, and without a second
+   pass the pool carried that overflow all season. */
+function capFreeAgentPool(G) {
+  if (G.freeAgents.length <= FA_POOL_MAX) return G;
+  const ranked = G.freeAgents.map((id) => G.players[id]).filter(Boolean)
+    .sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5));
+  ranked.slice(FA_POOL_MAX).forEach((p) => {
+    // A career worth remembering buys a place in the record; a dozen games
+    // eight years ago does not.
+    const games = (p.career || []).reduce((s, c) => s + (c.gp || 0), 0);
+    if (p.hof != null || (p.trophies || []).length || (p.rings || []).length || games >= 200) return;
+    delete G.players[p.id];
+  });
+  G.freeAgents = G.freeAgents.filter((id) => G.players[id]);
+  return G;
+}
+
+function enforceRosterLimits(G) {
+  G.teams.forEach((t) => {
+    const alive = () => rosterOf(G, t.id, true).filter((p) => !p.retired);
+    let moved = false;
+
+    // Too many dressed: the worst report to the farm, but never below what the
+    // club has to be able to ice.
+    const nhl = alive().filter((p) => !p.farm);
+    if (nhl.length > ROSTER_MAX) {
+      const atPos = (pos) => alive().filter((p) => !p.farm && p.pos === pos).length;
+      nhl.slice().sort((a, b) => a.ovr - b.ovr).forEach((p) => {
+        if (alive().filter((x) => !x.farm).length <= ROSTER_MAX) return;
+        if (atPos(p.pos) <= (DRESS_MIN[p.pos] || 0)) return;
+        p.farm = true; moved = true;
+      });
+    }
+
+    // Too many in the organisation: the least worth keeping are let go.
+    const farm = alive().filter((p) => p.farm);
+    if (farm.length > FARM_MAX) {
+      farm.slice().sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5))
+        .slice(FARM_MAX)
+        .forEach((p) => { releaseToPool(G, p); moved = true; });
+    }
+    if (moved) t.lines = null;
+  });
+  return G;
+}
+
 /* Re-signing your own. A club gets first refusal on a player in the last year
    of his deal, and he'd rather stay than move — that's the loyalty discount.
    Without this the only way to keep anyone was to let him hit the market and
@@ -4335,6 +4442,11 @@ function startNextSeason(G) {
   // What's left is to fill out the league and rebuild the calendar.
   aiFreeAgency(G);
   fillRosters(G);
+  /* AFTER the market and the top-ups, because both add players — the draft has
+     also just put seven more into every organisation. This is the point at
+     which the roster about to play a season has to be a legal one. */
+  enforceRosterLimits(G);
+  capFreeAgentPool(G);
   // Reset the league.
   G.teams.forEach((t) => {
     t.w = 0; t.l = 0; t.otl = 0; t.pts = 0; t.gf = 0; t.ga = 0; t.gp = 0; t.streak = 0; t.l10 = [];
@@ -6225,6 +6337,26 @@ function RosterTab({ G, setG, openPlayer, notify }) {
     notify(r.ok ? `${fullName(p)} placed on waivers for release.` : r.why);
   };
 
+  /* Ending a fringe contract outright. No waivers, so the roster spot is free
+     immediately — which is the whole point when the reason you're doing it is
+     that you have no room. */
+  const letGo = (p) => {
+    const inSeason = G.phase === "regular" || G.phase === "playoffs";
+    const cost = releaseCost(G, p.id);
+    const yrs = Math.max(1, p.contract.yrs);
+    if (!window.confirm(
+      `Cut ${fullName(p)}?\n\nHis contract ends now and he goes straight into the free-agent pool — `
+      + `no waivers, and the roster spot is free immediately.\n\n`
+      + (inSeason
+        ? `You'll carry $${cost}M in dead cap for ${yrs} more year${yrs === 1 ? "" : "s"}.`
+        : `It's the offseason, so this costs you nothing.`))) return;
+    const r = upd((g) => terminateContract(g, p.id));
+    notify(r.ok
+      ? (r.dead ? `${fullName(p)} cut — $${r.dead}M dead for ${r.yrs} year${r.yrs === 1 ? "" : "s"}.`
+                : `${fullName(p)} cut.`)
+      : r.why);
+  };
+
   // Re-signing your own. The ask is the loyalty-discounted number, so this is
   // simply "meet it" — haggling lives in the negotiation screen for free agents.
   const resign = (p, yrs) => {
@@ -6272,11 +6404,26 @@ function RosterTab({ G, setG, openPlayer, notify }) {
         {p.farm ? "Recall" : "Send down"}
       </button>
     ) },
+    /* Two different things, and conflating them is what made the bottom of a
+       roster impossible to clear. Waivers are for a player somebody else might
+       want; a fringe contract can just be ended. */
     { key: "cut", label: "", get: () => 0, cell: (p) => (
-      <button className={`${btnGhost} text-xs px-2 py-1 text-rose-300 hover:text-rose-200`}
-        onClick={(e) => { e.stopPropagation(); cut(p); }}>
-        Release
-      </button>
+      canTerminate(G, p) ? (
+        <button className={`${btnGhost} text-xs px-2 py-1 text-rose-300 hover:text-rose-200 whitespace-nowrap`}
+          title={`End his contract outright — no waivers, the spot is free straight away${
+            G.phase === "regular" || G.phase === "playoffs"
+              ? `, and you carry $${releaseCost(G, p.id)}M dead for ${Math.max(1, p.contract.yrs)} year${Math.max(1, p.contract.yrs) === 1 ? "" : "s"}`
+              : " and it costs nothing in the offseason"}`}
+          onClick={(e) => { e.stopPropagation(); letGo(p); }}>
+          Cut
+        </button>
+      ) : (
+        <button className={`${btnGhost} text-xs px-2 py-1 text-rose-300 hover:text-rose-200`}
+          title="He's paid too much to simply cut — he has to clear waivers first"
+          onClick={(e) => { e.stopPropagation(); cut(p); }}>
+          Release
+        </button>
+      )
     ) },
   ];
 

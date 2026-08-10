@@ -62,6 +62,8 @@ const EXPORTS = [
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES", "pairChemistry", "PAIR_CHEM_MAX_GAMES",
   "seasonBallots", "honoursOf", "HONOUR_MIN_GP",
+  "canTerminate", "terminateContract", "releaseToPool", "enforceRosterLimits",
+  "capFreeAgentPool", "TERMINATE_MAX_CAP", "DRESS_MIN", "FA_POOL_MAX",
   "playoffBerths", "clinchState", "shadowTable", "inFieldOf", "CLINCH_LABEL",
   "stampShares", "lineShares", "careerShares",
   "awardPool", "voteAwards", "awardTrophies", "backfillAwards", "archivedLine", "RETRO_MIN_POOL",
@@ -2740,6 +2742,83 @@ const CHECKS = {
       const top = A.confStandings(S, c).slice(0, 8);
       ok(top.every((t) => SB[t.id] && SB[t.id].in), `conference ${c}'s top eight are all in`);
     });
+  },
+
+  /* Clearing out the bottom of a roster. Measured before this existed: 31 of 32
+     clubs sat at or past the org limit from year two, some at 39, and not one
+     release happened league-wide in a decade. */
+  rosterLimits(A) {
+    section("Cutting and roster limits");
+    const G = A.newGame(0, { seed: 7373, rules: { seasonLen: 41 } });
+    const MAXORG = A.ROSTER_MAX + A.FARM_MAX;
+
+    // Only fringe money can simply be ended; a real contract needs waivers.
+    const mine = A.rosterOf(G, 0, true).filter((p) => !A.hasNtc(p));
+    const cheap = mine.filter((p) => A.effectiveCap(G, p) <= A.TERMINATE_MAX_CAP);
+    const dear = mine.filter((p) => A.effectiveCap(G, p) > A.TERMINATE_MAX_CAP);
+    ok(cheap.length > 0, `a club carries fringe contracts (${cheap.length})`);
+    ok(cheap.every((p) => A.canTerminate(G, p)), "all of which can be cut");
+    ok(dear.length > 0 && !dear.some((p) => A.canTerminate(G, p)),
+      "and no real contract can — that's what waivers are for");
+    ok(!A.terminateContract(G, dear[0].id).ok, "trying anyway is refused");
+
+    // Cutting frees the spot IMMEDIATELY. Waivers take a day, which is useless
+    // when the reason you're cutting is that you have no room.
+    const victim = cheap[0];
+    const before = A.rosterOf(G, 0, true).length;
+    const r = A.terminateContract(G, victim.id);
+    ok(r.ok, "a fringe contract can be ended");
+    ok(A.rosterOf(G, 0, true).length === before - 1, "and the roster spot is free straight away");
+    ok(victim.teamId == null && G.freeAgents.includes(victim.id), "he lands in the free-agent pool");
+    ok(!(G.waivers || []).some((w) => w.pid === victim.id), "without passing through waivers");
+    ok(!A.terminateContract(G, victim.id).ok, "and he can't be cut twice");
+
+    // In season it costs; at the rollover it doesn't.
+    A.simDays(G, 5);
+    const live = A.rosterOf(G, 0, true).filter((p) => A.canTerminate(G, p))[0];
+    const deadBefore = (G.retained || []).filter((x) => x.dead).length;
+    const capBefore = A.capHit(G, 0), ownCap = A.effectiveCap(G, live);
+    const inSeason = A.terminateContract(G, live.id);
+    ok(inSeason.ok && inSeason.dead > 0, `cutting mid-season carries dead money ($${inSeason.dead}M)`);
+    ok((G.retained || []).filter((x) => x.dead).length === deadBefore + 1, "charged to the club that cut him");
+    ok(A.retainedBy(G, 0).some((x) => x.pid === live.id && x.dead), "and it is recorded against that club");
+    /* The cap has to see it. Losing his salary but keeping a third of it means
+       the club saves exactly the other two thirds — a cut is relief, not an
+       escape. */
+    const saved = capBefore - A.capHit(G, 0);
+    ok(Math.abs(saved - (ownCap - inSeason.dead)) < 0.05,
+      `the cap saves the salary less the dead money ($${saved.toFixed(2)}M of $${ownCap}M)`);
+
+    /* The limits are ENFORCED, for everybody. The draft adds seven a year and
+       nothing used to count the dressed side at all. */
+    simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+    const orgs = G.teams.map((t) => A.rosterOf(G, t.id, true).filter((p) => !p.retired).length);
+    const dressed = G.teams.map((t) => A.rosterOf(G, t.id).filter((p) => !p.retired).length);
+    ok(Math.max(...orgs) <= MAXORG, `no organisation is over the limit (worst ${Math.max(...orgs)}/${MAXORG})`);
+    ok(Math.max(...dressed) <= A.ROSTER_MAX, `nobody dresses more than ${A.ROSTER_MAX} (worst ${Math.max(...dressed)})`);
+    ok(G.teams.every((t) => A.rosterOf(G, t.id, true).filter((p) => p.farm && !p.retired).length <= A.FARM_MAX),
+      "and no farm is over its own");
+
+    // Enforcement must not leave a club unable to ice a legal side — sorting on
+    // rating alone would send a second goaltender down.
+    Object.entries(A.DRESS_MIN).forEach(([pos, n]) => {
+      ok(G.teams.every((t) => A.rosterOf(G, t.id).filter((p) => p.pos === pos).length >= n),
+        `every club can still dress ${n} at ${pos}`);
+    });
+
+    /* And the AI actually lets people go — the whole "other teams" half. Before
+       this, `dead` releases league-wide over ten seasons was exactly zero and
+       fringe players stayed frozen on depth charts for their entire deal. */
+    for (let i = 0; i < 3; i++) {
+      simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+    }
+    ok(G.freeAgents.length > 20, `there is a real market to sign from (${G.freeAgents.length})`);
+    ok(G.freeAgents.length <= A.FA_POOL_MAX, `and it stays bounded (${G.freeAgents.length}/${A.FA_POOL_MAX})`);
+    const stillOver = G.teams.filter((t) => A.rosterOf(G, t.id, true).filter((p) => !p.retired).length > MAXORG);
+    ok(!stillOver.length, "no club drifts past the limit over several seasons");
+    // Room to move: a jammed league can't sign anybody.
+    const withRoom = G.teams.filter((t) => A.rosterOf(G, t.id, true).filter((p) => !p.retired).length < MAXORG);
+    ok(withRoom.length >= 24, `most clubs have room to sign somebody (${withRoom.length}/32)`);
   },
 
   /* Names carrying their honours. The marks are only worth anything if they
