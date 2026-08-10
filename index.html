@@ -5222,6 +5222,7 @@ function PlayerModal({ G, pid, onClose, onGo }) {
     <Modal wide title={
       <span className="flex items-center gap-2">
         <PosBadge pos={p.pos} /> {fullName(p)}
+        <HonourMark G={G} p={p} />
         {hasNtc(p) ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900 text-amber-200">NTC</span> : null}
         {p.inj > 0 ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-900 text-rose-200">INJ {p.inj}</span> : null}
       </span>
@@ -5897,7 +5898,7 @@ function HomeTab({ G, setG, go, openPlayer }) {
               {leaders.map((p) => (
                 <div key={p.id} className="text-sm flex justify-between py-0.5 cursor-pointer hover:text-sky-300"
                   onClick={() => openPlayer(p.id)}>
-                  <span>{shortName(p)}</span>
+                  <span>{shortName(p)}<HonourMark G={G} p={p} /></span>
                   <span className="tnum text-slate-400">{p.season.g}G {p.season.a}A · {pts(p.season)}</span>
                 </div>
               ))}
@@ -5929,6 +5930,86 @@ function formOf(G, p) {
   if (!p.season.gp) return 0;
   return pts(p.season) / p.season.gp;
 }
+/* -------------------------------- honours ---------------------------------
+ * A name on a table is just a name. These marks say, wherever the player turns
+ * up, that the league is currently arguing about him: a filled star for a
+ * trophy won, a hollow one for a place on a ballot, and a chip for an All-Star
+ * selection.
+ *
+ * THE BALLOTS ARE COMPUTED LIVE DURING THE SEASON. Awards are only decided at
+ * `endRegularSeason`, so keying this off `G.awards` alone would mean the marks
+ * appeared the moment they stopped being interesting — the whole point is to
+ * see who is in the running in February. `voteAwards` is pure (no `rnd`, no
+ * mutation), so running it from a render is safe; it is the SAME function that
+ * decides the real thing in April, so a name marked as leading the Hart is
+ * leading the actual Hart ballot, not a lookalike.
+ *
+ * Cached in a WeakMap keyed on `G` itself. Every state change replaces `G` with
+ * a fresh deep clone, so the cache invalidates on its own and can never serve a
+ * stale ballot — and one pass over the league is shared by every row on screen
+ * instead of being redone per name.
+ * ------------------------------------------------------------------------- */
+const BALLOT_CACHE = new WeakMap();
+const HONOUR_MIN_GP = 20;   // before this a "leader" is just whoever started hot
+
+function seasonBallots(G) {
+  // Once the vote is real, it IS the answer.
+  if (G.awards && G.awards.votes) return { votes: G.awards.votes, winners: G.awards, live: false };
+  if (!G.teams.some((t) => (t.gp || 0) >= HONOUR_MIN_GP)) return null;
+  const hit = BALLOT_CACHE.get(G);
+  if (hit !== undefined) return hit;
+  let out = null;
+  try {
+    const A = voteAwards(G, awardPool(G), G.year);
+    out = { votes: A.votes, winners: A, live: true };
+  } catch (e) { out = null; }
+  BALLOT_CACHE.set(G, out);
+  return out;
+}
+
+/* What this player is up for, right now. Returns null when there's nothing to
+   say, so callers can render nothing without a wrapper. */
+function honoursOf(G, p) {
+  if (!p || p.retired) return null;
+  const B = seasonBallots(G);
+  const won = [], up = [];
+  if (B) {
+    Object.entries(B.votes || {}).forEach(([k, rows]) => {
+      if (!rows.some((v) => v.id === p.id)) return;
+      if (B.winners[k] === p.id) won.push(k); else up.push(k);
+    });
+  }
+  const allStar = (p.allStars || []).includes(G.year);
+  if (!won.length && !up.length && !allStar) return null;
+  return { won, up, allStar, live: !!(B && B.live) };
+}
+
+function HonourMark({ G, p }) {
+  const h = honoursOf(G, p);
+  if (!h) return null;
+  const name = (k) => AWARD_LABEL[k] || k;
+  return (
+    <>
+      {h.won.length ? (
+        <span className="ml-1 text-[10px] text-amber-300"
+          title={`${h.live ? "leading" : "won"}: ${h.won.map(name).join(", ")}`}>
+          ★{h.won.length > 1 ? h.won.length : ""}
+        </span>
+      ) : null}
+      {h.up.length ? (
+        <span className="ml-1 text-[10px] text-sky-400"
+          title={`${h.live ? "in the running" : "on the ballot"}: ${h.up.map(name).join(", ")}`}>
+          ☆{h.up.length > 1 ? h.up.length : ""}
+        </span>
+      ) : null}
+      {h.allStar ? (
+        <span className="ml-1 text-[9px] px-1 rounded bg-sky-500/20 text-sky-300 align-middle"
+          title={`All-Star, ${G.year}`}>AS</span>
+      ) : null}
+    </>
+  );
+}
+
 function HotCold({ G, p }) {
   const rate = formOf(G, p);
   if (!p.season.gp || p.season.gp < 5) return null;
@@ -6163,6 +6244,7 @@ function RosterTab({ G, setG, openPlayer, notify }) {
             ? <span className="ml-1 text-[10px] text-amber-400" title={`Back from injury — ${p.rust} games to full sharpness`}>rusty</span>
             : null}
           <HotCold G={G} p={p} />
+          <HonourMark G={G} p={p} />
           {hasNtc(p) ? <span className="ml-1.5 text-[10px] text-amber-300" title="no-trade clause">NTC</span> : null}
           {p.inj > 0 ? <span className="ml-1.5 text-[10px] text-rose-400">INJ {p.inj}</span> : null}
           {(G.waivers || []).some((w) => w.pid === p.id) ? <span className="ml-1.5 text-[10px] text-sky-300">on waivers</span> : null}
@@ -6677,7 +6759,9 @@ function StatsTab({ G, openPlayer }) {
       </span>
     );
   };
-  const nameCell = (p) => <span className="whitespace-nowrap">{fullName(p)}<HotCold G={G} p={p} /></span>;
+  const nameCell = (p) => (
+    <span className="whitespace-nowrap">{fullName(p)}<HotCold G={G} p={p} /><HonourMark G={G} p={p} /></span>
+  );
 
   /* Computed ONCE per render, not per cell. `pointShares` was already being
      called inside a sort comparator over every skater in the league; three

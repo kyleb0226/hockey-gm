@@ -61,6 +61,7 @@ const EXPORTS = [
   "scoutBand", "scoutLabel", "draftValue", "SCOUT_POINTS",
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES", "pairChemistry", "PAIR_CHEM_MAX_GAMES",
+  "seasonBallots", "honoursOf", "HONOUR_MIN_GP",
   "playoffBerths", "clinchState", "shadowTable", "inFieldOf", "CLINCH_LABEL",
   "stampShares", "lineShares", "careerShares",
   "awardPool", "voteAwards", "awardTrophies", "backfillAwards", "archivedLine", "RETRO_MIN_POOL",
@@ -2739,6 +2740,63 @@ const CHECKS = {
       const top = A.confStandings(S, c).slice(0, 8);
       ok(top.every((t) => SB[t.id] && SB[t.id].in), `conference ${c}'s top eight are all in`);
     });
+  },
+
+  /* Names carrying their honours. The marks are only worth anything if they
+     say the same thing the awards screen says. */
+  honours(A) {
+    section("Honour marks");
+    const G = A.newGame(0, { seed: 5544, rules: { seasonLen: 82 } });
+    ok(!A.seasonBallots(G), "nothing is claimed before a season has been played");
+    ok(!A.playersOf(G).some((p) => A.honoursOf(G, p)), "and no name is marked");
+
+    // Mid-season: a live ballot, from the same function that decides the real one.
+    A.simDays(G, Math.floor(G.schedule.length * 0.6));
+    const live = A.seasonBallots(G);
+    ok(live && live.live, "a live ballot appears once there are games to judge");
+    ok(Object.keys(live.votes).length === 6, "covering all six awards");
+    const marked = A.playersOf(G).filter((p) => A.honoursOf(G, p));
+    ok(marked.length > 0 && marked.length < 60, `a handful of names are marked (${marked.length})`);
+
+    /* A mark has to mean what it says. Everyone shown as leading must actually
+       top his ballot; everyone shown as in the running must be on one. */
+    const wrongWin = marked.filter((p) => {
+      const h = A.honoursOf(G, p);
+      return h.won.some((k) => live.winners[k] !== p.id);
+    });
+    const wrongUp = marked.filter((p) => {
+      const h = A.honoursOf(G, p);
+      return h.up.some((k) => !live.votes[k].some((v) => v.id === p.id));
+    });
+    ok(!wrongWin.length, "nobody is shown leading an award he isn't leading");
+    ok(!wrongUp.length, "and nobody is on a ballot he isn't on");
+    ok(marked.every((p) => { const h = A.honoursOf(G, p); return !h.won.some((k) => h.up.includes(k)); }),
+      "no award is both won and merely nominated");
+
+    // The All-Star break marks its selections, and only for this season.
+    const stars = A.playersOf(G).filter((p) => (p.allStars || []).includes(G.year));
+    if (stars.length) {
+      ok(stars.every((p) => A.honoursOf(G, p) && A.honoursOf(G, p).allStar),
+        `every All-Star is marked (${stars.length})`);
+    } else ok(true, "the break hasn't come round yet");
+
+    /* Once the vote is real it REPLACES the projection — the marks must follow
+       the awards screen, not a stale estimate. */
+    simSeason(A, G);
+    const final = A.seasonBallots(G);
+    ok(final && !final.live, "a decided season stops projecting");
+    ok(final.votes === G.awards.votes, "and reads the real ballot");
+    const champ = G.players[G.awards.mvp];
+    ok(A.honoursOf(G, champ).won.includes("mvp"), "the MVP's name carries the trophy");
+    const runnerUp = G.players[G.awards.votes.mvp[1].id];
+    const rh = A.honoursOf(G, runnerUp);
+    ok(rh && rh.up.includes("mvp") && !rh.won.includes("mvp"), "and the runner-up carries the nomination");
+
+    // Last year's honours must not follow a player into a new season.
+    while (G.phase === "playoffs") A.simPlayoffRound(G);
+    A.autoDraft(G, false); A.startNextSeason(G);
+    ok(!A.seasonBallots(G), "a new season starts with nothing claimed");
+    ok(!A.honoursOf(G, champ), "last year's MVP is no longer marked");
   },
 
   /* Clinching. A guarantee that turns out to be wrong is worse than no

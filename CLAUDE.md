@@ -336,6 +336,19 @@ is refused below `RETRO_MIN_POOL` surviving skaters — `pruneSave` eventually c
 old players, and electing an MVP from forty survivors is an invention, not a record. Rebuilt years
 are flagged `h.retroAwards`.
 
+**Honour marks follow the name, and the ballots run LIVE.** `honoursOf(G, p)` / `HonourMark` put a
+filled amber star (leading or won), a hollow blue star (on the ballot) and an `AS` chip wherever a
+player is listed — stats leaderboards, the roster, the player modal, the Home scoring list. Keying
+this off `G.awards` alone would mean the marks appeared the moment they stopped being interesting,
+since awards are only decided at `endRegularSeason`; instead `seasonBallots` runs `voteAwards`
+itself during the season, so you can see who is in the running in February. That is safe because
+`voteAwards` is pure — no `rnd`, no mutation — and it is the SAME function that decides the real
+thing in April, so a name marked as leading the Hart leads the actual Hart ballot. Once the real
+vote exists it replaces the projection. Cached in a WeakMap keyed on `G`: every state change
+replaces `G` with a fresh clone, so the cache invalidates itself and one pass over the league is
+shared by every row on screen. Nothing is marked below `HONOUR_MIN_GP`, where a "leader" is just
+whoever started hot.
+
 **A counting title is not a vote.** `ballot` stores `val` (the raw score) beside `share`. The
 scoring and goal-scoring titles render `val` with bars scaled to the leader; the Hart, Norris,
 Vezina and Calder render the share as a percentage. Printing "31% of the vote" next to a man who
