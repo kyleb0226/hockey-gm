@@ -61,6 +61,13 @@ const EXPORTS = [
   "scoutBand", "scoutLabel", "draftValue", "SCOUT_POINTS",
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES", "pairChemistry", "PAIR_CHEM_MAX_GAMES",
+  "playoffBerths", "clinchState", "shadowTable", "inFieldOf", "CLINCH_LABEL",
+  "stampShares", "lineShares", "careerShares",
+  "awardPool", "voteAwards", "awardTrophies", "backfillAwards", "archivedLine", "RETRO_MIN_POOL",
+  "pickSlot", "pickLabel", "pickValue", "farmFixtures", "FARM_LOG_MAX",
+  "extendEarlyYears", "EXTEND_EARLY_MAX", "EXTEND_EARLY_PREMIUM", "EXTEND_TERM_MAX",
+  "draftOrderRows", "draftOnePick", "draftProjection", "starList", "toggleStar", "autoPickFor",
+  "resultFor", "PICK_ROUNDS",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -2086,12 +2093,31 @@ const CHECKS = {
     const mine = A.rosterOf(G, 0);
     const short = mine.find((p) => p.contract.yrs <= 1) || mine[0];
     short.contract.yrs = 1;
-    const locked = mine.find((p) => p.contract.yrs >= 3);
 
     ok(A.canExtend(G, short), "a player in the last year of his deal can be extended");
-    ok(!locked || !A.canExtend(G, locked), "one with years left cannot");
-    ok(!A.extendPlayer(G, locked ? locked.id : short.id, 99, 3).ok || !locked,
-      "and trying anyway is refused");
+
+    /* Extending EARLY. The window is `EXTEND_EARLY_MAX` years, and a player is
+       paid a premium for every year of a signed deal he's asked to tear up —
+       so the same term costs strictly more the earlier you buy it. */
+    const early = mine.find((p) => p.id !== short.id) || mine[1];
+    early.contract.yrs = A.EXTEND_EARLY_MAX;
+    ok(A.canExtend(G, early), `a player with ${A.EXTEND_EARLY_MAX} years left can be extended early`);
+    ok(A.extendEarlyYears(early) === A.EXTEND_EARLY_MAX - 1, "and the premium counts the years he gives up");
+    early.contract.yrs = A.EXTEND_EARLY_MAX + 1;
+    ok(!A.canExtend(G, early), "but not one with more than that to run");
+    ok(!A.extendPlayer(G, early.id, 99, 6).ok, "and trying anyway is refused");
+
+    // Same man, same term, priced from two different points in his deal.
+    early.contract.yrs = 1;
+    const lateAsk = A.extensionAsk(G, early.id, 0, 6);
+    early.contract.yrs = 3;
+    const earlyAsk = A.extensionAsk(G, early.id, 0, 6);
+    ok(earlyAsk > lateAsk, `signing him early costs more ($${earlyAsk}M vs $${lateAsk}M)`);
+    ok(!A.extendPlayer(G, early.id, 99, 2).ok, "a term shorter than his remaining deal is refused");
+    ok(!A.extendPlayer(G, early.id, 99, A.EXTEND_TERM_MAX + 1).ok, "and so is one past the term limit");
+    const addOn = A.extendPlayer(G, early.id, earlyAsk, 6);
+    ok(addOn.ok && addOn.added === 3, `extending adds the new years on top (${addOn.added} added)`);
+    ok(early.contract.yrs === 6, "and the deal now runs the full term");
 
     // Loyalty: staying costs a shade less than signing him off the market.
     const ask = A.extensionAsk(G, short.id, 0, 3);
@@ -2674,6 +2700,415 @@ const CHECKS = {
   },
 
   // The same seed must produce the same season, or nothing above is reproducible.
+  /* Where the playoff cutoff is. The standings knew who was in the field all
+     along; nothing said so, which made the one number anybody reads during a
+     season invisible. */
+  playoffLine(A) {
+    section("The playoff line");
+    const G = A.newGame(0, { seed: 7711, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const B = A.playoffBerths(G);
+    const inField = Object.keys(B).filter((k) => B[k].in);
+    ok(inField.length === 16, `sixteen clubs hold a berth (${inField.length})`);
+
+    // It must agree with the bracket that actually gets built.
+    A.buildBracket(G);
+    const bracket = new Set();
+    G.playoffs.rounds[0].forEach((s) => { bracket.add(s.hi); bracket.add(s.lo); });
+    ok(inField.every((id) => bracket.has(+id)), "and they are exactly the clubs in the bracket");
+    ok(inField.length === bracket.size, "with nobody in one and not the other");
+
+    // Exactly one cutoff per conference in each format, and one club next in line.
+    ok(Object.values(B).filter((b) => b.firstOut).length === 2, "each conference has a first club out");
+    ok(Object.values(B).filter((b) => b.in && b.wildcard).length === 4, "and four wildcards across the league");
+    const outs = Object.keys(B).filter((k) => !B[k].in);
+    ok(outs.every((id) => !bracket.has(+id)), "nobody outside the line made the bracket");
+
+    // A club out of the field must never be ahead of one in it, in its own conference.
+    const bad = G.teams.filter((t) => B[t.id] && B[t.id].in
+      && G.teams.some((u) => u.conf === t.conf && B[u.id] && !B[u.id].in && u.pts > t.pts + 6));
+    ok(bad.length <= 4, `the line broadly follows the table (${bad.length} division winners carried in)`);
+
+    // Seeded format: a plain 1-8, no wildcards at all.
+    const S = A.newGame(0, { seed: 7711, rules: { seasonLen: 41, playoffFormat: "seeded" } });
+    simSeason(A, S);
+    const SB = A.playoffBerths(S);
+    ok(Object.values(SB).filter((b) => b.in).length === 16, "the seeded format fields sixteen too");
+    ok(!Object.values(SB).some((b) => b.wildcard), "and has no wildcards");
+    [0, 1].forEach((c) => {
+      const top = A.confStandings(S, c).slice(0, 8);
+      ok(top.every((t) => SB[t.id] && SB[t.id].in), `conference ${c}'s top eight are all in`);
+    });
+  },
+
+  /* Clinching. A guarantee that turns out to be wrong is worse than no
+     guarantee, so this pins that the marks never lie. */
+  clinching(A) {
+    section("Clinching");
+    const G = A.newGame(0, { seed: 2468, rules: { seasonLen: 82 } });
+    ok(!Object.keys(A.clinchState(G)).length, "nothing is clinched before a game is played");
+
+    // Three quarters of the way in: some clubs are safe, some are done.
+    A.simDays(G, Math.floor(G.schedule.length * 0.88));
+    const C = A.clinchState(G);
+    ok(Object.keys(C).length === G.teams.length, "every club has a verdict late on");
+    const marked = G.teams.filter((t) => C[t.id].mark);
+    const dead = G.teams.filter((t) => C[t.id].eliminated);
+    ok(marked.length > 0, `somebody has clinched (${marked.length})`);
+    ok(dead.length > 0, `and somebody is out (${dead.length})`);
+    ok(!G.teams.some((t) => C[t.id].mark && C[t.id].eliminated), "nobody is both safe and eliminated");
+
+    /* The claims have to survive the season actually finishing. This is the
+       whole check: a club told it had clinched must be in the real bracket, and
+       a club told it was eliminated must not be. */
+    const promised = marked.map((t) => t.id);
+    const written = dead.map((t) => t.id);
+    const div = marked.filter((t) => C[t.id].mark === "z").map((t) => t.id);
+    const top3 = marked.filter((t) => ["z", "y"].includes(C[t.id].mark)).map((t) => t.id);
+    A.simDays(G, G.schedule.length + 2);
+    A.buildBracket(G);
+    const field = new Set();
+    G.playoffs.rounds[0].forEach((s) => { field.add(s.hi); field.add(s.lo); });
+    ok(promised.every((id) => field.has(id)), "every club told it had clinched made the field");
+    ok(!written.some((id) => field.has(id)), "and no club told it was eliminated got in");
+
+    // The sharper claims have to hold too.
+    const B = A.playoffBerths(G);
+    ok(top3.every((id) => B[id] && B[id].in && !B[id].wildcard),
+      "a top-three claim did not end up needing a wildcard");
+    ok(div.every((id) => A.divStandings(G, G.teams[id].div)[0].id === id),
+      "and a division claim won the division");
+
+    // Once every game is played there is nothing left to promise.
+    ok(!Object.keys(A.clinchState(G)).length, "a finished season clinches nothing");
+
+    // The seeded format has no divisions to win, so it never says so.
+    const S = A.newGame(0, { seed: 2468, rules: { seasonLen: 82, playoffFormat: "seeded" } });
+    A.simDays(S, Math.floor(S.schedule.length * 0.9));
+    const SC = A.clinchState(S);
+    ok(!Object.values(SC).some((c) => c.mark === "z" || c.mark === "y"),
+      "seeded standings only ever claim a berth");
+    const sPromised = S.teams.filter((t) => SC[t.id].mark).map((t) => t.id);
+    A.simDays(S, S.schedule.length + 2);
+    const SB = A.playoffBerths(S);
+    ok(sPromised.every((id) => SB[id] && SB[id].in), "and that claim holds up there too");
+  },
+
+  /* Point shares kept for good. They were a live calculation that vanished at
+     the rollover, so a twenty-year career had no record of them. */
+  careerShares(A) {
+    section("Point shares in the record");
+    const G = A.newGame(0, { seed: 5150, rules: { seasonLen: 41 } });
+    simSeason(A, G); simPlayoffs(A, G);
+    const withRows = A.playersOf(G).filter((p) => (p.career || []).some((c) => c.gp));
+    ok(withRows.length > 300, `seasons were archived (${withRows.length} players)`);
+
+    const skaters = withRows.filter((p) => p.pos !== "G");
+    const goalies = withRows.filter((p) => p.pos === "G");
+    ok(skaters.some((p) => p.career.some((c) => c.ops || c.dps)), "a skater's row carries offensive and defensive shares");
+    ok(goalies.some((p) => p.career.some((c) => c.gps)), "a goalie's row carries goaltending shares");
+    /* Only the INDEPENDENT parts are stored — the total is derived. Four fields
+       on every career row of every player is a quarter of a megabyte a decade,
+       and the soak test holds the save under 3 MB. */
+    ok(!withRows.some((p) => p.career.some((c) => c.ps != null)),
+      "the total is never stored, only its parts");
+    ok(!skaters.some((p) => p.career.some((c) => c.gps != null)), "a skater stores no goaltending share");
+    ok(!goalies.some((p) => p.career.some((c) => c.ops != null || c.dps != null)),
+      "and a goalie stores no skater shares");
+
+    // The derived total has to equal what the live calculation said at the time.
+    const big = skaters.map((p) => ({ p, c: p.career.find((c) => c.gp > 20) })).filter((x) => x.c)
+      .sort((a, b) => A.lineShares(b.c).ps - A.lineShares(a.c).ps)[0];
+    ok(big, "somebody had a real season");
+    if (big) {
+      const live = A.pointShares(G, big.p, big.c);
+      const kept = A.lineShares(big.c);
+      ok(Math.abs(kept.ps - live.ps) < 0.15,
+        `the stored season matches the live one (${kept.ps.toFixed(1)} vs ${live.ps.toFixed(1)})`);
+      ok(Math.abs((kept.ops + kept.dps) - kept.ps) < 0.001, "and its parts sum to its total");
+      const car = A.careerShares(big.p);
+      ok(Math.abs(car.ps - kept.ps) < 0.001, "a one-season career total is that season");
+    }
+
+    // A save archived before shares existed gets them filled in on load.
+    const stripped = JSON.parse(JSON.stringify(G));
+    delete stripped.psBackfilled;
+    Object.values(stripped.players).forEach((p) => {
+      (p.career || []).forEach((c) => { delete c.ops; delete c.dps; delete c.gps; });
+    });
+    A.migrate(stripped);
+    const filled = Object.values(stripped.players)
+      .filter((p) => (p.career || []).some((c) => c.gp > 20 && (c.ops || c.dps || c.gps)));
+    ok(filled.length > 100, `an old save is backfilled on load (${filled.length} players)`);
+  },
+
+  /* Awards handed out after the fact, for seasons played before the ballots
+     existed — and for seasons that were voted on but never delivered. */
+  retroAwards(A) {
+    section("Retroactive awards");
+    const G = A.newGame(0, { seed: 8123, rules: { seasonLen: 41 } });
+    for (let i = 0; i < 3; i++) {
+      simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+    }
+    ok(G.history.length === 3, `three seasons are on file (${G.history.length})`);
+
+    // Case 1: a year that was never voted on at all.
+    const wiped = JSON.parse(JSON.stringify(G));
+    wiped.history.forEach((h) => { h.awards = null; });
+    Object.values(wiped.players).forEach((p) => { p.trophies = []; });
+    A.migrate(wiped);
+    const voted = wiped.history.filter((h) => h.awards);
+    ok(voted.length === 3, `every reconstructible year was voted on (${voted.length}/3)`);
+    ok(voted.every((h) => h.retroAwards), "and each is marked as reconstructed");
+    ok(voted.every((h) => h.awards.mvp != null && h.awards.scoring != null), "with an MVP and a scoring champion");
+    ok(voted.every((h) => h.awards.year === h.year), "stamped with the right year");
+
+    // The trophies reach the players, and the scoring title really did lead.
+    const trophied = Object.values(wiped.players).filter((p) => (p.trophies || []).length);
+    ok(trophied.length > 3, `the silverware reached the players (${trophied.length})`);
+    const h0 = wiped.history[0];
+    const champ = wiped.players[h0.awards.scoring];
+    const row = champ && (champ.career || []).find((c) => c.year === h0.year);
+    ok(row, "the scoring champion has that season on his record");
+    if (row) {
+      const better = Object.values(wiped.players).filter((p) => {
+        const c = (p.career || []).find((x) => x.year === h0.year && !x.total);
+        return c && p.pos !== "G" && (c.g + c.a) > (row.g + row.a);
+      });
+      ok(!better.length, `nobody outscored him that year (${row.g + row.a} pts)`);
+    }
+
+    // Idempotent: loading the same save twice must not double anybody's trophies.
+    const before = Object.values(wiped.players).reduce((s, p) => s + (p.trophies || []).length, 0);
+    A.migrate(wiped);
+    A.migrate(wiped);
+    const after = Object.values(wiped.players).reduce((s, p) => s + (p.trophies || []).length, 0);
+    ok(before === after, `re-loading hands out nothing twice (${before} then ${after})`);
+
+    // Case 2: the vote survived but the trophies never reached the players.
+    const orphaned = JSON.parse(JSON.stringify(G));
+    Object.values(orphaned.players).forEach((p) => { p.trophies = []; });
+    A.migrate(orphaned);
+    const rescued = Object.values(orphaned.players).filter((p) => (p.trophies || []).length);
+    ok(rescued.length > 3, `a stored ballot still gets delivered (${rescued.length} players)`);
+    ok(!orphaned.history.some((h) => h.retroAwards), "without pretending the vote was re-run");
+
+    // A season too far gone to reconstruct is left blank rather than invented.
+    const gutted = JSON.parse(JSON.stringify(G));
+    gutted.history.forEach((h) => { h.awards = null; });
+    const keep = Object.keys(gutted.players).slice(0, 20);
+    gutted.players = keep.reduce((o, k) => { o[k] = gutted.players[k]; return o; }, {});
+    A.migrate(gutted);
+    ok(!gutted.history.some((h) => h.awards), "a season with nobody left is not given a fake MVP");
+  },
+
+  /* Trading a SPECIFIC pick. A round number alone can't tell the best asset in
+     the sport from the least valuable pick of the same round. */
+  pickTrading(A) {
+    section("Specific picks");
+    const G = A.newGame(0, { seed: 6420, rules: { seasonLen: 41 } });
+    // This year's picks are tradeable during the season — that's the deadline.
+    A.simDays(G, 12);
+    const now = A.tradablePicks(G, G.userTeam);
+    ok(now.some((pk) => pk.year === G.year), "this year's picks can be moved at the deadline");
+    ok(now.every((pk) => pk.year >= G.year), "and nothing already used is offered");
+    ok(now.every((pk) => pk.owner === G.userTeam), "you can only trade your own");
+
+    // Before the lottery a slot is a projection off the table; it must be real.
+    const thisYear = now.filter((pk) => pk.year === G.year);
+    ok(thisYear.length > 0 && thisYear.every((pk) => {
+      const s = A.pickSlot(G, pk); return s >= 1 && s <= G.teams.length;
+    }), "every pick this year has a place in the round");
+    ok(A.pickSlot(G, now.find((pk) => pk.year > G.year)) == null,
+      "a future year's slot is unknown, not guessed");
+
+    /* Where it lands has to MOVE its value, or "specific" is cosmetic. The
+       worst club's first and the best club's first are the same round. */
+    const table = A.standings(G);
+    const worst = table[table.length - 1].id, best = table[0].id;
+    const pickOf = (tid) => ({ year: G.year, round: 1, orig: tid, owner: tid });
+    const vWorst = A.pickValue(G, pickOf(worst)), vBest = A.pickValue(G, pickOf(best));
+    ok(vWorst > vBest * 1.3, `the bottom club's first is worth far more (${vWorst.toFixed(1)} vs ${vBest.toFixed(1)})`);
+    ok(A.pickSlot(G, pickOf(worst)) === 1, "and it projects as first overall");
+
+    // The average is unchanged, so every valuation built on the old flat number
+    // still holds.
+    const mean = G.teams.reduce((s, t) => s + A.pickValue(G, pickOf(t.id)), 0) / G.teams.length;
+    ok(Math.abs(mean - 9) < 0.6, `the average first is still worth about 9 (${mean.toFixed(2)})`);
+    ok(A.pickValue(G, { year: G.year + 2, round: 1, orig: worst, owner: worst }) < vWorst,
+      "a pick further out is discounted");
+
+    // Once the order is drawn the slot is exact, not projected.
+    simSeason(A, G); simPlayoffs(A, G);
+    ok(G.draftYear === G.year, "the draft order is stamped with its year");
+    const drawn = A.tradablePicks(G, G.userTeam).find((pk) => pk.year === G.year);
+    if (drawn) ok(A.pickSlot(G, drawn) === G.draftOrder.indexOf(drawn.orig) + 1,
+      "and a slot now reads straight off the lottery");
+    else ok(true, "no picks left this year");
+    const L = drawn ? A.pickLabel(G, drawn, G.userTeam) : null;
+    ok(!L || (L.text && L.note && !/proj/.test(L.note)), "a drawn pick is labelled exactly, not as a projection");
+  },
+
+  /* The draft as a room you sit in: an order, a shortlist, and the run before
+     your turn happening one pick at a time. */
+  draftRoom(A) {
+    section("The draft room");
+    const G = A.newGame(0, { seed: 9090, rules: { seasonLen: 41 } });
+    simSeason(A, G); simPlayoffs(A, G);
+
+    const rows = A.draftOrderRows(G);
+    ok(rows.length === A.draftPicksTotal(G), `the order covers every pick (${rows.length})`);
+    ok(rows.every((r, i) => r.pick === i + 1), "numbered straight through");
+    ok(rows.filter((r) => r.round === 1).length === G.teams.length, "with a full first round");
+    ok(rows.every((r) => r.owner != null && G.teams[r.owner]), "and every pick has an owner");
+    ok(!rows.some((r) => r.made), "nothing has been taken yet");
+
+    // One pick at a time, and never one of yours.
+    const at = G.draftPick;
+    const onClock = A.pickOwner(G, at);
+    const moved = A.draftOnePick(G);
+    if (onClock === G.userTeam) {
+      ok(!moved && G.draftPick === at, "it refuses to pick for you");
+      A.draftPlayer(G, G.draftClass[0]);
+    } else {
+      ok(moved && G.draftPick === at + 1, "one pick advances exactly one pick");
+      ok(A.draftOrderRows(G).filter((r) => r.made).length === 1, "and the order records what was taken");
+    }
+
+    /* The shortlist. A pick made FOR you takes your man; the same call for
+       anybody else ignores your list entirely. */
+    const board = G.draftClass.map((id) => G.players[id]).sort((a, b) => A.draftValue(a) - A.draftValue(b));
+    const humble = board[0];   // deliberately the worst man on the board
+    A.toggleStar(G, humble.id);
+    ok(A.starList(G)[0] === humble.id, "starring puts him at the top of your list");
+    ok(A.autoPickFor(G, G.userTeam).id === humble.id, "and a pick made for you takes him");
+    const other = G.teams.find((t) => t.id !== G.userTeam).id;
+    ok(A.autoPickFor(G, other).id !== humble.id, "while nobody else is steered by your list");
+    A.toggleStar(G, humble.id);
+    ok(!A.starList(G).length, "starring again clears him");
+
+    // A projection you can snipe off: better prospects are expected sooner.
+    const proj = A.draftProjection(G);
+    const ranked = G.draftClass.map((id) => G.players[id]).sort((a, b) => A.draftValue(b) - A.draftValue(a));
+    ok(proj.byId[ranked[0].id].at < proj.byId[ranked[ranked.length - 1].id].at,
+      "the best man on the board is expected first");
+    ok(proj.byId[ranked[0].id].at >= G.draftPick + 1, "and nobody is expected before the current pick");
+    if (proj.myNext != null) {
+      ok(A.pickOwner(G, proj.myNext - 1) === G.userTeam, "your next pick is really yours");
+      const risky = ranked.filter((p) => proj.byId[p.id].risk > 0.9);
+      const safe = ranked.filter((p) => proj.byId[p.id].risk < 0.1);
+      ok(!risky.length || !safe.length || A.draftValue(risky[0]) > A.draftValue(safe[0]),
+        "the men who won't last are the good ones");
+    } else { ok(true, "no picks left"); ok(true, ""); }
+
+    // Your list is for one draft and must not steer the next one.
+    A.toggleStar(G, G.draftClass[0]);
+    A.autoDraft(G, false);
+    ok(!G.draftStars.length, "the list is cleared when the draft closes");
+  },
+
+  /* The farm as a set of games rather than a points total. */
+  farmGames(A) {
+    section("Farm results");
+    const G = A.newGame(0, { seed: 4477, rules: { seasonLen: 41 } });
+    A.simDays(G, 40);
+    const mine = G.teams[G.userTeam];
+    const log = mine.farmLog || [];
+    ok(log.length > 5, `your affiliate has a game log (${log.length})`);
+    ok(log.length === A.farmRec(mine).gp, "with one row per game it played");
+    // The log has to reconcile with the table it produced.
+    const w = log.filter((r) => r.gf > r.ga).length;
+    ok(w === A.farmRec(mine).w, `wins in the log match the table (${w})`);
+    ok(log.reduce((s, r) => s + r.gf, 0) === A.farmRec(mine).gf, "and so do goals for");
+    ok(log.reduce((s, r) => s + r.ga, 0) === A.farmRec(mine).ga, "and goals against");
+    ok(log.every((r) => r.o !== G.userTeam), "nobody played themselves");
+    ok(log.every((r, i) => i === 0 || r.d > log[i - 1].d), "in the order they were played");
+    ok(log.length <= A.FARM_LOG_MAX, "and the log is bounded");
+
+    // The affiliate mirrors the parent schedule, so a farm result must sit on a
+    // day the parent club actually played.
+    ok(log.every((r) => (G.schedule[r.d] || []).some((f) =>
+      (f.home === G.userTeam && f.away === r.o) || (f.away === G.userTeam && f.home === r.o))),
+      "every farm game mirrors a real fixture");
+
+    // Last night's league-wide scoreboard, replaced each day rather than piled up.
+    ok(G.farmDay && Array.isArray(G.farmDay.games), "last night's scores are kept");
+    ok(G.farmDay.games.length === (G.schedule[G.farmDay.day] || []).length,
+      "one farm game per parent fixture that night");
+
+    // Fixtures are read off the parent schedule, so they cost nothing to store.
+    const next = A.farmFixtures(G, G.userTeam, 5);
+    ok(next.length > 0, `the affiliate has fixtures to come (${next.length})`);
+    ok(next.every((f) => f.d >= G.day), "all of them ahead of today");
+    ok(next.every((f) => (G.schedule[f.d] || []).some((x) => x.home === f.opp || x.away === f.opp)),
+      "and each is a real fixture");
+
+    A.startNextSeason(G);
+    ok(!G.teams[G.userTeam].farmLog && !G.farmDay, "the log and the scoreboard reset for a new season");
+  },
+
+  /* Starting a career in the offseason instead of at game one. */
+  careerStart(A) {
+    section("Where the career starts");
+    const D = A.newGame(0, { seed: 1234, rules: { seasonLen: 41 } });
+    ok(D.phase === "regular" && D.day === 0, "the default is opening night");
+
+    const O = A.newGame(0, { seed: 1234, rules: { seasonLen: 41 }, start: "offseason" });
+    ok(O.phase === "offseason", "starting early lands in the offseason");
+    ok(A.offseasonStage(O) === "review", "at the top of the sequence");
+    ok(O.draftClass.length > 0, `with a draft class already built (${O.draftClass.length})`);
+    ok(O.draftOrder && O.draftOrder.length === O.teams.length, "and a full draft order");
+    ok(O.draftYear === O.year, "stamped with this year");
+
+    /* Nobody has played, so the order can't come from the table. Weakest roster
+       picks first — otherwise the sort falls through to club id and the draft
+       order is the alphabet. */
+    const early = O.draftOrder.slice(0, 8).reduce((s, id) => s + A.teamStrength(O, id), 0) / 8;
+    const late = O.draftOrder.slice(-8).reduce((s, id) => s + A.teamStrength(O, id), 0) / 8;
+    ok(early < late, `the weakest clubs pick first (${early.toFixed(1)} vs ${late.toFixed(1)})`);
+    ok(new Set(O.draftOrder).size === O.teams.length, "and every club appears exactly once");
+
+    // The world itself is the same league either way — only the starting point moves.
+    ok(A.playersOf(D).length === A.playersOf(O).length - O.draftClass.length,
+      "the league is identical apart from the draft class");
+    ok(O.freeAgents.length > 0, "there is a market to work");
+
+    // And it plays through to a real season.
+    let guard = 0;
+    while (O.phase === "offseason" && guard++ < 400) A.doOffseasonStep(O);
+    ok(O.phase === "regular", "the offseason runs through to a season");
+    ok(O.year === D.year + 1, `which is the year after the draft (${O.year})`);
+    ok(O.schedule.length > 0, "with a calendar built");
+    ok(O.teams.every((t) => A.rosterOf(O, t.id).length >= 20), "and every club able to dress a side");
+  },
+
+  /* A playoff game should read like a regular-season one. */
+  playoffSummaries(A) {
+    section("Playoff summaries");
+    const G = A.newGame(0, { seed: 3030, rules: { seasonLen: 41 } });
+    simSeason(A, G); simPlayoffs(A, G);
+    const played = G.playoffs.rounds.flat().flatMap((s) => s.games);
+    ok(played.length > 20, `a postseason was played (${played.length} games)`);
+    ok(played.every((g) => g.d != null), "every series game records the day it was played");
+
+    const rows = G.results.filter((r) => r.playoff);
+    ok(rows.length > 0, `playoff games reach the results feed (${rows.length})`);
+    ok(rows.every((r) => Array.isArray(r.scorers)), "carrying who scored");
+
+    // The lookup that ties a series game to its summary.
+    const found = played.map((g) => A.resultFor(G, g)).filter(Boolean);
+    ok(found.length > played.length * 0.5, `most games resolve to a summary (${found.length}/${played.length})`);
+    ok(found.every((r) => r.playoff), "and never to a regular-season game by mistake");
+    const sample = played.find((g) => A.resultFor(G, g));
+    if (sample) {
+      const r = A.resultFor(G, sample);
+      ok(r.hg === sample.hg && r.ag === sample.ag, "the summary is the same game as the scoreline");
+      ok(r.scorers.length === r.hg + r.ag - (r.so ? 1 : 0),
+        "and names a scorer for every goal but a shootout winner");
+      ok(r.scorers.every((s) => s.t === r.home || s.t === r.away), "each credited to a club that played");
+    } else { ok(true, ""); ok(true, ""); ok(true, ""); }
+  },
+
   determinism(A) {
     section("Determinism");
     const run = () => {

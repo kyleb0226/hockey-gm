@@ -622,6 +622,48 @@ function pointShares(G, p, line) {
 }
 const psOf = (G, p, line) => pointShares(G, p, line).ps;
 
+/* Point shares were a LIVE calculation — real for the current season and gone
+ * the moment it was archived, so a twenty-year career had no record of the one
+ * number that puts a shutdown defenceman and a sniper on the same scale.
+ *
+ * They are stamped onto the line at the rollover rather than recomputed from it
+ * on demand, and that is deliberate: the constants above are calibrated against
+ * the league that actually played that season. Re-deriving 1998's shares under
+ * 2020's rules (a different schedule length, the loser point on or off, a
+ * different save percentage) would quietly rewrite history every time the game
+ * is patched. Stamped once, a season's shares are what they were.
+ * WRITTEN AS NARROWLY AS POSSIBLE. Four fields on every career row of every
+ * player is a quarter of a megabyte a decade, and the soak test holds the whole
+ * save under 3 MB. So only the INDEPENDENT parts are stored: a skater's
+ * offensive and defensive shares, a goalie's goaltending share. The total is
+ * their sum and is derived on read, never stored, and a zero is left off the
+ * row entirely — one decimal place, which is all any screen shows. */
+function stampShares(G, p, line) {
+  if (!line || !line.gp) return line;
+  const r = pointShares(G, p, line);
+  const round = (v) => Math.round(v * 10) / 10;
+  const put = (k, v) => { const x = round(v); if (x) line[k] = x; else delete line[k]; };
+  if (p.pos === "G") { put("gps", r.gps); delete line.ops; delete line.dps; }
+  else { put("ops", r.ops); put("dps", r.dps); delete line.gps; }
+  return line;
+}
+/* The four numbers a screen wants, from the two a row carries. */
+function lineShares(c) {
+  const ops = (c && c.ops) || 0, dps = (c && c.dps) || 0, gps = (c && c.gps) || 0;
+  return { ops, dps, gps, ps: ops + dps + gps };
+}
+/* A career total, summed from the seasons rather than recomputed. A retired
+   player's rows are collapsed into one by `pruneSave`, which sums every numeric
+   field, so this reads a long-dead career the same way it reads a live one. */
+function careerShares(p) {
+  const out = { ops: 0, dps: 0, gps: 0, ps: 0 };
+  (p.career || []).forEach((c) => {
+    const s = lineShares(c);
+    out.ops += s.ops; out.dps += s.dps; out.gps += s.gps; out.ps += s.ps;
+  });
+  return out;
+}
+
 /* --------------------------- contracts & the cap --------------------------- */
 
 function marketValue(G, p) {
@@ -983,6 +1025,21 @@ function newGame(userTeam, opts) {
 
   buildSchedule(G);
   setMandate(G);
+
+  /* Where the career begins. Dropping straight into game one is the default and
+     what every save did before, but the offseason is where a GM job actually
+     starts: you inherit a roster, and the first things you do are a draft and a
+     free-agent market. Starting there means your first season is one you built.
+     It is a genuine offseason, not a cutscene — the same `offseasonStage` /
+     `doOffseasonStep` sequence the game runs every other year, so the draft
+     board, the scouting budget and the market all behave exactly as they will
+     in year two. The season that follows is `G.year + 1`, because the draft you
+     are about to run is this year's. */
+  if (opts.start === "offseason") {
+    G.phase = "offseason";
+    G.offseasonStep = "review";
+    buildDraftClass(G);
+  }
   return G;
 }
 
@@ -1021,6 +1078,10 @@ function migrate(G) {
   if (!G.shotLog) G.shotLog = {};
   if (G.scoutPoints == null) G.scoutPoints = 0;
   if (!G.draftLog) G.draftLog = [];
+  if (!G.draftStars) G.draftStars = [];
+  // A save from before the order was year-stamped: a class in hand means the
+  // order on file is this year's, and anything else means there isn't one.
+  if (G.draftYear === undefined) G.draftYear = (G.draftClass || []).length ? G.year : null;
   if (!G.block) G.block = [];
   if (!G.offers) G.offers = [];
   if (!G.hall) G.hall = [];
@@ -1029,6 +1090,20 @@ function migrate(G) {
     if (!p.stats) p.stats = blankStats(p.pos);
     if (!p.season) p.season = blankStats(p.pos);
     if (!p.career) p.career = [];
+    /* A save whose seasons were archived before shares were stored gets them
+       derived from the raw line. That is the ONE case where recomputing an old
+       year under today's constants is right — the alternative is a career table
+       with a decade of blanks. A collapsed retired total is left alone: summing
+       a career's worth of games and calling the result one season's shares
+       would be badly wrong, not slightly.
+       Gated on a SAVE-LEVEL flag, not on whether a given row looks stamped: a
+       genuinely zero share stores nothing, so a per-row test can never tell
+       "not done" from "done, and it was zero" and would re-run the whole league
+       on every migrate — and migrate runs on every click of the trade screen. */
+    if (!G.psBackfilled) {
+      (p.career || []).forEach((c) => { if (!c.total) stampShares(G, p, c); });
+      if (p.stats && p.stats.gp) stampShares(G, p, p.stats);
+    }
     if (!p.trophies) p.trophies = [];
     if (!p.rings) p.rings = [];
     if (!p.allStars) p.allStars = [];
@@ -1059,6 +1134,11 @@ function migrate(G) {
     if (!t.pairChem) t.pairChem = [0, 0, 0];
     if (!t.pairSig) t.pairSig = [null, null, null];
   });
+  /* Runs LAST: it reads career lines and point shares, so everything above has
+     to have been repaired first. It writes its results back onto the history
+     rows, so the expensive half only ever happens once per save. */
+  G.psBackfilled = 1;
+  backfillAwards(G);
   return G;
 }
 
@@ -1963,8 +2043,118 @@ function playoffField(G, conf) {
     s.slice(3).forEach((t) => rest.push(t));
   });
   const wc = rest.sort((a, b) => b.pts - a.pts || b.w - a.w).slice(0, 2);
-  return { top, wc, divs };
+  return { top, wc, divs, out: rest.slice(2) };
 }
+
+/* ---------------------------- the playoff line -----------------------------
+ * The standings knew who was in the field — `playoffField` has always decided
+ * the bracket — but the table never said so, which made the one number anybody
+ * actually reads during a season invisible: where the cutoff is.
+ *
+ * This turns the field into a per-club verdict the table can render. `label` is
+ * the berth as a fan would say it (A1, WC2, or a plain seed), `bubble` is the
+ * last club currently holding a place and `firstOut` the one that would take it
+ * — those two are the whole story of a playoff race, so they get their own
+ * marks rather than being left as "in" and "out" like everyone else.
+ * ------------------------------------------------------------------------- */
+const DIV_TAG = ["A", "M", "C", "P"];
+function playoffBerths(G) {
+  const map = {};
+  [0, 1].forEach((conf) => {
+    if (ruleValue(G, "playoffFormat") === "seeded") {
+      const s = confStandings(G, conf);
+      s.slice(0, 8).forEach((t, i) => {
+        map[t.id] = { in: true, label: `${i + 1}`, seed: i + 1, bubble: i === 7 };
+      });
+      if (s[8]) map[s[8].id] = { in: false, label: "9th", firstOut: true };
+      return;
+    }
+    const { top, wc, out } = playoffField(G, conf);
+    top.forEach((x) => {
+      map[x.team.id] = {
+        in: true, label: `${DIV_TAG[x.div] || "?"}${x.divRank}`,
+        seed: x.divRank, divRank: x.divRank, bubble: x.divRank === 3,
+      };
+    });
+    wc.forEach((t, i) => {
+      map[t.id] = { in: true, label: `WC${i + 1}`, seed: 4 + i, wildcard: true, bubble: i === wc.length - 1 };
+    });
+    // Everyone still chasing a wildcard, nearest first.
+    (out || []).forEach((t, i) => {
+      map[t.id] = { in: false, label: i === 0 ? "1st out" : `${i + 1} out`, firstOut: i === 0 };
+    });
+  });
+  return map;
+}
+
+/* ------------------------------ clinching ---------------------------------
+ * Who is mathematically safe, and who is mathematically done.
+ *
+ * Rather than reason about the divisional format's cases — three per division
+ * plus two wildcards, where a club can miss on points and still get in on
+ * division rank — this asks `playoffField` itself, on a hypothetical table:
+ *
+ *   CLINCHED: give every rival every point still available to it, freeze this
+ *   club where it is, and break every tie against it. If it is STILL in the
+ *   field in that table, nothing that can still happen can put it out.
+ *
+ *   ELIMINATED: the mirror image. Give this club every remaining point and win
+ *   it every tie, leave everyone else where they are. If it still misses, it
+ *   cannot get in.
+ *
+ * Both are conservative — rivals play each other, so they cannot all win out —
+ * which is the right direction for a guarantee. And because the verdict comes
+ * from the same function that builds the bracket, the two can never disagree
+ * about what a berth is.
+ * ------------------------------------------------------------------------- */
+function shadowTable(G, ptsOf) {
+  return { ...G, teams: G.teams.map((t) => ({ ...t, pts: ptsOf(t) })) };
+}
+function inFieldOf(shadow, teamId) {
+  const conf = shadow.teams[teamId].conf;
+  if (ruleValue(shadow, "playoffFormat") === "seeded")
+    return playoffField(shadow, conf).some((x) => x.team.id === teamId);
+  const { top, wc } = playoffField(shadow, conf);
+  return top.some((x) => x.team.id === teamId) || wc.some((t) => t.id === teamId);
+}
+
+function clinchState(G) {
+  const out = {};
+  const len = ruleValue(G, "seasonLen");
+  const left = (t) => Math.max(0, len - (t.gp || 0));
+  // Nothing to clinch before a game is played, and nothing left to say once
+  // every game has been.
+  if (!G.teams.some((t) => t.gp > 0) || !G.teams.some((t) => left(t) > 0)) return out;
+
+  G.teams.forEach((t) => {
+    // Worst case for this club: everyone else wins out and takes every tie.
+    const worst = shadowTable(G, (u) => (u.id === t.id ? u.pts : u.pts + left(u) * 2 + 0.5));
+    // Best case: this club wins out and takes every tie.
+    const best = shadowTable(G, (u) => (u.id === t.id ? u.pts + left(u) * 2 + 0.5 : u.pts));
+    const safe = inFieldOf(worst, t.id);
+    const alive = inFieldOf(best, t.id);
+
+    let mark = null;
+    if (safe) {
+      mark = "x";   // a berth, by whatever route
+      if (ruleValue(G, "playoffFormat") !== "seeded") {
+        // Sharper statements, where they're true: the division, or a top-three
+        // place in it (which is a berth that owes nothing to the wildcard race).
+        const rivals = G.teams.filter((u) => u.div === t.div && u.id !== t.id);
+        const canPass = rivals.filter((u) => u.pts + left(u) * 2 >= t.pts).length;
+        if (canPass === 0) mark = "z";
+        else if (canPass <= 2) mark = "y";
+      }
+    }
+    out[t.id] = { mark, eliminated: !alive };
+  });
+  return out;
+}
+const CLINCH_LABEL = {
+  z: "has won the division",
+  y: "has clinched a top-three place in the division",
+  x: "has clinched a playoff berth",
+};
 
 /* -------------------------------- playoffs -------------------------------- */
 
@@ -2034,7 +2224,9 @@ function simSeriesGame(G, s) {
   }
   const hiWon = (res.hg > res.ag) === homeIsHi;
   s.w[hiWon ? 0 : 1]++;
-  s.games.push({ home, away, hg: res.hg, ag: res.ag, ot: res.ot });
+  // The DAY is what ties this game to its row in `G.results`, which is where
+  // the scoring summary lives. Without it a series game is only a scoreline.
+  s.games.push({ home, away, hg: res.hg, ag: res.ag, ot: res.ot, so: res.so, d: G.day });
   const need = winsNeeded(G);
   if (s.w[0] >= need || s.w[1] >= need) {
     s.done = true;
@@ -2301,16 +2493,46 @@ function ballot(cands, scoreFn, size) {
   const floor = scored[scored.length - 1].score;
   const spread = scored.map((x) => Math.max(0, x.score - floor) + 0.12 * Math.abs(scored[0].score - floor || 1));
   const tot = spread.reduce((a, b) => a + b, 0) || 1;
-  return scored.map((x, i) => ({ id: x.p.id, share: spread[i] / tot }));
+  /* `val` is the RAW score, kept alongside the vote share. For the Hart or the
+     Norris the share is the whole story and the raw number is an internal
+     index nobody should see. For the scoring and goal-scoring titles it's the
+     reverse: those are not votes at all, they're counts, and rendering "31% of
+     the vote" next to a man who scored 54 goals was a made-up number sitting
+     where the real one belonged. Storing both lets each award show the one
+     that means something. */
+  return scored.map((x, i) => ({ id: x.p.id, share: spread[i] / tot, val: x.score }));
 }
 
-function computeAwards(G) {
-  const sk = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 10);
-  const gs = playersOf(G).filter((p) => p.pos === "G" && p.season.gp > 15);
-  const byPts = sk.slice().sort((a, b) => pts(b.season) - pts(a.season) || b.season.g - a.season.g);
-  const byGoals = sk.slice().sort((a, b) => b.season.g - a.season.g);
-  const rookiePool = playersOf(G).filter((p) => p.rookie && p.season.gp > 10);
-  const clubPts = (p) => (p.teamId != null && G.teams[p.teamId] ? G.teams[p.teamId].pts : 0);
+/* The ballot's electorate: one entry per player, carrying the line the voters
+ * are reading and the club record behind it.
+ *
+ * This is split out from `computeAwards` so the SAME vote can be run over a
+ * season rebuilt from the career archive. A retroactive award and a live one
+ * have to come out of one function — two implementations of "who was the MVP"
+ * is two different records of the same season, and the one nobody is looking at
+ * is always the one that drifts.
+ * ------------------------------------------------------------------------- */
+function awardPool(G, opts) {
+  const o = opts || {};
+  return playersOf(G).map((p) => {
+    const s = o.lineOf ? o.lineOf(p) : p.season;
+    if (!s || !s.gp) return null;
+    return {
+      id: p.id, p, s,
+      clubPts: o.clubPtsOf ? o.clubPtsOf(p, s)
+        : (p.teamId != null && G.teams[p.teamId] ? G.teams[p.teamId].pts : 0),
+      rookie: o.rookieOf ? o.rookieOf(p) : !!p.rookie,
+    };
+  }).filter(Boolean);
+}
+
+function voteAwards(G, pool, year) {
+  const sk = pool.filter((x) => x.p.pos !== "G" && x.s.gp > 10);
+  const gs = pool.filter((x) => x.p.pos === "G" && x.s.gp > 15);
+  const byPts = sk.slice().sort((a, b) => pts(b.s) - pts(a.s) || b.s.g - a.s.g);
+  const byGoals = sk.slice().sort((a, b) => b.s.g - a.s.g);
+  const rookiePool = pool.filter((x) => x.rookie && x.s.gp > 10);
+  const clubPts = (x) => x.clubPts || 0;
 
   /* The MVP used to BE the scoring champion — the same id in two fields, so the
      two trophies could never disagree and the Hart meant nothing on its own.
@@ -2321,33 +2543,33 @@ function computeAwards(G) {
      goals-over-replacement — so scoring the Hart on raw shares handed it to a
      goaltender in every season tested. Real voters correct for exactly that,
      giving it to a netminder perhaps one year in ten. */
-  const mvpScore = (p) => {
-    const ps = pointShares(G, p);
-    if (p.pos === "G") return ps.ps * 0.72 + clubPts(p) * 0.028;
+  const mvpScore = (x) => {
+    const ps = pointShares(G, x.p, x.s);
+    if (x.p.pos === "G") return ps.ps * 0.72 + clubPts(x) * 0.028;
     // For skaters, weight what he did WITH THE PUCK. Defensive shares come
     // mostly from ice time, so scoring the Hart on total shares handed it to a
     // defenceman five years in eight — the same flaw as the goalie case.
-    return ps.ops * 1.5 + ps.dps * 0.3 + clubPts(p) * 0.028;
+    return ps.ops * 1.5 + ps.dps * 0.3 + clubPts(x) * 0.028;
   };
   const votes = {
     mvp: ballot(sk.concat(gs), mvpScore),
-    defence: ballot(sk.filter((p) => p.pos === "D"),
-      (p) => pointShares(G, p).ps * 1.25 + p.season.blk * 0.012 + p.season.pm * 0.06
-        + (p.season.toi / Math.max(1, p.season.gp)) * 0.18),
-    goalie: ballot(gs.filter((p) => p.season.sa > 700),
-      (p) => (svPct(p.season) - 0.885) * 240 + p.season.w * 0.09 + p.season.so * 0.35),
+    defence: ballot(sk.filter((x) => x.p.pos === "D"),
+      (x) => pointShares(G, x.p, x.s).ps * 1.25 + x.s.blk * 0.012 + x.s.pm * 0.06
+        + (x.s.toi / Math.max(1, x.s.gp)) * 0.18),
+    goalie: ballot(gs.filter((x) => x.s.sa > 700),
+      (x) => (svPct(x.s) - 0.885) * 240 + x.s.w * 0.09 + x.s.so * 0.35),
     // A rookie goaltender is eligible for the Calder, which sorting by points
     // quietly made impossible.
     rookie: ballot(rookiePool,
-      (p) => (p.pos === "G"
-        ? (svPct(p.season) - 0.885) * 200 + p.season.w * 0.08
-        : pts(p.season) * 0.12 + pointShares(G, p).ps * 0.5)),
-    scoring: ballot(sk, (p) => pts(p.season)),
-    goals: ballot(sk, (p) => p.season.g),
+      (x) => (x.p.pos === "G"
+        ? (svPct(x.s) - 0.885) * 200 + x.s.w * 0.08
+        : pts(x.s) * 0.12 + pointShares(G, x.p, x.s).ps * 0.5)),
+    scoring: ballot(sk, (x) => pts(x.s)),
+    goals: ballot(sk, (x) => x.s.g),
   };
   const winner = (k) => (votes[k] && votes[k][0] ? votes[k][0].id : null);
-  const A = {
-    year: G.year,
+  return {
+    year,
     scoring: byPts[0] ? byPts[0].id : null,
     goals: byGoals[0] ? byGoals[0].id : null,
     mvp: winner("mvp"),
@@ -2356,13 +2578,103 @@ function computeAwards(G) {
     rookie: winner("rookie"),
     votes,
   };
+}
+
+/* Hand the trophies out. Idempotent on (player, year, award), because the
+   retroactive pass runs over seasons that may already have been settled — a
+   save reloaded twice must not give the same man two of the same trophy. */
+function awardTrophies(G, A) {
   Object.entries(A).forEach(([k, id]) => {
     if (k === "year" || k === "votes" || id == null) return;
     const p = G.players[id];
-    if (p) p.trophies.push({ year: G.year, award: k });
+    if (!p) return;
+    p.trophies = p.trophies || [];
+    if (p.trophies.some((t) => t.year === A.year && t.award === k)) return;
+    p.trophies.push({ year: A.year, award: k });
   });
+  return A;
+}
+
+function computeAwards(G) {
+  const A = voteAwards(G, awardPool(G), G.year);
+  awardTrophies(G, A);
   G.awards = A;
   return A;
+}
+
+/* ---------------------------- awards, after the fact -----------------------
+ * Awards arrived later than the seasons some careers had already played, so a
+ * save carried years with no trophies at all and a player's bio was missing
+ * silverware he had plainly earned. Two different holes, and this fills both:
+ *
+ *  1. A season that was never voted on. Rebuilt from the career archive and
+ *     put through `voteAwards` — the same ballot the live season uses.
+ *  2. A season that WAS voted on but whose trophies never reached the players.
+ *     Cheap to fix and the more common of the two: the vote is already stored
+ *     on the history row, so it just has to be handed out.
+ *
+ * Case 1 is only honest while the season is still reconstructible. `pruneSave`
+ * collapses a retired man's seasons into one career total and eventually drops
+ * him entirely, so an old enough year survives only as its stars — and electing
+ * an MVP from forty surviving players is not a record, it's an invention. Below
+ * `RETRO_MIN_POOL` skaters the year is left blank, which is the truthful
+ * answer. Case 2 has no such problem: nothing is being decided, only delivered.
+ * ------------------------------------------------------------------------- */
+const RETRO_MIN_POOL = 220;   // skaters that must survive for a rebuilt vote to mean anything
+
+/* One player's line for a finished season, rebuilt from his career rows. A
+   traded year is stored one row per club, so the rows are summed back into the
+   season the voters would actually have seen. A collapsed retired total is not
+   a season and is ignored. */
+function archivedLine(p, year) {
+  const rows = (p.career || []).filter((c) => c.year === year && !c.total);
+  if (!rows.length) return null;
+  if (rows.length === 1) return rows[0];
+  const line = {};
+  rows.forEach((c) => Object.keys(c).forEach((k) => {
+    if (k === "year" || k === "teamId" || k === "to" || typeof c[k] !== "number") return;
+    line[k] = (line[k] || 0) + c[k];
+  }));
+  return line;
+}
+
+function backfillAwards(G) {
+  let voted = 0, handed = 0;
+  (G.history || []).forEach((h) => {
+    if (!h || h.year == null) return;
+
+    // Case 2 first — it's free, and it also covers the years case 1 just filled.
+    if (h.awards) { awardTrophies(G, h.awards); handed++; return; }
+
+    // Case 1: rebuild the season and put it to a vote.
+    const ptsOf = {};
+    (h.standings || []).forEach((s) => { ptsOf[s.id] = s.pts; });
+    const lines = {};
+    playersOf(G).forEach((p) => {
+      const s = archivedLine(p, h.year);
+      if (s && s.gp) lines[p.id] = s;
+    });
+    const pool = awardPool(G, {
+      lineOf: (p) => lines[p.id],
+      // The club he was with THAT year, not the one he plays for now.
+      clubPtsOf: (p) => {
+        const row = (p.career || []).find((c) => c.year === h.year && !c.total);
+        return (row && ptsOf[row.teamId]) || 0;
+      },
+      // Nothing records who was a rookie, but a career's first season is one.
+      // Wrong only for a man whose debut year has already been pruned away —
+      // and he is not winning the Calder in a rebuilt vote anyway.
+      rookieOf: (p) => {
+        const first = (p.career || []).filter((c) => !c.total).map((c) => c.year).sort()[0];
+        return first === h.year;
+      },
+    });
+    if (pool.filter((x) => x.p.pos !== "G").length < RETRO_MIN_POOL) return;
+    h.awards = awardTrophies(G, voteAwards(G, pool, h.year));
+    h.retroAwards = true;   // so the history page can say the vote was reconstructed
+    voted++;
+  });
+  return { voted, handed };
 }
 
 /* ------------------------------ end of season ----------------------------- */
@@ -2419,10 +2731,11 @@ function finishSeason(G) {
       const spells = (p.stints || []).filter((st) => st.s.gp);
       if (spells.length > 1) {
         // A traded year goes into the record as one row per club, which is how
-        // a real career table reads it.
-        spells.forEach((st) => p.career.push({ year: G.year, teamId: st.t, ...st.s }));
+        // a real career table reads it. Each spell's shares are computed from
+        // that spell's own line, so the rows still sum to the season.
+        spells.forEach((st) => p.career.push(stampShares(G, p, { year: G.year, teamId: st.t, ...st.s })));
       } else {
-        p.career.push({ year: G.year, teamId: spells.length ? spells[0].t : p.teamId, ...totals });
+        p.career.push(stampShares(G, p, { year: G.year, teamId: spells.length ? spells[0].t : p.teamId, ...totals }));
       }
     }
     p.stints = null;
@@ -2431,7 +2744,7 @@ function finishSeason(G) {
        reads `p.stats.z` or `p.stats.net`. Carrying them was ~240 bytes on every
        player in the league for a year, for data no screen ever showed. */
     const { z: _lz, net: _ln, ...lastYear } = p.season;
-    p.stats = lastYear;
+    p.stats = stampShares(G, p, lastYear);
     p.season = blankStats(p.pos);
     // A playoff run used to be thrown away at the rollover, which meant a
     // twenty-year career had no postseason record at all. Keep the running
@@ -2703,8 +3016,14 @@ function buildDraftClass(G) {
   G.scoutPoints = SCOUT_POINTS;
   G.draftLog = [];
   // Lottery order: non-playoff teams worst-first, with a real lottery on top.
-  const nonPlayoff = G.teams.filter((t) => !inPlayoffs(G, t.id)).sort((a, b) => a.pts - b.pts);
-  const playoffTeams = G.teams.filter((t) => inPlayoffs(G, t.id)).sort((a, b) => a.pts - b.pts);
+  /* A career that STARTS in the offseason has no season behind it, so every
+     club sits on zero points and the sort falls back to club id — the draft
+     order would be the alphabet. Weakest roster picks first instead, which is
+     what last year's table would have said anyway. */
+  const played = G.teams.some((t) => t.gp > 0);
+  const rank = played ? (t) => t.pts : (t) => teamStrength(G, t.id);
+  const nonPlayoff = G.teams.filter((t) => !inPlayoffs(G, t.id)).sort((a, b) => rank(a) - rank(b));
+  const playoffTeams = G.teams.filter((t) => inPlayoffs(G, t.id)).sort((a, b) => rank(a) - rank(b));
   const order = nonPlayoff.map((t) => t.id);
   // Weighted lottery for the top pick among the bottom ten.
   const pool = order.slice(0, 10);
@@ -2718,6 +3037,9 @@ function buildDraftClass(G) {
   }
   G.draftOrder = order.concat(playoffTeams.map((t) => t.id));
   G.draftPick = 0;
+  // Which year this order belongs to. Without it last June's order looks like
+  // this June's for the whole offseason before the class is built.
+  G.draftYear = G.year;
   return G.draftClass;
 }
 function inPlayoffs(G, teamId) {
@@ -2757,27 +3079,115 @@ function draftPlayer(G, pid) {
   }
   return true;
 }
+/* --------------------------------- the list --------------------------------
+ * Prospects you've starred, IN THE ORDER YOU STARRED THEM. It's a ranked
+ * shortlist, not a set of bookmarks: when a pick is made for you — the "draft
+ * best available" step, or auto-drafting the rest of the round — it goes down
+ * this list first and only falls back to the board when none of your men are
+ * left. Which is the point. A draft you sim through is otherwise a draft
+ * somebody else's ranking made for you.
+ * ------------------------------------------------------------------------- */
+function starList(G) {
+  return (G.draftStars || []).filter((id) => G.players[id] && G.draftClass.includes(id));
+}
+function toggleStar(G, pid) {
+  G.draftStars = G.draftStars || [];
+  const i = G.draftStars.indexOf(pid);
+  if (i >= 0) G.draftStars.splice(i, 1); else G.draftStars.push(pid);
+  return G;
+}
+
+/* Who a club takes with the pick in front of it. Your own picks consult your
+   list; everyone else reads their own fogged board. The AI branch must stay
+   exactly one `gauss` call — the harness replays seasons off the seed. */
+function autoPickFor(G, team) {
+  if (team === G.userTeam) {
+    const want = starList(G)[0];
+    if (want) return G.players[want];
+  }
+  // Clubs draft off their OWN read of the board, with a little extra noise, so
+  // the same prospect isn't ranked identically by all thirty-two of them.
+  const best = G.draftClass
+    .map((id) => G.players[id])
+    .map((p) => ({ p, v: draftValue(p) + gauss(G, 0, 3.2) }))
+    .sort((a, b) => b.v - a.v)[0];
+  return best ? best.p : null;
+}
+
 function autoDraft(G, stopAtUser) {
   let guard = 0;
   while (G.draftPick < draftPicksTotal(G) && G.draftClass.length && guard++ < 400) {
     const team = pickOwner(G, G.draftPick);
     if (stopAtUser && team === G.userTeam) return false;
-    // Clubs draft off their OWN read of the board, with a little extra noise, so
-    // the same prospect isn't ranked identically by all thirty-two of them.
-    const best = G.draftClass
-      .map((id) => G.players[id])
-      .map((p) => ({ p, v: draftValue(p) + gauss(G, 0, 3.2) }))
-      .sort((a, b) => b.v - a.v)[0];
-    draftPlayer(G, best.p.id);
+    const best = autoPickFor(G, team);
+    if (!best) break;
+    draftPlayer(G, best.id);
   }
   if (!G.draftClass.length || G.draftPick >= draftPicksTotal(G)) closeDraft(G);
   return true;
+}
+
+/* ONE pick, then stop. "Sim to my pick" skips past the twelve selections that
+   decide whether your man is still there, which is the part worth watching —
+   you want to see the run happen, not be told how it ended. Nothing is
+   duplicated: it makes the same draw `autoDraft` makes, one time.
+   Returns false when it's your turn and there is nothing to advance. */
+function draftOnePick(G) {
+  if (!G.draftClass.length || G.draftPick >= draftPicksTotal(G)) return false;
+  if (pickOwner(G, G.draftPick) === G.userTeam) return false;
+  const best = autoPickFor(G, pickOwner(G, G.draftPick));
+  if (!best) return false;
+  draftPlayer(G, best.id);
+  if (!G.draftClass.length || G.draftPick >= draftPicksTotal(G)) closeDraft(G);
+  return true;
+}
+
+/* When a prospect is likely to come off the board.
+ *
+ * Sniping only means something if you can see the run coming, and the
+ * information is all there: clubs draft off `draftValue` plus noise, so the
+ * board sorted by that value IS the expected order. A prospect ranked fifth
+ * among those left is expected to go five picks from now.
+ *
+ * It is an EXPECTATION, not a promise — the `gauss(0, 3.2)` each club adds is
+ * real and routinely moves a man several slots either way. `risk` says how
+ * close he is to the edge of your reach so the board can shade it rather than
+ * printing a false certainty: 1 means he'll almost surely be gone, 0 that he
+ * will almost surely last. `NOISE_PICKS` is how far that rating spreads him,
+ * measured in picks, and it is the honest width of the guess.
+ * ------------------------------------------------------------------------- */
+const NOISE_PICKS = 5;
+function draftProjection(G) {
+  const out = { byId: {}, myNext: null };
+  if (!G.draftClass || !G.draftClass.length) return out;
+  const total = draftPicksTotal(G);
+  for (let i = G.draftPick; i < total; i++) {
+    if (pickOwner(G, i) === G.userTeam) { out.myNext = i + 1; break; }
+  }
+  G.draftClass.map((id) => G.players[id]).filter(Boolean)
+    .sort((a, b) => draftValue(b) - draftValue(a))
+    .forEach((p, rank) => {
+      const at = G.draftPick + 1 + rank;   // expected overall pick number
+      // How far past your turn he is expected to last, in picks.
+      const slack = out.myNext == null ? null : at - out.myNext;
+      out.byId[p.id] = {
+        at,
+        // Below your pick means he's expected to be gone; the closer to zero,
+        // the more the noise decides it.
+        risk: slack == null ? 0 : clamp(0.5 - slack / (2 * NOISE_PICKS), 0, 1),
+        slack,
+      };
+    });
+  return out;
 }
 /* Anyone left on the board goes home. Without this every undrafted prospect
    stayed in G.players forever — 100+ dead records a season. */
 function closeDraft(G) {
   (G.draftClass || []).forEach((id) => { delete G.players[id]; });
   G.draftClass = [];
+  // The list is for one draft. Left standing it would hold ids of players who
+  // no longer exist, and next June it would silently steer your first pick.
+  G.draftStars = [];
   return G;
 }
 
@@ -2806,10 +3216,14 @@ function offseasonStage(G) {
 function offseasonAction(G) {
   switch (offseasonStage(G)) {
     case "review": return { label: "Go to the draft" };
-    case "draft":
-      return pickOwner(G, G.draftPick) === G.userTeam
-        ? { label: "Draft best available", onClock: true }
-        : { label: "Sim to my pick" };
+    case "draft": {
+      if (pickOwner(G, G.draftPick) !== G.userTeam) return { label: "Sim to my pick" };
+      // Name him. "Draft best available" is a shrug; "Draft Elias Riis" is a
+      // decision you can see coming and change your mind about.
+      const want = starList(G)[0];
+      return { label: want && G.players[want] ? `Draft ${fullName(G.players[want])}` : "Draft best available",
+        onClock: true };
+    }
     case "draftDone": return { label: "Go to free agency" };
     case "fa": return { label: `Start the ${G.year + 1} season` };
     default: return null;
@@ -2820,8 +3234,13 @@ function doOffseasonStep(G) {
   if (st === "review") { G.offseasonStep = "draft"; return G; }
   if (st === "draft") {
     if (pickOwner(G, G.draftPick) === G.userTeam) {
-      const best = G.draftClass.map((id) => G.players[id])
-        .sort((a, b) => (b.pot * 0.7 + b.ovr * 0.3) - (a.pot * 0.7 + a.ovr * 0.3))[0];
+      // Your list first, then the best on the board — the same order
+      // `autoPickFor` uses, so the header button and the draft screen can't
+      // disagree about who your next pick would be.
+      const want = starList(G)[0];
+      const best = want ? G.players[want]
+        : G.draftClass.map((id) => G.players[id])
+          .sort((a, b) => (b.pot * 0.7 + b.ovr * 0.3) - (a.pot * 0.7 + a.ovr * 0.3))[0];
       if (best) draftPlayer(G, best.id);
     }
     autoDraft(G, true);
@@ -2895,10 +3314,33 @@ function tradeValue(G, p) {
   v *= clamp(1 + (mv - p.contract.amt) * 0.09, 0.35, 1.6);
   return Math.max(0.2, v);
 }
+/* What a pick is worth in a trade.
+ *
+ * WHERE it lands matters, not just which round it's in. A first from the worst
+ * club in the league and a first from the Cup holder were both flatly worth 9,
+ * which made "trade a specific pick" a cosmetic idea — you could hand over the
+ * best asset in the sport and get back the least valuable pick of the same
+ * round, and the AI would call it even. The multiplier runs about 1.5× at first
+ * overall down to 0.75× at the end of the round, centred on 1 so the average
+ * pick is worth exactly what it always was and every existing valuation the
+ * deadline logic depends on still holds.
+ *
+ * A future year's slot is genuinely unknown, so it gets the neutral 1 — on top
+ * of the existing discount for being further away. */
 function pickValue(G, pk) {
   const base = pk.round === 1 ? 9 : 2.5;
   const yearsOut = pk.year - G.year;
-  return base * Math.pow(0.88, Math.max(0, yearsOut));
+  const slot = pickSlot(G, pk);
+  const decay = Math.pow(0.88, Math.max(0, yearsOut));
+  if (slot == null) return base * decay;
+  const n = (G.teams || TEAMS).length || 32;
+  // 0 at the top of the round, 1 at the bottom.
+  const depth = clamp((slot - 1) / Math.max(1, n - 1), 0, 1);
+  /* 1.5 at first overall, 0.75 at the end of the round, and — because the mean
+     of (1-d)² over a uniform draw is exactly a third — an average of 1. Convex
+     rather than linear because that's how pick value actually behaves: the gap
+     between 1st and 5th dwarfs the gap between 25th and 29th. */
+  return base * decay * (0.75 + 0.75 * Math.pow(1 - depth, 2));
 }
 /* The deadline. Trades run from the offseason through roughly three quarters of
    the schedule, then the rosters are locked for the run-in and the playoffs. */
@@ -3006,21 +3448,75 @@ function doTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts) {
 
 /* Players you've made available. Listing a player invites offers rather than
    forcing a sale — the AI still has to want him. */
-/* Picks you can actually move. Future years always; this year's too while the
-   draft is still running and the slot hasn't come up yet — trading up or down
-   on the clock is where draft-day drama lives. */
+/* Picks you can actually move.
+ *
+ * THIS YEAR'S PICKS COUNT. They used to be tradable only once the draft was
+ * already under way, which quietly removed the single most-traded asset in the
+ * sport from the deadline: "our second in June" is what a rental costs. The
+ * draft for year Y happens at the END of year Y — until the class is on the
+ * clock, every one of that year's picks is a future asset like any other.
+ *
+ * Once the draft IS running, a pick survives only until its own slot comes up;
+ * after that there is nothing left to trade. Trading up or down on the clock is
+ * where draft-day drama lives, so that window stays open. */
 function tradablePicks(G, teamId) {
-  const out = (G.picks || []).filter((pk) => pk.owner === teamId && pk.year > G.year);
-  if (G.phase === "offseason" && G.draftClass && G.draftClass.length) {
-    const used = new Set((G.draftLog || []).map((d) => `${d.round}-${d.pick}`));
-    (G.picks || []).forEach((pk) => {
-      if (pk.owner !== teamId || pk.year !== G.year) return;
-      // Its slot in this year's order — gone once that pick has been made.
-      const slot = G.draftOrder.indexOf(pk.orig) + (pk.round - 1) * G.teams.length;
-      if (slot >= G.draftPick) out.push(pk);
-    });
+  const out = [];
+  /* Has THIS year's order been drawn? `G.draftYear` is stamped when the class
+     is built, and it has to be checked rather than just the presence of
+     `G.draftOrder` — the order from last June survives the rollover, and
+     reading it as this year's would price every pick off a stale lottery. */
+  const drawn = G.draftYear === G.year && G.draftOrder && G.draftOrder.length;
+  (G.picks || []).forEach((pk) => {
+    if (pk.owner !== teamId || pk.year < G.year) return;
+    if (pk.year > G.year) { out.push(pk); return; }
+    // This year's: still ahead of us until the draft is actually on the clock.
+    if (G.phase !== "offseason" || !drawn) { out.push(pk); return; }
+    // Its slot in this year's order — gone once that pick has been made.
+    const slot = G.draftOrder.indexOf(pk.orig) + (pk.round - 1) * G.teams.length;
+    if (slot >= G.draftPick) out.push(pk);
+  });
+  return out.sort((a, b) => a.year - b.year || a.round - b.round
+    || ((pickSlot(G, a) || 99) - (pickSlot(G, b) || 99)));
+}
+
+/* Where a pick is likely to land. A round number alone doesn't distinguish the
+   asset everyone wants from the one nobody does — a first from the worst club
+   in the league and a first from the Cup holder are both "round 1", and being
+   unable to tell them apart is what made trading picks feel vague.
+ *
+ * Exact once the lottery has been drawn, PROJECTED off the current table before
+ * that, and genuinely unknown for future years — which the UI says rather than
+ * papering over with a number that would be a guess about a season nobody has
+ * played. Returns a 1-based position within the round. */
+function pickSlot(G, pk) {
+  if (pk.year !== G.year) return null;
+  if (G.draftYear === G.year && G.draftOrder && G.draftOrder.length) {
+    const i = G.draftOrder.indexOf(pk.orig);
+    return i < 0 ? null : i + 1;
   }
-  return out.sort((a, b) => a.year - b.year || a.round - b.round);
+  // Before the lottery: worst record picks first, which is the order as it
+  // stands tonight and moves with every result.
+  const order = G.teams.slice().sort((a, b) => a.pts - b.pts || (a.gf - a.ga) - (b.gf - b.ga));
+  const i = order.findIndex((t) => t.id === pk.orig);
+  return i < 0 ? null : i + 1;
+}
+
+/* How a pick reads on a trade sheet: the year, the round, whose it originally
+   was, and where it is expected to land. */
+function pickLabel(G, pk, teamId) {
+  const rd = pk.round === 1 ? "1st" : pk.round === 2 ? "2nd" : pk.round === 3 ? "3rd" : `${pk.round}th`;
+  const from = pk.orig !== teamId && G.teams[pk.orig] ? ` (from ${G.teams[pk.orig].abbr})` : "";
+  const slot = pickSlot(G, pk);
+  const exact = !!(G.draftOrder && G.draftOrder.length);
+  return {
+    text: `${pk.year} ${rd}${from}`,
+    slot,
+    // A projection is a projection and is labelled as one.
+    note: slot == null ? null : `${exact ? "" : "proj. "}${ordinal(slot)} of the round`,
+    // Roughly how good the asset is, for colour: an early pick is a real prize.
+    tone: slot == null ? "text-slate-500"
+      : slot <= 5 ? "text-emerald-300" : slot <= 15 ? "text-sky-300" : "text-slate-400",
+  };
 }
 
 /* Who's likely to be in the other net, and where he's soft. The information
@@ -3222,27 +3718,67 @@ function releasePlayer(G, pid) {
    Without this the only way to keep anyone was to let him hit the market and
    outbid thirty-one other clubs for a player you already had. */
 const EXTEND_LOYALTY = 0.94;
+/* Extending EARLY.
+ *
+ * This used to be the last year of the deal or nothing, which meant the one
+ * genuinely strategic contract decision in the sport — buying a young player's
+ * best years before he has proved they're coming — didn't exist. You could only
+ * ever re-sign a man at the moment his leverage was highest.
+ *
+ * Now you can open talks with up to `EXTEND_EARLY_MAX` years still to run, and
+ * the trade-off is priced rather than forbidden: he is being asked to tear up a
+ * signed contract, so every year he gives up costs `EXTEND_EARLY_PREMIUM` on
+ * top. Buying out a season of certainty is expensive NOW and can look like a
+ * bargain in three years — which is the actual decision, and it only exists
+ * because the price moves.
+ *
+ * The new deal REPLACES the old one and runs for the remaining years plus the
+ * new ones, so the cap sees the new number immediately. That's the honest
+ * reading of an early extension in a single-contract model: you don't get to
+ * pay the old price and hold the new term.
+ * ------------------------------------------------------------------------- */
+const EXTEND_EARLY_MAX = 3;        // years still to run and he'll still talk
+const EXTEND_EARLY_PREMIUM = 0.11; // per year he's being asked to give up
+const EXTEND_TERM_MAX = 8;         // total length of the resulting deal
+
 function canExtend(G, p) {
-  return p && p.teamId != null && !p.retired && p.contract.yrs <= 1;
+  return !!(p && p.teamId != null && !p.retired && p.contract.yrs >= 1
+    && p.contract.yrs <= EXTEND_EARLY_MAX);
 }
+/* How much of his deal he's tearing up. Zero in the final year, which is why
+   the ordinary last-year extension is priced exactly as it always was. */
+function extendEarlyYears(p) { return Math.max(0, (p && p.contract ? p.contract.yrs : 1) - 1); }
+
+/* `yrs` is the TOTAL length of the new deal, so the number the UI shows and the
+   number he's signing for are the same thing. */
 function extensionAsk(G, pid, teamId, yrs) {
-  return round1(Math.max(MIN_SALARY, askingPrice(G, pid, teamId, yrs) * EXTEND_LOYALTY));
+  const p = G.players[pid];
+  const early = extendEarlyYears(p);
+  const base = askingPrice(G, pid, teamId, yrs) * EXTEND_LOYALTY;
+  return round1(Math.max(MIN_SALARY, base * (1 + early * EXTEND_EARLY_PREMIUM)));
 }
 function extendPlayer(G, pid, amt, yrs) {
   const p = G.players[pid];
   if (!p) return { ok: false, why: "no such player" };
-  if (!canExtend(G, p)) return { ok: false, why: "he isn't in the last year of his deal" };
+  if (!canExtend(G, p))
+    return { ok: false, why: p && p.teamId != null && !p.retired
+      ? `he has ${p.contract.yrs} years to run — too early to talk`
+      : "he isn't yours to extend" };
+  if (yrs < p.contract.yrs)
+    return { ok: false, why: `he's already signed for ${p.contract.yrs} years` };
+  if (yrs > EXTEND_TERM_MAX) return { ok: false, why: `${EXTEND_TERM_MAX} years is the limit` };
   const R = rules(G);
   const want = extensionAsk(G, pid, p.teamId, yrs);
   if (amt < want * 0.82) return { ok: false, want, why: "not interested at that number" };
   if (amt < want) return { ok: false, counter: want, counterYrs: yrs, why: `he wants $${want}M × ${yrs}` };
-  // The extension replaces his expiring deal, so only the DIFFERENCE is new money.
+  // The extension replaces his existing deal, so only the DIFFERENCE is new money.
   if (R.hardCap && capHit(G, p.teamId) - effectiveCap(G, p) + amt > R.capAmount)
     return { ok: false, why: "no cap space for that" };
+  const added = yrs - p.contract.yrs;
   p.contract = { amt: round1(amt), yrs };
   p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
   p.ntcWaived = false;
-  return { ok: true, want };
+  return { ok: true, want, added };
 }
 
 /* What an AI club does with its own expiring players. It is not a blanket
@@ -3534,10 +4070,53 @@ function applyFarmGame(G, res) {
   return G;
 }
 
-// Every affiliate whose parent club plays today plays the mirrored fixture.
+/* Every affiliate whose parent club plays today plays the mirrored fixture.
+ *
+ * The scorelines used to be thrown away the instant they'd moved the table,
+ * which is why the farm read as a spreadsheet that ticked over rather than a
+ * league: your affiliate could win eleven straight and the only trace was the
+ * points column. Two things are kept now, and deliberately only two:
+ *
+ *  - `G.farmDay`, last night's scoreboard across the league. One day, replaced
+ *    every day, so it costs the same in March as in October.
+ *  - `t.farmLog`, a full season of results — FOR YOUR CLUB ONLY. Nobody ever
+ *    opens Calgary's affiliate's game log, and thirty-two of these would cost
+ *    thirty-two times as much as the one that gets read.
+ * ------------------------------------------------------------------------- */
+const FARM_LOG_MAX = 120;
 function simFarmDay(G, day) {
-  (G.schedule[day] || []).forEach((fx) => { applyFarmGame(G, simFarmGame(G, fx.home, fx.away)); });
+  const games = [];
+  (G.schedule[day] || []).forEach((fx) => {
+    const res = simFarmGame(G, fx.home, fx.away);
+    applyFarmGame(G, res);
+    games.push({ h: res.home, a: res.away, hg: res.hg, ag: res.ag, ot: !!res.ot, so: !!res.so });
+  });
+  G.farmDay = { day, games };
+  const mine = games.find((g) => g.h === G.userTeam || g.a === G.userTeam);
+  if (mine) {
+    const t = G.teams[G.userTeam];
+    const home = mine.h === G.userTeam;
+    t.farmLog = (t.farmLog || []).concat([{
+      d: day, o: home ? mine.a : mine.h, home,
+      gf: home ? mine.hg : mine.ag, ga: home ? mine.ag : mine.hg,
+      ot: mine.ot, so: mine.so,
+    }]).slice(-FARM_LOG_MAX);
+  }
   return G;
+}
+
+/* What the affiliate has coming. The farm mirrors the parent schedule, so the
+   fixture list already exists and costs nothing to store — it just has to be
+   read from the other side. */
+function farmFixtures(G, teamId, n) {
+  const out = [];
+  for (let d = G.day; d < G.schedule.length && out.length < (n || 5); d++) {
+    (G.schedule[d] || []).forEach((fx) => {
+      if (fx.home !== teamId && fx.away !== teamId) return;
+      out.push({ d, opp: fx.home === teamId ? fx.away : fx.home, home: fx.home === teamId });
+    });
+  }
+  return out;
 }
 
 function farmStandings(G, filterFn) {
@@ -3760,9 +4339,11 @@ function startNextSeason(G) {
   G.teams.forEach((t) => {
     t.w = 0; t.l = 0; t.otl = 0; t.pts = 0; t.gf = 0; t.ga = 0; t.gp = 0; t.streak = 0; t.l10 = [];
     t.farmRec = blankFarmRec();
+    t.farmLog = null;
     t.lines = null;
   });
   G.farmCup = null;
+  G.farmDay = null;
   G.results = [];
   G.playoffs = null;
   G.awards = null;
@@ -4533,6 +5114,31 @@ function RatingBar({ label, v }) {
   );
 }
 
+/* Point shares as a number AND a bar, because the number alone doesn't say
+   whether 6.8 was a good year. `split` draws the offensive and defensive halves
+   in the same two colours the OPS and DPS columns use, so one glance says both
+   how big the season was and what it was made of. A negative total — a real
+   result for a fourth-liner who was on for nothing but goals against — draws
+   nothing rather than an inverted bar, and keeps its minus sign on the number.
+   Bars are clamped at the peak, never wider than the track. */
+function ShareBar({ v, max, split }) {
+  const val = v || 0;
+  const width = (n) => `${clamp((n / Math.max(1, max)) * 100, 0, 100)}%`;
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="tnum w-8 text-right text-slate-200">{val.toFixed(1)}</span>
+      <div className="w-14 h-1.5 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45] flex">
+        {val <= 0 ? null : split ? (
+          <>
+            <div className="h-full bg-sky-500" style={{ width: width(Math.max(0, split[0])) }} />
+            <div className="h-full bg-emerald-500" style={{ width: width(Math.max(0, split[1])) }} />
+          </>
+        ) : <div className="h-full bg-sky-500" style={{ width: width(val) }} />}
+      </div>
+    </div>
+  );
+}
+
 /* A young player's season is either developing him or wasting him, and until
    this existed the only way to find out was to hit the rollover and compare
    ratings — by which point the year is gone. This says it while there is still
@@ -4606,6 +5212,12 @@ function PlayerModal({ G, pid, onClose, onGo }) {
     Object.keys(c).forEach((k) => { if (typeof c[k] === "number" && k !== "year" && k !== "teamId") a[k] = (a[k] || 0) + c[k]; });
     return a;
   }, {});
+  const cShares = careerShares(p);
+  /* Every bar in the table is drawn against his OWN best season, not a league
+     scale — the question a career table answers is which of his years was the
+     big one, and a fixed scale makes a fourth-liner's whole career one flat
+     line. Floored so a modest career doesn't render as a full bar every row. */
+  const psPeak = Math.max(4, ...career.map((c) => lineShares(c).ps));
   return (
     <Modal wide title={
       <span className="flex items-center gap-2">
@@ -4820,7 +5432,7 @@ function PlayerModal({ G, pid, onClose, onGo }) {
           ) : null}
           {career.length ? (
             <Section title="Career">
-              <SortTable min={340} initial="year" asc
+              <SortTable min={isG ? 400 : 460} initial="year" asc
                 rows={career.map((c, i) => ({ ...c, _i: i }))}
                 rowKey={(r) => r._i}
                 cols={isG ? [
@@ -4829,8 +5441,14 @@ function PlayerModal({ G, pid, onClose, onGo }) {
                     cls: "text-slate-400" },
                   { key: "gp", label: "GP", get: (r) => r.gp || 0 },
                   { key: "w", label: "W", get: (r) => r.w || 0 },
+                  { key: "l", label: "L", get: (r) => r.l || 0 },
                   { key: "so", label: "SO", get: (r) => r.so || 0 },
                   { key: "sv", label: "SV%", get: (r) => (r.sa ? r.sv / r.sa : 0), cell: (r) => (r.sa ? (r.sv / r.sa * 100).toFixed(1) : "—") },
+                  // Negated so the sort puts the BEST goals-against average on
+                  // top, the same trick the season leaderboard uses.
+                  { key: "gaa", label: "GAA", get: (r) => -gaa(r), cell: (r) => (r.toi ? gaa(r).toFixed(2) : "—") },
+                  { key: "ps", label: "PS", get: (r) => lineShares(r).ps,
+                    cell: (r) => <ShareBar v={lineShares(r).ps} max={psPeak} /> },
                 ] : [
                   { key: "year", label: "Yr", get: (r) => (r.total ? `${r.year}–${r.to}` : r.year) },
                   { key: "tm", label: "Tm", get: (r) => (G.teams[r.teamId] ? G.teams[r.teamId].abbr : "—"),
@@ -4840,17 +5458,46 @@ function PlayerModal({ G, pid, onClose, onGo }) {
                   { key: "a", label: "A", get: (r) => r.a || 0 },
                   { key: "p", label: "P", get: (r) => (r.g || 0) + (r.a || 0) },
                   { key: "pim", label: "PIM", get: (r) => r.pim || 0 },
+                  /* Offence and defence side by side, because the whole point
+                     of the split is that they trade off — a season can be big
+                     in one column and empty in the other. */
+                  { key: "ops", label: "OPS", get: (r) => lineShares(r).ops,
+                    cell: (r) => <span className="tnum text-sky-300">{lineShares(r).ops.toFixed(1)}</span> },
+                  { key: "dps", label: "DPS", get: (r) => lineShares(r).dps,
+                    cell: (r) => <span className="tnum text-emerald-300">{lineShares(r).dps.toFixed(1)}</span> },
+                  { key: "ps", label: "PS", get: (r) => lineShares(r).ps,
+                    cell: (r) => { const s = lineShares(r);
+                      return <ShareBar v={s.ps} max={psPeak} split={[s.ops, s.dps]} />; } },
                 ]} />
               <div className="px-3 py-2 text-xs border-t border-[#1e2b45] tnum space-y-0.5">
                 <div className="text-slate-400">
                   Career: {totals.gp || 0} GP
-                  {isG ? ` · ${totals.w || 0}W · ${totals.so || 0} SO`
+                  {isG ? `${` · ${totals.w || 0}-${totals.l || 0}-${totals.otl || 0}`
+                    }${totals.sa ? ` · ${((totals.sv / totals.sa) * 100).toFixed(1)} SV%` : ""
+                    }${totals.toi ? ` · ${gaa(totals).toFixed(2)} GAA` : ""
+                    } · ${totals.so || 0} SO`
                        : ` · ${totals.g || 0}G ${totals.a || 0}A · ${(totals.g || 0) + (totals.a || 0)} P`}
                 </div>
+                {cShares.ps ? (
+                  <div className="text-slate-400">
+                    Point shares: <b className="text-sky-300">{cShares.ps.toFixed(1)}</b>
+                    {isG ? null : (
+                      <span className="text-slate-500">
+                        {" "}— {cShares.ops.toFixed(1)} offensive, {cShares.dps.toFixed(1)} defensive
+                      </span>
+                    )}
+                    <span className="text-slate-500">
+                      {" · "}{(cShares.ps / Math.max(1, totals.gp || 0) * 82).toFixed(1)} per 82 games
+                    </span>
+                  </div>
+                ) : null}
                 {p.careerPO && p.careerPO.gp ? (
                   <div className="text-amber-300/80">
                     Playoffs: {p.careerPO.gp} GP over {p.poRuns || 1} run{(p.poRuns || 1) === 1 ? "" : "s"}
-                    {isG ? ` · ${p.careerPO.w}W · ${p.careerPO.so} SO`
+                    {isG ? `${` · ${p.careerPO.w}W`
+                      }${p.careerPO.sa ? ` · ${(svPct(p.careerPO) * 100).toFixed(1)} SV%` : ""
+                      }${p.careerPO.toi ? ` · ${gaa(p.careerPO).toFixed(2)} GAA` : ""
+                      } · ${p.careerPO.so} SO`
                          : ` · ${p.careerPO.g}G ${p.careerPO.a}A · ${p.careerPO.g + p.careerPO.a} P`}
                   </div>
                 ) : null}
@@ -5059,6 +5706,7 @@ function Splash({ onStart }) {
   const [team, setTeam] = useState(0);
   const [difficulty, setDifficulty] = useState("normal");
   const [seasonLen, setSeasonLen] = useState(82);
+  const [startAt, setStartAt] = useState("season");
   const [tick, setTick] = useState(0);
   // The league you're browsing IS the league you'll get — same seed in, same
   // world out. Rerolling picks a new one. Math.random is fine here: this is
@@ -5102,6 +5750,23 @@ function Splash({ onStart }) {
               </select>
             </div>
           </div>
+          {/* Where the job starts. Taking over in the offseason means the first
+              roster you ice is one you built rather than one you inherited. */}
+          <div>
+            <div className="text-xs text-slate-400 mb-1">Start the career</div>
+            <div className="grid sm:grid-cols-2 gap-2">
+              {[["season", "At game one", "Take the roster as it stands and drop straight into opening night."],
+                ["offseason", "Before the draft and free agency", `Run the ${preview.year} draft and the market first, then play ${preview.year + 1}.`],
+              ].map(([k, label, blurb]) => (
+                <button key={k} onClick={() => setStartAt(k)}
+                  className={`text-left p-2.5 rounded-lg border transition-colors
+                    ${startAt === k ? "border-sky-500 bg-sky-950/40" : "border-[#1e2b45] hover:border-[#2c3d63]"}`}>
+                  <div className={`text-sm font-medium ${startAt === k ? "text-sky-300" : "text-slate-200"}`}>{label}</div>
+                  <div className="text-[11px] text-slate-400 mt-0.5">{blurb}</div>
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="flex items-center justify-between gap-2">
             <div className="text-xs text-slate-400">
               Pick a club below. This is the real league — the one you're looking at is the one you'll manage.
@@ -5111,7 +5776,7 @@ function Splash({ onStart }) {
           </div>
           <ClubPicker G={preview} value={team} onPick={setTeam} />
           <button className={`${btnPri} w-full py-2`}
-            onClick={() => onStart({ team, difficulty, rules: { seasonLen }, seed })}>
+            onClick={() => onStart({ team, difficulty, rules: { seasonLen }, seed, start: startAt })}>
             Take over the {TEAMS[team].city} {TEAMS[team].name}
           </button>
         </div>
@@ -5127,7 +5792,12 @@ function form5(t) { return (t.l10 || []).slice(-5); }
 function HomeTab({ G, setG, go, openPlayer }) {
   const t = G.teams[G.userTeam];
   const today = G.schedule[G.day] || [];
-  const mine = today.find((f) => f.home === G.userTeam || f.away === G.userTeam);
+  /* Only during the season. The calendar is built before the first puck drops,
+     so a career that STARTS in the offseason sits on day 0 with a full fixture
+     list — and the header cheerfully announced tonight's game in the middle of
+     the draft. */
+  const mine = G.phase === "regular"
+    ? today.find((f) => f.home === G.userTeam || f.away === G.userTeam) : null;
   const dl = daysToDeadline(G);
   const leaders = rosterOf(G, G.userTeam).filter((p) => p.pos !== "G")
     .sort((a, b) => pts(b.season) - pts(a.season)).slice(0, 5);
@@ -5269,6 +5939,72 @@ function HotCold({ G, p }) {
 
 /* The affiliate as a club you follow rather than a spreadsheet that ticks over:
    where it sits, who's carrying it, and what it's playing for. */
+/* Your affiliate's season as a set of games rather than a points total: what
+   it just played, what it plays next, and how the rest of the league did last
+   night. The fixtures aren't stored anywhere — the farm mirrors the parent
+   schedule, so they're read straight off `G.schedule`. */
+function FarmGames({ G }) {
+  const mine = G.teams[G.userTeam];
+  const log = (mine.farmLog || []).slice().reverse();
+  const next = farmFixtures(G, G.userTeam, 5);
+  const night = G.farmDay;
+  const res = (r) => (r.gf > r.ga ? "W" : r.so ? "SOL" : r.ot ? "OTL" : "L");
+  const tone = (r) => (r.gf > r.ga ? "text-emerald-400" : r.ot || r.so ? "text-amber-300" : "text-rose-400");
+  return (
+    <div className="space-y-3">
+      <Section title="Results" right={<span className="text-xs text-slate-500">{log.length} played</span>}>
+        {log.length ? (
+          <div className="max-h-72 overflow-y-auto">
+            {log.map((r, i) => (
+              <div key={i} className="flex items-center gap-2 px-3 py-1.5 border-b border-[#16223a] last:border-0 text-sm">
+                <span className="text-slate-500 tnum w-12 text-xs">Day {r.d + 1}</span>
+                <span className={`w-9 font-semibold text-xs ${tone(r)}`}>{res(r)}</span>
+                <span className="flex-1 truncate">
+                  <span className="text-slate-500">{r.home ? "vs" : "at"} </span>
+                  {G.teams[r.o] ? `${G.teams[r.o].city} ${G.teams[r.o].name}` : "—"}
+                </span>
+                <span className="tnum">{r.gf}–{r.ga}</span>
+                {r.so ? <span className="text-[10px] text-slate-500">SO</span>
+                  : r.ot ? <span className="text-[10px] text-slate-500">OT</span> : null}
+              </div>
+            ))}
+          </div>
+        ) : <div className="px-3 py-4 text-sm text-slate-500">The affiliate hasn't played yet.</div>}
+      </Section>
+
+      <Section title="Coming up" className="p-3">
+        <div className="pt-1 space-y-1">
+          {next.length ? next.map((f, i) => (
+            <div key={i} className="flex items-center gap-2 text-sm">
+              <span className="text-slate-500 tnum w-12 text-xs">Day {f.d + 1}</span>
+              <span className="flex-1 truncate">
+                <span className="text-slate-500">{f.home ? "vs" : "at"} </span>
+                {G.teams[f.opp].city} {G.teams[f.opp].name}
+              </span>
+              <span className="tnum text-xs text-slate-500">{farmRec(G.teams[f.opp]).pts} pts</span>
+            </div>
+          )) : <div className="text-sm text-slate-500">No fixtures left this season.</div>}
+        </div>
+      </Section>
+
+      {night && night.games.length ? (
+        <Section title={`Around the league — day ${night.day + 1}`} className="p-3">
+          <div className="pt-1 grid sm:grid-cols-2 gap-x-4 gap-y-1">
+            {night.games.map((g, i) => (
+              <div key={i} className={`flex items-center gap-2 text-xs
+                ${g.h === G.userTeam || g.a === G.userTeam ? "text-sky-300" : "text-slate-400"}`}>
+                <span className="flex-1 truncate">{G.teams[g.a].abbr} at {G.teams[g.h].abbr}</span>
+                <span className="tnum">{g.ag}–{g.hg}</span>
+                <span className="w-5 text-[10px] text-slate-500">{g.so ? "SO" : g.ot ? "OT" : ""}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      ) : null}
+    </div>
+  );
+}
+
 function FarmLeaguePanel({ G, openPlayer }) {
   const [view, setView] = useState("squad");
   const mine = G.teams[G.userTeam];
@@ -5311,7 +6047,7 @@ function FarmLeaguePanel({ G, openPlayer }) {
       ) : null}
 
       <div className="flex gap-2 flex-wrap">
-        {[["squad", "Your prospects"], ["table", "Farm table"], ["leaders", "Scoring leaders"]].map(([k, label]) => (
+        {[["squad", "Your prospects"], ["games", "Games"], ["table", "Farm table"], ["leaders", "Scoring leaders"]].map(([k, label]) => (
           <button key={k} className={view === k ? btnPri : btnGhost} onClick={() => setView(k)}>{label}</button>
         ))}
       </div>
@@ -5335,6 +6071,8 @@ function FarmLeaguePanel({ G, openPlayer }) {
             )) : <div className="text-sm text-slate-500">Nobody on the farm.</div>}
           </div>
         </Section>
+      ) : view === "games" ? (
+        <FarmGames G={G} />
       ) : view === "table" ? (
         <Section>
           {/* keyed per view: React reuses one SortTable across these branches,
@@ -5477,29 +6215,49 @@ function RosterTab({ G, setG, openPlayer, notify }) {
         </button>
       </div>
       {expiring.length ? (
-        <Section title="Expiring contracts"
-          right={<span className="text-xs text-slate-400">{expiring.length} in their last year</span>}
+        <Section title="Contract talks"
+          right={<span className="text-xs text-slate-400">
+            {expiring.filter((p) => p.contract.yrs <= 1).length} expiring
+            {expiring.filter((p) => p.contract.yrs > 1).length
+              ? ` · ${expiring.filter((p) => p.contract.yrs > 1).length} open early` : ""}
+          </span>}
           className="p-3">
           <div className="space-y-1.5 pt-1">
             <div className="text-xs text-slate-500">
               Re-sign them now and they stay. Let them run out and they hit the market with everyone else.
+              You can open talks with {EXTEND_EARLY_MAX} years still to run — but a player being asked to tear
+              up a signed deal charges about {Math.round(EXTEND_EARLY_PREMIUM * 100)}% more for every year he
+              gives up. The buttons are the TOTAL length of the new deal.
             </div>
-            {expiring.map((p) => (
-              <div key={p.id} className="flex items-center gap-2 text-sm flex-wrap">
-                <PosBadge pos={p.pos} />
-                <span className="cursor-pointer hover:text-sky-300" onClick={() => openPlayer(p.id)}>
-                  {shortName(p)} <span className="text-slate-500">({p.age}, {p.ovr})</span>
-                </span>
-                {p.farm ? <span className="text-[10px] text-slate-500">farm</span> : null}
-                <span className="flex-1" />
-                {[2, 4, 6].map((y) => (
-                  <button key={y} className={`${btnGhost} text-xs px-2 py-1 whitespace-nowrap`}
-                    onClick={() => resign(p, y)}>
-                    {y}y · ${extensionAsk(G, p.id, G.userTeam, y)}M
-                  </button>
-                ))}
-              </div>
-            ))}
+            {expiring.map((p) => {
+              const left = p.contract.yrs;
+              const early = extendEarlyYears(p);
+              /* Only terms that actually extend him. Offering a man with three
+                 years left a "2 year" deal is a pay cut in disguise, and
+                 `extendPlayer` refuses it anyway. */
+              const terms = [2, 4, 6].filter((y) => y > left);
+              return (
+                <div key={p.id} className="flex items-center gap-2 text-sm flex-wrap">
+                  <PosBadge pos={p.pos} />
+                  <span className="cursor-pointer hover:text-sky-300" onClick={() => openPlayer(p.id)}>
+                    {shortName(p)} <span className="text-slate-500">({p.age}, {p.ovr})</span>
+                  </span>
+                  {p.farm ? <span className="text-[10px] text-slate-500">farm</span> : null}
+                  <span className={`text-[10px] ${left <= 1 ? "text-amber-300" : "text-slate-500"}`}>
+                    {left <= 1 ? "expiring" : `${left}y left · +${Math.round(early * EXTEND_EARLY_PREMIUM * 100)}% early`}
+                  </span>
+                  <span className="flex-1" />
+                  <span className="text-[10px] text-slate-600">${effectiveCap(G, p)}M now</span>
+                  {terms.map((y) => (
+                    <button key={y} className={`${btnGhost} text-xs px-2 py-1 whitespace-nowrap`}
+                      title={`${y} years in total — ${y - left} new on top of the ${left} he has left`}
+                      onClick={() => resign(p, y)}>
+                      {y}y · ${extensionAsk(G, p.id, G.userTeam, y)}M
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
           </div>
         </Section>
       ) : null}
@@ -5785,16 +6543,50 @@ function ScheduleTab({ G, openTeam }) {
 
 function StandingsTab({ G, openTeam }) {
   const [mode, setMode] = useState("div");
+  // Recomputed whenever the table is, so the line moves with the season.
+  const berths = useMemo(() => playoffBerths(G), [G]);
+  const clinch = useMemo(() => clinchState(G), [G]);
   const cols = [
-    { key: "team", label: "Team", get: (t) => t.city, cell: (t) => (
-      <span className="whitespace-nowrap font-medium flex items-center gap-2">
-        <span className="w-2.5 h-4 rounded-sm inline-block shrink-0"
-          style={{ background: clubColour(t)[0], borderLeft: `2px solid ${clubColour(t)[1]}` }} />
-        {t.city} {t.name}
-        {t.id === G.userTeam ? null : t.rivalId === G.userTeam
-          ? <span className="text-[10px] text-rose-400" title="your rival">rival</span> : null}
-      </span>
-    ) },
+    { key: "berth", label: "", thCls: "w-10",
+      // Sorts by seed so "in the field" clusters at the top whichever column
+      // the table is ordered by — an out-of-field club sorts below every berth.
+      get: (t) => { const b = berths[t.id]; return b && b.in ? 20 - b.seed : 0; },
+      cell: (t) => {
+        const b = berths[t.id];
+        if (!b) return null;
+        if (!b.in) return (
+          <span className={`text-[10px] tnum ${b.firstOut ? "text-amber-400" : "text-slate-600"}`}
+            title={b.firstOut ? "first club out of the playoff field" : "outside the playoff field"}>
+            {b.firstOut ? "1st out" : "—"}
+          </span>
+        );
+        return (
+          <span title={b.wildcard ? "wildcard berth" : "in the playoff field"}
+            className={`inline-block text-[10px] font-semibold tnum px-1.5 py-0.5 rounded
+              ${b.wildcard ? "bg-sky-500/20 text-sky-300" : "bg-emerald-500/20 text-emerald-300"}`}>
+            {b.label}
+          </span>
+        );
+      } },
+    { key: "team", label: "Team", get: (t) => t.city, cell: (t) => {
+      const c = clinch[t.id] || {};
+      return (
+        <span className="whitespace-nowrap font-medium flex items-center gap-2">
+          <span className="w-2.5 h-4 rounded-sm inline-block shrink-0"
+            style={{ background: clubColour(t)[0], borderLeft: `2px solid ${clubColour(t)[1]}` }} />
+          {t.city} {t.name}
+          {/* The letter goes next to the name, where a real table puts it. */}
+          {c.mark ? (
+            <span className={`text-[11px] font-bold ${c.mark === "z" ? "text-amber-300" : "text-emerald-400"}`}
+              title={CLINCH_LABEL[c.mark]}>{c.mark}</span>
+          ) : c.eliminated ? (
+            <span className="text-[11px] font-bold text-rose-500" title="eliminated from the playoffs">e</span>
+          ) : null}
+          {t.id === G.userTeam ? null : t.rivalId === G.userTeam
+            ? <span className="text-[10px] text-rose-400" title="your rival">rival</span> : null}
+        </span>
+      );
+    } },
     { key: "gp", label: "GP", get: (t) => t.gp },
     { key: "w", label: "W", get: (t) => t.w },
     { key: "l", label: "L", get: (t) => t.l },
@@ -5807,11 +6599,25 @@ function StandingsTab({ G, openTeam }) {
     { key: "l10", label: "L10", get: (t) => (t.l10 || []).filter((x) => x === "W").length,
       cell: (t) => <span className="text-xs text-slate-400">{(t.l10 || []).join("")}</span> },
   ];
+  /* The cutoff is drawn UNDER the last club holding a berth, which is what
+     makes it a line rather than a colour: everything above it is in, and the
+     club immediately below it is the one that would take the place. */
   const Table = ({ title, list }) => (
     <Section title={title}>
-      <SortTable min={640} cols={cols} rows={list} initial="pts" rowKey={(t) => t.id}
+      <SortTable min={680} cols={cols} rows={list} initial="pts" rowKey={(t) => t.id}
         onRow={(t) => openTeam(t.id)}
-        rowCls={(t) => (t.id === G.userTeam ? "bg-sky-950/40" : "")} />
+        rowCls={(t) => {
+          const b = berths[t.id] || {};
+          /* Both marks are inset box-shadows in ONE class. They can't be two
+             classes — each would set `box-shadow` and the loser would simply
+             vanish — and the cutoff can't be a border, because the row already
+             has one from SortTable and overriding it means fighting
+             specificity. */
+          const edge = b.in && b.bubble
+            ? "shadow-[inset_3px_0_0_0_rgb(16,185,129),inset_0_-2px_0_0_rgb(16,185,129)]"
+            : b.in ? "shadow-[inset_3px_0_0_0_rgb(16,185,129)]" : "";
+          return [t.id === G.userTeam ? "bg-sky-950/40" : "", edge].filter(Boolean).join(" ");
+        }} />
     </Section>
   );
   return (
@@ -5820,6 +6626,30 @@ function StandingsTab({ G, openTeam }) {
         {[["div", "Division"], ["conf", "Conference"], ["league", "League"]].map(([k, l]) => (
           <button key={k} className={mode === k ? btnPri : btnGhost} onClick={() => setMode(k)}>{l}</button>
         ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-400 px-1">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-6 h-3 rounded-sm bg-emerald-500/20 border-l-2 border-emerald-500" />
+          {ruleValue(G, "playoffFormat") === "seeded" ? "top eight" : "top three in the division"}
+        </span>
+        {ruleValue(G, "playoffFormat") === "seeded" ? null : (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block w-6 h-3 rounded-sm bg-sky-500/20" />wildcard
+          </span>
+        )}
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block w-6 border-b-2 border-emerald-500/60" />the cutoff
+        </span>
+        <span className="text-amber-400">1st out — next in line</span>
+        {Object.keys(clinch).length ? (
+          <span className="flex items-center gap-2">
+            <span className="text-slate-600">|</span>
+            <span><b className="text-amber-300">z</b> division</span>
+            <span><b className="text-emerald-400">y</b> top three</span>
+            <span><b className="text-emerald-400">x</b> berth</span>
+            <span><b className="text-rose-500">e</b> eliminated</span>
+          </span>
+        ) : null}
       </div>
       {mode === "div" && DIVS.map((d, i) => <Table key={i} title={`${CONFS[DIV_CONF[i]]} · ${d}`} list={divStandings(G, i)} />)}
       {mode === "conf" && CONFS.map((c, i) => <Table key={i} title={c} list={confStandings(G, i)} />)}
@@ -5849,6 +6679,20 @@ function StatsTab({ G, openPlayer }) {
   };
   const nameCell = (p) => <span className="whitespace-nowrap">{fullName(p)}<HotCold G={G} p={p} /></span>;
 
+  /* Computed ONCE per render, not per cell. `pointShares` was already being
+     called inside a sort comparator over every skater in the league; three
+     columns reading it independently would have run it thousands of times a
+     keystroke. The peak is the league leader, so every bar in the table is on
+     the same scale — which is the only scale that answers "is that a lot?". */
+  const shares = useMemo(() => {
+    const m = {};
+    skaters.concat(goalies).forEach((p) => { m[p.id] = pointShares(G, p); });
+    return m;
+  }, [G, scope]);
+  const sh = (p) => shares[p.id] || { ops: 0, dps: 0, gps: 0, ps: 0 };
+  const psPeak = useMemo(
+    () => Math.max(4, ...Object.values(shares).map((s) => s.ps)), [shares]);
+
   const skaterCols = [
     { key: "name", label: "Player", get: (p) => p.ln, cell: nameCell },
     { key: "team", label: "Tm", get: (p) => (p.teamId != null ? G.teams[p.teamId].abbr : "FA"), cell: teamCell },
@@ -5865,8 +6709,12 @@ function StatsTab({ G, openPlayer }) {
     { key: "ppg", label: "PPG", get: (p) => p.season.ppg },
     { key: "hit", label: "Hits", get: (p) => p.season.hit },
     { key: "blk", label: "Blk", get: (p) => p.season.blk },
-    { key: "ps", label: "PS", get: (p) => pointShares(G, p).ps, cls: "font-semibold text-sky-300",
-      cell: (p) => pointShares(G, p).ps.toFixed(1) },
+    { key: "ops", label: "OPS", get: (p) => sh(p).ops, cls: "text-sky-300",
+      cell: (p) => sh(p).ops.toFixed(1) },
+    { key: "dps", label: "DPS", get: (p) => sh(p).dps, cls: "text-emerald-300",
+      cell: (p) => sh(p).dps.toFixed(1) },
+    { key: "ps", label: "PS", get: (p) => sh(p).ps, cls: "font-semibold",
+      cell: (p) => <ShareBar v={sh(p).ps} max={psPeak} split={[sh(p).ops, sh(p).dps]} /> },
   ];
   const goalieCols = [
     { key: "name", label: "Goalie", get: (p) => p.ln, cell: nameCell },
@@ -5882,8 +6730,8 @@ function StatsTab({ G, openPlayer }) {
     { key: "sa", label: "SA", get: (p) => p.season.sa },
     { key: "sosv", label: "SO SV", get: (p) => p.season.sosa ? p.season.sosv / p.season.sosa : 0,
       cell: (p) => (p.season.sosa ? `${p.season.sosv}/${p.season.sosa}` : "—") },
-    { key: "ps", label: "PS", get: (p) => pointShares(G, p).ps, cls: "font-semibold text-sky-300",
-      cell: (p) => pointShares(G, p).ps.toFixed(1) },
+    { key: "ps", label: "PS", get: (p) => sh(p).ps, cls: "font-semibold",
+      cell: (p) => <ShareBar v={sh(p).ps} max={psPeak} /> },
   ];
   return (
     <div className="space-y-3">
@@ -5895,7 +6743,7 @@ function StatsTab({ G, openPlayer }) {
         <button className={scope === "mine" ? btnPri : btnGhost} onClick={() => setScope("mine")}>My club</button>
       </div>
       <Section>
-        <SortTable min={880} rowKey={(p) => p.id} onRow={(p) => openPlayer(p.id)}
+        <SortTable min={mode === "skaters" ? 1040 : 900} rowKey={(p) => p.id} onRow={(p) => openPlayer(p.id)}
           rowCls={(p) => (p.teamId === G.userTeam ? "bg-sky-950/30" : "")}
           cols={mode === "skaters" ? skaterCols : goalieCols}
           rows={mode === "skaters" ? skaters : goalies}
@@ -6184,15 +7032,24 @@ function TradeTab({ G, setG, notify, openPlayer }) {
             ) : null}
           </div>
         ))}
-        {picks.length ? <div className="text-[11px] uppercase tracking-wide text-slate-500 px-2 pt-2">Draft picks</div> : null}
-        {picks.map((pk) => (
-          <label key={pkId(pk)} className={`flex items-center gap-2 px-2 py-1 rounded text-sm cursor-pointer
-            ${pickSel.includes(pkId(pk)) ? "bg-sky-900/50" : "hover:bg-[#16223a]"}`}>
-            <input type="checkbox" checked={pickSel.includes(pkId(pk))} onChange={() => toggle(pickSel, setPickSel, pkId(pk))} />
-            <span className="flex-1">{pk.year} round {pk.round}
-              {pk.orig !== tid ? <span className="text-slate-500"> (from {G.teams[pk.orig].abbr})</span> : null}</span>
-          </label>
-        ))}
+        {picks.length ? (
+          <div className="text-[11px] uppercase tracking-wide text-slate-500 px-2 pt-2">
+            Draft picks <span className="normal-case tracking-normal text-slate-600">— pick one by where it lands</span>
+          </div>
+        ) : null}
+        {picks.map((pk) => {
+          const L = pickLabel(G, pk, tid);
+          return (
+            <label key={pkId(pk)} className={`flex items-center gap-2 px-2 py-1 rounded text-sm cursor-pointer
+              ${pickSel.includes(pkId(pk)) ? "bg-sky-900/50" : "hover:bg-[#16223a]"}`}>
+              <input type="checkbox" checked={pickSel.includes(pkId(pk))} onChange={() => toggle(pickSel, setPickSel, pkId(pk))} />
+              <span className="flex-1 truncate">{L.text}</span>
+              {L.note ? <span className={`text-[11px] tnum ${L.tone}`}>{L.note}</span> : null}
+              <span className="text-slate-500 tnum text-xs w-10 text-right"
+                title="what the AI values this pick at">{pickValue(G, pk).toFixed(1)}</span>
+            </label>
+          );
+        })}
       </div>
     </Section>
   );
@@ -6403,11 +7260,82 @@ function roundName(n) {
   return "First Round";
 }
 
+/* The row in `G.results` a series game came from. Matched on the day it was
+   played; a save from before series games carried one falls back to the
+   scoreline, which is unambiguous enough for two named clubs on one night. */
+function resultFor(G, g) {
+  return (G.results || []).find((r) => r.playoff && r.home === g.home && r.away === g.away
+    && (g.d != null ? r.day === g.d : (r.hg === g.hg && r.ag === g.ag))) || null;
+}
+
+const STRENGTH_LABEL = { pp: "PP", sh: "SH", en: "EN", en6: "6on5" };
+
+/* Who scored. `G.results` has carried this for every game since the first
+   build — regular season and playoffs alike — and only the regular season ever
+   showed it, so a Cup run was seven rows of bare numbers. */
+function ScoringSummary({ G, r, openPlayer }) {
+  if (!r) return <div className="px-3 py-2 text-xs text-slate-500">No summary for this game.</div>;
+  if (!r.scorers || !r.scorers.length) {
+    return <div className="px-3 py-2 text-xs text-slate-500">
+      {r.so ? "Decided in the shootout — no goal is credited to a skater." : "No goals."}
+    </div>;
+  }
+  return (
+    <div className="px-3 py-1.5 space-y-0.5">
+      {r.scorers.map((s, i) => {
+        const p = G.players[s.id];
+        const helpers = (s.a || []).map((id) => G.players[id]).filter(Boolean);
+        return (
+          <div key={i} className="flex items-baseline gap-2 text-xs">
+            <span className="w-8 shrink-0 text-slate-500">{G.teams[s.t] ? G.teams[s.t].abbr : ""}</span>
+            <span className="cursor-pointer hover:text-sky-300 font-medium"
+              onClick={() => p && openPlayer && openPlayer(p.id)}>
+              {p ? fullName(p) : "unknown"}
+            </span>
+            {/* The engine's own codes: "es" is even strength and needs no
+                label, "en6" is a six-on-five goal, and the rest read as-is. */}
+            {STRENGTH_LABEL[s.strength] ? (
+              <span className="text-[10px] uppercase text-amber-300">{STRENGTH_LABEL[s.strength]}</span>
+            ) : null}
+            {helpers.length ? (
+              <span className="text-slate-500 truncate">
+                ({helpers.map((h) => shortName(h)).join(", ")})
+              </span>
+            ) : <span className="text-slate-600">(unassisted)</span>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function SeriesPage({ G, s, onClose, openPlayer }) {
   const hi = G.teams[s.hi], lo = G.teams[s.lo];
-  // Who's actually driving the series.
-  const stars = [s.hi, s.lo].map((tid) => rosterOf(G, tid).filter((p) => p.po && p.po.gp)
-    .sort((a, b) => pts(b.po) - pts(a.po)).slice(0, 5));
+  const [openGame, setOpenGame] = useState(null);
+  /* Who's actually driving THIS series, counted from its own scoring summaries.
+     It used to read `p.po`, the whole-postseason line, which was wrong twice
+     over: it credited a man's other rounds to this one, and `finishSeason`
+     blanks it — so every series you opened after the Cup was handed out said
+     "No games played" about seven games you had just watched. */
+  const stars = useMemo(() => {
+    const tally = {};
+    s.games.forEach((g) => {
+      const r = resultFor(G, g);
+      if (!r) return;
+      (r.scorers || []).forEach((sc) => {
+        const add = (id, k) => {
+          if (!G.players[id]) return;
+          const t = tally[id] = tally[id] || { id, g: 0, a: 0 };
+          t[k]++;
+        };
+        add(sc.id, "g");
+        (sc.a || []).forEach((id) => add(id, "a"));
+      });
+    });
+    return [s.hi, s.lo].map((tid) => Object.values(tally)
+      .filter((t) => G.players[t.id] && G.players[t.id].teamId === tid)
+      .sort((a, b) => (b.g + b.a) - (a.g + a.a) || b.g - a.g).slice(0, 5));
+  }, [G, s]);
   return (
     <Modal wide title={`${hi.city} ${hi.name} vs ${lo.city} ${lo.name}`} onClose={onClose}>
       <div className="space-y-3">
@@ -6417,13 +7345,24 @@ function SeriesPage({ G, s, onClose, openPlayer }) {
             {s.done ? `${G.teams[s.winner].name} advance` : `first to ${winsNeeded(G)}`}
           </div>
         </div>
-        <Section title="Games">
+        <Section title="Games"
+          right={s.games.length ? <span className="text-xs text-slate-500">tap a game for the summary</span> : null}>
           <div>
             {s.games.map((g, i) => (
-              <div key={i} className="flex items-center gap-3 px-3 py-1.5 border-b border-[#16223a] last:border-0 text-sm">
-                <span className="w-16 text-slate-500">Game {i + 1}</span>
-                <span className="flex-1">{G.teams[g.away].abbr} @ {G.teams[g.home].abbr}</span>
-                <span className="tnum">{g.ag}–{g.hg}{g.ot ? " OT" : ""}</span>
+              <div key={i} className="border-b border-[#16223a] last:border-0">
+                <button onClick={() => setOpenGame(openGame === i ? null : i)}
+                  className={`w-full flex items-center gap-3 px-3 py-1.5 text-sm text-left hover:bg-[#16223a]
+                    ${openGame === i ? "bg-[#16223a]" : ""}`}>
+                  <span className="w-16 text-slate-500">Game {i + 1}</span>
+                  <span className="flex-1">{G.teams[g.away].abbr} @ {G.teams[g.home].abbr}</span>
+                  <span className="tnum">{g.ag}–{g.hg}{g.so ? " SO" : g.ot ? " OT" : ""}</span>
+                  <span className="text-slate-600 text-xs w-3">{openGame === i ? "−" : "+"}</span>
+                </button>
+                {openGame === i ? (
+                  <div className="bg-[#0b1424] border-t border-[#16223a]">
+                    <ScoringSummary G={G} r={resultFor(G, g)} openPlayer={openPlayer} />
+                  </div>
+                ) : null}
               </div>
             ))}
             {!s.games.length ? <div className="px-3 py-4 text-sm text-slate-500">Not started.</div> : null}
@@ -6433,11 +7372,11 @@ function SeriesPage({ G, s, onClose, openPlayer }) {
           {[0, 1].map((i) => (
             <Section key={i} title={`${G.teams[i === 0 ? s.hi : s.lo].name} leaders`} className="p-3">
               <div className="pt-1">
-                {stars[i].length ? stars[i].map((p) => (
-                  <div key={p.id} className="flex justify-between text-sm py-0.5 cursor-pointer hover:text-sky-300"
-                    onClick={() => openPlayer(p.id)}>
-                    <span>{shortName(p)}</span>
-                    <span className="tnum text-slate-400">{p.po.g}G {p.po.a}A · {pts(p.po)}</span>
+                {stars[i].length ? stars[i].map((t) => (
+                  <div key={t.id} className="flex justify-between text-sm py-0.5 cursor-pointer hover:text-sky-300"
+                    onClick={() => openPlayer(t.id)}>
+                    <span>{shortName(G.players[t.id])}</span>
+                    <span className="tnum text-slate-400">{t.g}G {t.a}A · {t.g + t.a}</span>
                   </div>
                 )) : <div className="text-sm text-slate-500">No games played.</div>}
               </div>
@@ -6837,15 +7776,143 @@ function HistoryTab({ G, openPlayer, openTeam }) {
  * rather than a ranked list everybody already agrees on.
  * ------------------------------------------------------------------------- */
 
+/* ------------------------------ the draft order ----------------------------
+ * The draft used to be a board of available prospects and a reverse-order log
+ * of what had already gone. What it never showed was the ORDER — who is on the
+ * clock, who is coming up, and which of those picks belong to somebody other
+ * than the club that earned them. That's the thing you actually read a draft
+ * off: not "who's left" but "how many good ones survive until my turn".
+ * ------------------------------------------------------------------------- */
+function draftOrderRows(G) {
+  if (!G.draftOrder || !G.draftOrder.length) return [];
+  const total = draftPicksTotal(G);
+  const made = {};
+  (G.draftLog || []).forEach((d) => { made[d.pick - 1] = d; });
+  const rows = [];
+  for (let i = 0; i < total; i++) {
+    const orig = G.draftOrder[i % G.teams.length];
+    rows.push({
+      i, pick: i + 1, round: Math.floor(i / G.teams.length) + 1,
+      orig, owner: pickOwner(G, i), made: made[i] || null,
+    });
+  }
+  return rows;
+}
+
+/* A deal for one thing: an upcoming pick, or a player somebody just took.
+ *
+ * It is the ordinary trade machinery pointed at a single target — `evalTrade`
+ * decides, `doTrade` executes — rather than a second, looser set of rules that
+ * happens to live on the draft screen. What it changes is the WORK: you don't
+ * have to leave the draft, find the club in a dropdown and hunt for the asset
+ * while the clock runs. Only picks and prospects can go the other way, which is
+ * the honest scope of a draft-day deal and keeps you from accidentally
+ * dismantling your NHL roster with two clicks. */
+function DraftDealModal({ G, setG, notify, target, onClose }) {
+  const [mine, setMine] = useState([]);
+  const [myPicks, setMyPicks] = useState([]);
+  const other = target.owner;
+  const pkId = (pk) => `${pk.year}-${pk.round}-${pk.orig}`;
+  const offerPicks = tradablePicks(G, G.userTeam).filter((pk) => !(target.kind === "pick"
+    && pk.year === target.pk.year && pk.round === target.pk.round && pk.orig === target.pk.orig));
+  // Your NHL roster is deliberately not on the table here.
+  const offerPlayers = rosterOf(G, G.userTeam, true).filter((p) => p.farm)
+    .sort((a, b) => (b.pot + b.ovr) - (a.pot + a.ovr));
+
+  const theirPlayers = target.kind === "player" ? [target.pid] : [];
+  const theirPicks = target.kind === "pick" ? [target.pk] : [];
+  const selPicks = offerPicks.filter((pk) => myPicks.includes(pkId(pk)));
+  const ev = evalTrade(G, G.userTeam, mine, selPicks, other, theirPlayers, theirPicks);
+  const toggle = (list, set, id) => set(list.includes(id) ? list.filter((x) => x !== id) : list.concat(id));
+
+  const send = () => {
+    const g2 = migrate(JSON.parse(JSON.stringify(G)));
+    const r = doTrade(g2, G.userTeam, mine, selPicks, other, theirPlayers, theirPicks);
+    if (!r.ok) { notify(r.why || "they said no"); return; }
+    setG(g2);
+    notify(target.kind === "pick"
+      ? `Acquired ${G.teams[other].abbr}'s ${target.pk.year} round ${target.pk.round} pick.`
+      : `Acquired ${fullName(G.players[target.pid])}.`);
+    onClose();
+  };
+
+  const title = target.kind === "pick"
+    ? `Trade for pick ${target.pick} — ${G.teams[other].city} ${G.teams[other].name}`
+    : `Trade for ${fullName(G.players[target.pid])}`;
+
+  return (
+    <Modal wide title={title} onClose={onClose}>
+      <div className="space-y-3">
+        <div className={`${card} p-3 text-sm`}>
+          <span className="text-slate-400">You get: </span>
+          {target.kind === "pick"
+            ? <b>{target.pk.year} round {target.pk.round}{target.orig !== other
+                ? ` (originally ${G.teams[target.orig].abbr})` : ""} — pick {target.pick} overall</b>
+            : <b>{fullName(G.players[target.pid])} · {G.players[target.pid].pos} · taken {target.pick} overall</b>}
+        </div>
+
+        <Section title="What you're offering" className="max-h-72 overflow-y-auto">
+          <div className="p-2 space-y-0.5">
+            {offerPicks.length ? <div className="text-[11px] uppercase tracking-wide text-slate-500 px-2">Picks</div> : null}
+            {offerPicks.map((pk) => {
+              const L = pickLabel(G, pk, G.userTeam);
+              return (
+                <label key={pkId(pk)} className={`flex items-center gap-2 px-2 py-1 rounded text-sm cursor-pointer
+                  ${myPicks.includes(pkId(pk)) ? "bg-sky-900/50" : "hover:bg-[#16223a]"}`}>
+                  <input type="checkbox" checked={myPicks.includes(pkId(pk))}
+                    onChange={() => toggle(myPicks, setMyPicks, pkId(pk))} />
+                  <span className="flex-1 truncate">{L.text}</span>
+                  {L.note ? <span className={`text-[11px] ${L.tone}`}>{L.note}</span> : null}
+                  <span className="text-slate-500 tnum text-xs w-10 text-right">{pickValue(G, pk).toFixed(1)}</span>
+                </label>
+              );
+            })}
+            {offerPlayers.length ? <div className="text-[11px] uppercase tracking-wide text-slate-500 px-2 pt-2">Prospects</div> : null}
+            {offerPlayers.map((p) => (
+              <label key={p.id} className={`flex items-center gap-2 px-2 py-1 rounded text-sm cursor-pointer
+                ${mine.includes(p.id) ? "bg-sky-900/50" : "hover:bg-[#16223a]"}`}>
+                <input type="checkbox" checked={mine.includes(p.id)} onChange={() => toggle(mine, setMine, p.id)} />
+                <PosBadge pos={p.pos} />
+                <span className="flex-1 truncate">{shortName(p)} <span className="text-slate-500">({p.age})</span></span>
+                <span className="text-slate-400 tnum text-xs">{p.ovr} → {p.pot}</span>
+              </label>
+            ))}
+            {!offerPicks.length && !offerPlayers.length
+              ? <div className="px-2 py-3 text-sm text-slate-500">You have nothing to offer but your roster.</div> : null}
+          </div>
+        </Section>
+
+        <div className={`${card} p-3 flex flex-wrap items-center gap-3`}>
+          <span className={`text-sm ${ev.ok ? "text-emerald-300" : "text-amber-300"}`}>
+            {ev.ok ? "They'd do that." : (ev.why || "they want more back")}
+          </span>
+          {ev.aVal != null ? (
+            <span className="text-xs text-slate-500 tnum">your side {ev.aVal} · theirs {ev.bVal}</span>
+          ) : null}
+          <span className="flex-1" />
+          <button className={btnGhost} onClick={onClose}>Cancel</button>
+          <button className={btnPri} disabled={!ev.ok} onClick={send}>Make the trade</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function DraftBoard({ G, setG, notify, openPlayer }) {
   const [posFilter, setPosFilter] = useState("ALL");
   const [onlyUnseen, setOnlyUnseen] = useState(false);
+  const [onlyStars, setOnlyStars] = useState(false);
+  const [deal, setDeal] = useState(null);
   const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); const r = fn(g2); setG(g2); return r; };
 
   const total = draftPicksTotal(G);
   const onClock = G.draftClass.length && G.draftPick < total ? pickOwner(G, G.draftPick) : null;
   const round = Math.floor(G.draftPick / G.teams.length) + 1;
   const mine = onClock === G.userTeam;
+  const proj = useMemo(() => draftProjection(G), [G]);
+  const stars = starList(G);
+  const [orderRound, setOrderRound] = useState(round);
+  const orderRows = useMemo(() => draftOrderRows(G), [G]);
 
   // What the organisation is actually short of, so the board can flag it.
   const org = rosterOf(G, G.userTeam, true);
@@ -6858,6 +7925,7 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
   let board = G.draftClass.map((id) => G.players[id]).filter(Boolean);
   if (posFilter !== "ALL") board = board.filter((p) => p.pos === posFilter);
   if (onlyUnseen) board = board.filter((p) => p.scout && p.scout.fog > 0.45);
+  if (onlyStars) board = board.filter((p) => stars.includes(p.id));
 
   const myPicks = [];
   for (let i = G.draftPick; i < total && myPicks.length < 4; i++) {
@@ -6888,6 +7956,11 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
             <span className="text-slate-500"> left</span>
           </div>
           <div className="flex-1" />
+          {/* One pick at a time, because the run before your turn is the part
+              worth watching. Disabled on your own clock — there is nothing to
+              advance until you pick. */}
+          <button className={btnGhost} disabled={mine || onClock == null}
+            onClick={() => upd((g) => draftOnePick(g))}>Next pick</button>
           <button className={btnGhost} onClick={() => upd((g) => autoDraft(g, true))}>Sim to my pick</button>
           <button className={btnPri} onClick={() => upd((g) => { autoDraft(g, false); g.offseasonStep = "fa"; })}>
             Auto the rest
@@ -6895,14 +7968,91 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
         </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
           {myPicks.length ? <span>Your next picks: <span className="text-slate-200">{myPicks.join(", ")}</span></span> : null}
-          <span className="text-slate-500">
-            This year's unused picks are tradeable from the Trade tab while the draft runs.
-          </span>
           {Object.keys(need).length
             ? <span>Thin at <span className="text-amber-300">{Object.keys(need).join(", ")}</span></span>
             : <span>No glaring holes in the organisation.</span>}
         </div>
+        {stars.length ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs border-t border-[#1e2b45] pt-2">
+            <span className="text-slate-400">Your list</span>
+            <span className="text-slate-600">— auto-draft goes down it in order</span>
+            {stars.map((id, i) => {
+              const p = G.players[id];
+              const pr = proj.byId[id];
+              return (
+                <span key={id} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded
+                  bg-amber-500/15 border border-amber-500/40 text-amber-200">
+                  <span className="text-amber-400/70 tnum">{i + 1}.</span>
+                  <button className="hover:underline" onClick={() => openPlayer(id)}>{p ? shortName(p) : "?"}</button>
+                  {pr ? <span className={`tnum ${pr.risk > 0.6 ? "text-rose-300" : pr.risk > 0.35 ? "text-amber-300" : "text-emerald-300"}`}
+                    title="where he's expected to go">~{pr.at}</span> : null}
+                  <button className="text-amber-400/60 hover:text-rose-300"
+                    onClick={() => upd((g) => toggleStar(g, id))} title="remove from your list">×</button>
+                </span>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
+
+      {/* The order itself: who has picked, what they took, and who is coming. */}
+      <Section title="Draft order"
+        right={
+          <div className="flex gap-1">
+            {Array.from({ length: DRAFT_ROUNDS }, (_, i) => i + 1).map((r) => (
+              <button key={r} onClick={() => setOrderRound(r)}
+                className={`text-[11px] px-1.5 py-0.5 rounded ${orderRound === r
+                  ? "bg-sky-500/25 text-sky-200" : "text-slate-500 hover:text-slate-300"}`}>R{r}</button>
+            ))}
+          </div>
+        }>
+        <div className="max-h-80 overflow-y-auto">
+          {orderRows.filter((r) => r.round === orderRound).map((r) => {
+            const took = r.made ? G.players[r.made.pid] : null;
+            const isNow = r.i === G.draftPick;
+            const traded = r.owner !== r.orig;
+            return (
+              <div key={r.i} className={`flex items-center gap-2 px-3 py-1 border-b border-[#16223a] last:border-0 text-sm
+                ${isNow ? "bg-sky-900/40" : r.owner === G.userTeam ? "bg-sky-950/30" : ""}`}>
+                <span className="w-8 text-slate-500 tnum text-xs">{r.pick}</span>
+                <span className="w-24 shrink-0 truncate text-xs">
+                  <span className={r.owner === G.userTeam ? "text-sky-300 font-medium" : "text-slate-300"}>
+                    {G.teams[r.owner].abbr}
+                  </span>
+                  {traded ? <span className="text-slate-600"> ←{G.teams[r.orig].abbr}</span> : null}
+                </span>
+                {took ? (
+                  <>
+                    <PosBadge pos={took.pos} />
+                    <button className="flex-1 text-left truncate hover:text-sky-300"
+                      onClick={() => openPlayer(took.id)}>{fullName(took)}</button>
+                    {r.owner !== G.userTeam ? (
+                      <button className="text-[11px] text-sky-400 hover:underline"
+                        onClick={() => setDeal({ kind: "player", pid: took.id, owner: r.owner, pick: r.pick, orig: r.orig })}>
+                        trade for
+                      </button>
+                    ) : <span className="text-[11px] text-slate-600">yours</span>}
+                  </>
+                ) : isNow ? (
+                  <span className="flex-1 text-sky-300 text-xs">on the clock</span>
+                ) : (
+                  <>
+                    <span className="flex-1 text-slate-600 text-xs">upcoming</span>
+                    {r.owner !== G.userTeam && r.round <= PICK_ROUNDS ? (
+                      <button className="text-[11px] text-sky-400 hover:underline"
+                        onClick={() => setDeal({ kind: "pick", owner: r.owner, pick: r.pick, orig: r.orig,
+                          pk: { year: G.year, round: r.round, orig: r.orig, owner: r.owner } })}>
+                        trade for
+                      </button>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            );
+          })}
+          {!orderRows.length ? <div className="px-3 py-4 text-sm text-slate-500">No order yet.</div> : null}
+        </div>
+      </Section>
 
       <div className="flex flex-wrap gap-2">
         {["ALL", "C", "LW", "RW", "D", "G"].map((k) => (
@@ -6911,13 +8061,23 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
         <button className={onlyUnseen ? btnPri : btnGhost} onClick={() => setOnlyUnseen(!onlyUnseen)}>
           Unscouted only
         </button>
+        <button className={onlyStars ? btnPri : btnGhost} onClick={() => setOnlyStars(!onlyStars)}>
+          ★ My list{stars.length ? ` (${stars.length})` : ""}
+        </button>
       </div>
 
       <Section title={`Board — ${board.length} available`}>
-        <SortTable min={880} rows={board} initial="val" rowKey={(p) => p.id}
+        <SortTable min={1000} rows={board} initial="val" rowKey={(p) => p.id}
           onRow={(p) => openPlayer(p.id)}
           rowCls={(p) => (need[p.pos] ? "bg-amber-950/20" : "")}
           cols={[
+            { key: "star", label: "★", thCls: "w-6",
+              get: (p) => (stars.includes(p.id) ? 1 : 0),
+              cell: (p) => (
+                <button className={stars.includes(p.id) ? "text-amber-300" : "text-slate-700 hover:text-slate-400"}
+                  title={stars.includes(p.id) ? "on your list" : "add to your list"}
+                  onClick={(e) => { e.stopPropagation(); upd((g) => toggleStar(g, p.id)); }}>★</button>
+              ) },
             { key: "name", label: "Prospect", get: (p) => p.ln,
               cell: (p) => <span className="whitespace-nowrap">{fullName(p)}</span> },
             { key: "pos", label: "Pos", get: (p) => POS.indexOf(p.pos),
@@ -6934,6 +8094,24 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
             { key: "seen", label: "Report", get: (p) => -(p.scout ? p.scout.fog : 0), cls: "text-xs",
               cell: (p) => <span className={p.scout && p.scout.fog <= 0.2 ? "text-emerald-400" : "text-slate-400"}>
                 {scoutLabel(p)}</span> },
+            /* Where the league is expected to take him, against where you pick
+               next. This is the sniping column: green means he should still be
+               there, red means take him now or lose him. */
+            { key: "proj", label: "Goes", get: (p) => -((proj.byId[p.id] || {}).at || 999), cls: "text-xs",
+              cell: (p) => {
+                const pr = proj.byId[p.id];
+                if (!pr) return <span className="text-slate-600">—</span>;
+                const tone = proj.myNext == null ? "text-slate-400"
+                  : pr.risk > 0.6 ? "text-rose-400" : pr.risk > 0.35 ? "text-amber-300" : "text-emerald-400";
+                return (
+                  <span className={`tnum ${tone}`}
+                    title={proj.myNext == null ? "you have no picks left"
+                      : pr.slack >= 0 ? `expected to last ${pr.slack} picks past your turn at ${proj.myNext}`
+                      : `expected gone ${-pr.slack} picks before your turn at ${proj.myNext}`}>
+                    ~{pr.at}
+                  </span>
+                );
+              } },
             { key: "val", label: "", get: (p) => draftValue(p), cell: (p) => (
               <span className="flex gap-2 justify-end">
                 <button className="text-xs text-emerald-400 hover:underline disabled:opacity-30"
@@ -6941,15 +8119,33 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
                   onClick={(e) => { e.stopPropagation(); const r = upd((g) => scoutProspect(g, p.id));
                     if (r && !r.ok) notify(r.why); }}>scout</button>
                 {mine ? (
+                  /* Make the pick and STOP. It used to run straight on to your
+                     next turn, which threw away the whole point of sitting in
+                     the room: you couldn't watch the run, you couldn't trade up
+                     into it, and by the time you saw the board again the man
+                     you were weighing had gone. Advancing is now its own
+                     button. */
                   <button className="text-xs text-sky-400 hover:underline"
-                    onClick={(e) => { e.stopPropagation(); upd((g) => { draftPlayer(g, p.id); autoDraft(g, true); }); }}>
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      upd((g) => {
+                        draftPlayer(g, p.id);
+                        // Making the last pick by hand still has to end the
+                        // draft; `draftPlayer` only makes a selection.
+                        if (!g.draftClass.length || g.draftPick >= draftPicksTotal(g)) {
+                          closeDraft(g); g.offseasonStep = "fa";
+                        }
+                      });
+                    }}>
                     draft
                   </button>
                 ) : null}
               </span>
             ) },
-          ]} empty="The board is empty." />
+          ]} empty={onlyStars ? "Nothing on your list is still available." : "The board is empty."} />
       </Section>
+
+      {deal ? <DraftDealModal G={G} setG={setG} notify={notify} target={deal} onClose={() => setDeal(null)} /> : null}
 
       {G.draftLog && G.draftLog.length ? (
         <Section title="Picks so far">
@@ -7031,8 +8227,18 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
           <div className="grid sm:grid-cols-2 gap-x-4 gap-y-3 text-sm pt-1">
             {["mvp", "scoring", "goals", "defence", "goalie", "rookie"].map((k) => {
               const ballotRows = (A.votes && A.votes[k]) || [];
-              // A counting title is won on the number, not on a vote.
+              /* A counting title is won on the NUMBER, not on a vote, so it is
+                 shown and measured as one: bars in proportion to the leader's
+                 total, and the total itself in the margin. The share a ballot
+                 computes is meaningless here — it's a shifted score built to
+                 make close votes readable, and printing it beside a scoring
+                 race said 31% of a man who led the league in points. */
               const counted = k === "scoring" || k === "goals";
+              const unit = k === "scoring" ? "pts" : "g";
+              const top = ballotRows.length ? (ballotRows[0].val || 0) : 0;
+              const width = (v) => (counted
+                ? (top > 0 ? Math.round(((v.val || 0) / top) * 100) : 0)
+                : Math.round(v.share * 100));
               return (
                 <div key={k} className="space-y-1">
                   <div>
@@ -7040,6 +8246,7 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
                     {A[k] != null && G.players[A[k]]
                       ? <button className="font-medium hover:text-sky-300" onClick={() => openPlayer(A[k])}>{nm(A[k])}</button>
                       : "—"}
+                    {counted && top ? <span className="text-slate-500 text-xs"> · {top} {unit}</span> : null}
                   </div>
                   {ballotRows.length > 1 ? (
                     <div className="space-y-0.5">
@@ -7048,10 +8255,16 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
                           <button className="w-40 truncate text-left text-xs text-slate-300 hover:text-sky-300"
                             onClick={() => openPlayer(v.id)}>{nm(v.id)}</button>
                           <div className="flex-1 h-1.5 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
-                            <div className="h-full bg-sky-500" style={{ width: `${Math.round(v.share * 100)}%` }} />
+                            <div className={`h-full ${counted ? "bg-emerald-500" : "bg-sky-500"}`}
+                              style={{ width: `${width(v)}%` }} />
                           </div>
-                          <span className="w-10 text-right text-[11px] tnum text-slate-400">
-                            {counted ? "" : `${Math.round(v.share * 100)}%`}
+                          <span className="w-12 text-right text-[11px] tnum text-slate-400">
+                            {/* A save made before ballots carried their raw
+                                score has no number to show; the share is still
+                                right for the vote awards. */}
+                            {counted
+                              ? (v.val != null ? `${Math.round(v.val)} ${unit}` : "—")
+                              : `${Math.round(v.share * 100)}%`}
                           </span>
                         </div>
                       ))}
@@ -7317,7 +8530,7 @@ function App() {
     }
     // The seed comes from the club picker, so the league he previewed is the
     // league he gets. Without it the preview would be a different world.
-    const g = newGame(opts.team, { difficulty: opts.difficulty, rules: opts.rules, seed: opts.seed });
+    const g = newGame(opts.team, { difficulty: opts.difficulty, rules: opts.rules, seed: opts.seed, start: opts.start });
     const free = [0, 1, 2].find((s) => !slotMeta(s));
     setSlot(free != null ? free : 0);
     setG(g);

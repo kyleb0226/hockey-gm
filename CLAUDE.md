@@ -155,6 +155,13 @@ which is what makes line construction and last change matter.
   - **`otFormat`** — `3on3` / `5on5` / `none`. `none` allows real ties.
   - **`playoffFormat`** — `divisional` (top 3 per division + 2 conference wildcards, the
     interesting one) or `seeded` (1–8). Both must produce exactly 8 first-round series.
+    **`playoffBerths(G)` turns the field into a per-club verdict the table can render** (`A1`,
+    `WC2`, a plain seed, `bubble`, `firstOut`) and **`clinchState(G)` says who is mathematically
+    safe or done** — `z` division, `y` top three, `x` berth, `e` eliminated. Clinching is not
+    reasoned about case by case: it asks `playoffField` on a hypothetical table where every rival
+    wins out and takes every tie (and the mirror for elimination). Conservative, and it can never
+    disagree with the bracket, because it *is* the bracket's own function. The harness plays the
+    season out and checks that every club told it had clinched actually made the field.
   - **`hardCap` / `capAmount`** — the hard cap is the defining GM constraint. `evalTrade` and
     `signPlayer` both refuse to breach it.
 - **Difficulty** (`DIFFICULTIES`, `diff(G)`) scales budget, AI asking prices, injury frequency and
@@ -171,6 +178,24 @@ plus extra noise**, so thirty-two clubs genuinely disagree about the board.
 `p.draft = {year, round, pick, teamId}` is stamped on the player for life and `G.draftLog` records
 the pick-by-pick order. `closeDraft` deletes everyone left on the board — without it a hundred-odd
 undrafted prospects leaked into `G.players` every year.
+
+**The draft is a room you sit in, not a button you press.**
+- `draftOrderRows(G)` is the ORDER: who picked, what they took, who's on the clock, who's coming,
+  and whose picks have changed hands. The board used to show only what was left and a reverse log
+  of what had gone.
+- `draftOnePick(G)` advances exactly one selection (never the user's) — "sim to my pick" skipped
+  past the twelve picks that decide whether your man survives, which is the part worth watching.
+  **The board's draft button makes the pick and STOPS**; advancing is its own button.
+- `draftProjection(G)` is where the sniping lives: clubs draft off `draftValue` plus noise, so the
+  board sorted by that value IS the expected order. `risk` shades how likely a man is gone before
+  your next turn; `NOISE_PICKS` is the honest width of the guess.
+- `G.draftStars` is a RANKED shortlist in the order you starred them. `autoPickFor(G, team)` takes
+  the top surviving star for YOUR picks and reads its own fogged board for everybody else's — the
+  AI branch must stay exactly one `gauss` call or determinism breaks. `closeDraft` clears the list;
+  left standing it holds ids of players who no longer exist.
+- `DraftDealModal` points the ordinary `evalTrade`/`doTrade` machinery at a single target — an
+  upcoming pick or a player somebody just took — so you never leave the draft. Only picks and
+  prospects can go the other way, which is the honest scope of a draft-day deal.
 
 **Attrition is not optional.** Seven rounds puts 224 players a year into a league that loses ~50
 to retirement, so without culling the save reached 4.9 MB in eight seasons. Two mechanisms in
@@ -199,9 +224,14 @@ lie that nothing in the UI would reveal.
   **Dead money must not follow the player** — `retainedOn` filters `dead` entries so his next club
   negotiates its own price, while `retainedBy` still sees it because that's the half that hits the
   cap. `retainedTraded` is the non-dead subset, used for the `MAX_RETAINED` trade limit.
-- **You can re-sign your own.** `canExtend` (last year of the deal) → `extensionAsk`
-  (`askingPrice` × `EXTEND_LOYALTY`) → `extendPlayer`. The extension REPLACES the expiring deal,
-  so only the difference is new money against the cap.
+- **You can re-sign your own, and you can do it EARLY.** `canExtend` opens with up to
+  `EXTEND_EARLY_MAX` (3) years still to run → `extensionAsk` (`askingPrice` × `EXTEND_LOYALTY`,
+  plus `EXTEND_EARLY_PREMIUM` for every year he's asked to tear up) → `extendPlayer`. `yrs` is the
+  TOTAL length of the new deal, capped at `EXTEND_TERM_MAX`, and a term shorter than what he
+  already has is refused. The extension REPLACES the existing deal, so only the difference is new
+  money against the cap — you don't get to pay the old price and hold the new term. Buying
+  certainty early is expensive now and can look like a bargain in three years; that trade-off only
+  exists because the price moves.
 - **AI clubs make real decisions.** `aiExtensionOffer` runs in `finishSeason` before contracts
   expire: core players and rising youngsters get kept, veterans and fringe players walk.
   **The baseline is deliberately low (0.1).** Starting from a coin flip meant clubs kept everybody
@@ -234,6 +264,12 @@ Every affiliate now plays a real league with a table and a championship.
   goal only if the scorer is real, but always draw the helpers.
 - `runFarmPlayoffs` seeds `FARM_CUP_FIELD` clubs, best-of-three, three rounds, resolved in one go
   at `endRegularSeason`. Winners get `t.farmCups` and `p.farmTitles`.
+- **The scorelines are kept, but only twice over.** `G.farmDay` is last night's league-wide
+  scoreboard, replaced every day so it costs the same in March as in October; `t.farmLog` is a
+  full season of results **for the user's club only** (capped at `FARM_LOG_MAX`), because nobody
+  opens Calgary's affiliate's game log and thirty-two of them cost thirty-two times as much.
+  Fixtures are not stored at all — `farmFixtures` reads the parent schedule, which the farm
+  mirrors. Both reset in `startNextSeason`.
 - `prospectReady` now also fires on farm production — a prospect outscoring the league is telling
   you he's finished learning there, whatever his rating says.
 
@@ -286,6 +322,24 @@ literally the same id, two trophies that could never disagree.
 (0.72) because a starter's saves-over-replacement dwarfs a forward's goals-over-replacement, and
 for skaters the ballot weights `ops` over `dps` because a defenceman's shares come mostly from ice
 time. Only drafted players carry `p.rookie`, so the opening season can never award a Calder.
+
+**One vote, two callers.** `awardPool` builds the electorate (a line and a club record per
+player), `voteAwards` runs the ballots, `awardTrophies` hands out the silverware — idempotent on
+(player, year, award). `computeAwards` is the live path; `backfillAwards` is the retroactive one,
+and they MUST stay one function. Two implementations of "who was the MVP" is two records of the
+same season, and the one nobody looks at is the one that drifts.
+
+**Retroactive awards** (`backfillAwards`, run last in `migrate`) fix two different holes: a season
+never voted on at all is rebuilt from career rows and put through the same ballot; a season that
+*was* voted on but whose trophies never reached the players just gets them delivered. The rebuild
+is refused below `RETRO_MIN_POOL` surviving skaters — `pruneSave` eventually collapses and drops
+old players, and electing an MVP from forty survivors is an invention, not a record. Rebuilt years
+are flagged `h.retroAwards`.
+
+**A counting title is not a vote.** `ballot` stores `val` (the raw score) beside `share`. The
+scoring and goal-scoring titles render `val` with bars scaled to the leader; the Hart, Norris,
+Vezina and Calder render the share as a percentage. Printing "31% of the vote" next to a man who
+scored 54 goals was a made-up number where the real one belonged.
 
 ## The board, and getting sacked
 `boardConfidence` was tracked and displayed from the first build with nothing depending on it, so
@@ -365,6 +419,16 @@ goalies — that alone pushed a .931 goalie from 3rd in the league to 18th. `REP
 three against the `pointShares` assertions (sum ≈ league points, leader 15–18, a goalie in the top
 15) rather than one at a time.
 
+**Shares are STORED on archived seasons, and stored narrowly.** `stampShares` writes them onto
+each career row at the rollover; `lineShares(row)` derives the four numbers on read. Only the
+*independent* parts are kept — `ops`/`dps` for a skater, `gps` for a goalie — at one decimal, with
+zeros omitted and the total never stored. Four fields per row per player per season is a quarter
+of a megabyte a decade and the soak test holds the save under 3 MB (currently 2.95). They are
+stamped rather than recomputed because the constants are calibrated against *that* season's
+league: re-deriving 1998 under 2020's rules would rewrite history on every patch. `migrate`
+backfills a pre-shares save once, gated on the save-level `G.psBackfilled` flag — a per-row test
+can't tell "not done" from "done, and it was zero", and migrate runs on every trade-screen click.
+
 `pointShares(G, p, line)` is hockey's Win Shares — the closest thing the sport has to WAR that a
 box score can produce — split into `ops` / `dps` / `gps` and measured in **standings points**.
 It is a Point Shares-*style* estimate, not Hockey Reference's exact formula (that needs league
@@ -373,8 +437,7 @@ constants this engine doesn't produce). `GOALS_PER_POINT`, `REPL_SV`, `REPL_GC_P
 points actually handed out (~0.95) and the leader lands in the real 15–18 range. The harness pins
 the sum, the leader, the positional composition, and the correlation with production — retune the
 constants only against those.
-Nothing is stored: it's derived from `p.season` (or any career row) on demand, so it costs no
-save size.
+The LIVE season is still derived from `p.season` on demand; only finished seasons are stamped.
 
 ## Seasons split by club
 `p.stints` is a chronological list of spells — one slim stat line per club a player turned out for
@@ -420,9 +483,20 @@ the outcome are real; the clock time within the game is generated.
   at `HOF_CLASS_MAX` a year over `HOF_BAR`. Inductees are exempt from `pruneSave`.
 - **The block** (`setBlock`, `generateOffers`, `acceptOffer`): listing a player invites offers
   every fifth day; the AI still has to want him and be able to fit him.
-- **Draft-day picks**: `tradablePicks` includes this year's picks whose slot hasn't come up yet.
-  `seedPicks` starts at the CURRENT year — seeding only future years meant the first draft had no
-  tradeable picks at all. Only `PICK_ROUNDS` rounds are tradeable; the rest fall back to `orig`.
+- **Draft-day picks**: `tradablePicks` includes **this year's picks all season** — the draft for
+  year Y happens at the END of year Y, so until the class is on the clock they're future assets
+  like any other, and excluding them removed the most-traded asset in the sport ("our second in
+  June") from the deadline. Once the draft is running a pick survives only until its own slot
+  comes up. `seedPicks` starts at the CURRENT year. Only `PICK_ROUNDS` rounds are tradeable; the
+  rest fall back to `orig`.
+- **A pick is a SLOT, not a round.** `pickSlot` is exact once the lottery is drawn (guarded on
+  `G.draftYear === G.year` — last June's order survives the rollover and reading it as this
+  June's prices every pick off a stale lottery) and projected off the current table before that.
+  `pickValue` multiplies by 1.5 at first overall down to 0.75 at the end of the round, on a convex
+  curve whose mean over a uniform draw is exactly 1 — so the average pick is worth what it always
+  was and every valuation the deadline logic depends on still holds. Without this the worst club's
+  first and the Cup holder's first were both flatly worth 9, and "trade a specific pick" was
+  cosmetic.
 
 **A React component that doesn't exist still passes the harness** — the harness never renders. A
 UI addition needs a browser pass; two components were silently missing while 448 checks were green.
@@ -466,6 +540,15 @@ in a click; `simPlayoffRound` is a fast-forward that loops it. Both share `advan
 so the two paths can't disagree about how the bracket moves. The user's playoff games get the same
 `events` and `log` treatment his regular-season games get.
 
+**A career can start at either end of the offseason.** `newGame(..., {start: "offseason"})` drops
+you in at `offseasonStage` "review" with a draft class already built, so your first roster is one
+you assembled; the season that follows is `G.year + 1`. It's the real sequence, not a cutscene.
+Two things it exposed: nobody has played, so `buildDraftClass` falls back to **team strength**
+when no club has a game played (otherwise the sort falls through to club id and the draft order is
+the alphabet), and `HomeTab` must only read today's fixture **during the regular season** — the
+calendar is built before the first puck drops, so the header cheerfully announced tonight's game
+in the middle of the draft.
+
 **Ageing, progression, retirement and contract expiry all happen in `finishSeason`, not at the
 rollover.** That is deliberate: it means the offseason screens show next year's ratings and a
 real free-agent class instead of last year's leftovers. `startNextSeason` only advances the year,
@@ -493,6 +576,13 @@ runs `aiFreeAgency` + `fillRosters`, wipes the table and rebuilds the calendar.
 - Career rows deliberately **drop `z` and `net`** when archived in `finishSeason`. Carrying nine
   net cells and three ice zones per player per season is what pushed a long save past the storage
   ceiling; the shot maps are a current-season view.
+- **A playoff game reads like a regular-season one.** `G.results` has carried `scorers` for every
+  game since the first build, playoff rows included, and only the regular season ever showed them
+  — so a Cup run was seven rows of bare numbers. Series games now record the DAY they were played,
+  `resultFor(G, g)` ties one to its row, and `ScoringSummary` renders it. `SeriesPage` counts its
+  leaders from those summaries rather than from `p.po`, which was wrong twice over: it credited a
+  man's other rounds to this series, and `finishSeason` blanks it, so every series opened after
+  the Cup said "No games played" about seven games you had just watched.
 - `GameTab` replays `G.lastGame`, which holds the **user's most recent game only** — a full
   season of play-by-play would dwarf everything else in the save. Events carry an invented clock
   time and are sorted; the events themselves are real.
@@ -576,6 +666,13 @@ box-score reconciliation (player goals + shootout winners must equal team goals;
 faced must equal skater shots on goal), the points system, both playoff formats, the cap, trades,
 the rollover, rule staging, lines, special teams, injuries, awards, save round-tripping, and
 determinism, plus goaltending workload, shot zones, retained salary, waivers, negotiation, the deadline, prospects, records, the All-Star break, play-by-play, an eight-season soak and save durability.
+
+Newer checks worth knowing: `playoffLine` and `clinching` (the marks must agree with the bracket
+that actually gets built — a guarantee that turns out wrong is worse than no guarantee),
+`careerShares` (stored shares match the live calculation, and the total is never stored),
+`retroAwards` (rebuilt years are real and re-loading hands out nothing twice), `pickTrading` (slot
+moves value, and the average first is still worth 9), `draftRoom`, `farmGames`, `careerStart` and
+`playoffSummaries`.
 
 ```bash
 node tools/simtest.js          # all checks
