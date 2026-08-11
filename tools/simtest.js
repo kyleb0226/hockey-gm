@@ -72,6 +72,12 @@ const EXPORTS = [
   "draftUpOffers", "acceptDraftUp", "TRADE_UP_HORIZON",
   "rollDemands", "demandCase", "demandDrag", "expectedMinutes", "DEMAND_EVERY", "DEMAND_PATIENCE",
   "stockAffiliates", "FARM_DEPTH_EACH", "callUpCost", "draftClassReport", "rookieGames",
+  "buyOut", "buyoutCost", "canBuyOut", "BUYOUT_PCT", "BUYOUT_TERM_MULT",
+  "termAdjust", "valuesNtc", "NTC_DISCOUNT", "UNHAPPY_PREMIUM",
+  "answerDemand", "checkPromises", "PROMISE_WINDOW", "demandOffers", "rollHoldouts", "endHoldout", "HOLDOUT_AFTER",
+  "staffMarket", "hireStaff", "fireStaff", "scoutOf", "STAFF_MARKET_SIZE",
+  "PROTECTIONS", "protectionOf", "pickConveys", "resolveProtections",
+  "draftTier", "DRAFT_TIER_LABEL",
   "canTerminate", "terminateContract", "releaseToPool", "enforceRosterLimits", "enforceCap",
   "capFreeAgentPool", "TERMINATE_MAX_CAP", "DRESS_MIN", "FA_POOL_MAX",
   "playoffBerths", "clinchState", "shadowTable", "inFieldOf", "CLINCH_LABEL",
@@ -3021,6 +3027,158 @@ const CHECKS = {
       `an early pick is expected to be better (${early[0].par} vs ${late[0].par})`);
     ok(rep.rows.every((r) => r.gp >= 0 && r.pts >= 0), "and every row has real career numbers");
     ok(A.draftClassReport(FA, FA.year - 40) === null, "a year nobody was drafted in has no report");
+  },
+
+  /* Contracts with terms in them, and a way out of one. */
+  contractDepth(A) {
+    section("Buyouts");
+    const G = A.newGame(0, { seed: 8181, rules: { seasonLen: 41 } });
+    const cheap = A.rosterOf(G, 0, true).find((p) => p.contract.amt <= A.TERMINATE_MAX_CAP);
+    const big = A.rosterOf(G, 0, true).slice().sort((a, b) => b.contract.amt - a.contract.amt)[0];
+    ok(!A.canBuyOut(G, cheap), "a fringe contract is cut, not bought out");
+    ok(A.canBuyOut(G, big), "a real one can be bought out");
+    big.contract = { amt: 9, yrs: 2 };
+    const c = A.buyoutCost(G, big.id);
+    /* The trade that makes it a decision: a fraction of what's left, spread
+       over double the term. Cheap now, still there when he's retired. */
+    ok(c.yrs === 2 * A.BUYOUT_TERM_MULT, `it stretches over double the term (${c.yrs} years)`);
+    ok(Math.abs(c.total - 9 * 2 * A.BUYOUT_PCT) < 0.05, "at a fraction of what he was owed");
+    ok(c.perYear < 9, `and costs less per year than keeping him ($${c.perYear}M vs $9M)`);
+    const capBefore = A.capHit(G, 0);
+    const r = A.buyOut(G, big.id);
+    ok(r.ok && big.teamId == null, "buying him out frees the roster spot");
+    ok(G.freeAgents.includes(big.id), "and puts him on the market");
+    ok(A.retainedBy(G, 0).some((x) => x.buyout), "the dead money is recorded as a buyout");
+    ok(A.capHit(G, 0) < capBefore, "the cap goes down");
+    ok(A.capHit(G, 0) > capBefore - 9, "but not by the whole contract");
+    /* A no-trade clause is a promise not to MOVE him, not to employ him. */
+    const H = A.newGame(0, { seed: 8181, rules: { seasonLen: 41 } });
+    const shielded = A.rosterOf(H, 0, true).find((p) => A.hasNtc(p));
+    if (shielded) {
+      shielded.contract = { amt: 8, yrs: 2 };
+      ok(A.buyOut(H, shielded.id).ok, "a clause does not protect against a buyout");
+    } else ok(true, "nobody on that club has a clause");
+
+    section("Negotiating terms");
+    const N = A.newGame(0, { seed: 8181, rules: { seasonLen: 41 } });
+    const star = A.playersOf(N).find((p) => A.eligibleForNtc(p) && p.teamId != null);
+    ok(star && A.valuesNtc(N, star), "an established player values a no-trade clause");
+    const plain = A.askingPrice(N, star.id, 0, 4);
+    const withNtc = A.askingPrice(N, star.id, 0, 4, { ntc: true });
+    ok(withNtc < plain, `and takes less to get one ($${withNtc}M vs $${plain}M)`);
+    ok(Math.abs(withNtc / plain - (1 - A.NTC_DISCOUNT)) < 0.02, "by about the stated discount");
+    const kid = A.playersOf(N).find((p) => p.teamId != null && !A.eligibleForNtc(p));
+    ok(A.askingPrice(N, kid.id, 0, 4, { ntc: true }) === A.askingPrice(N, kid.id, 0, 4),
+      "offering one to a player who'd never be moved anyway buys nothing");
+    // Signing with the clause agreed is not a coin flip any more.
+    star.teamId = null; N.freeAgents.push(star.id);
+    ok(A.signPlayer(N, star.id, 0, withNtc, 4, { ntc: true }).ok, "he signs on those terms");
+    ok(A.hasNtc(star), "and gets the clause he agreed");
+    const K = A.newGame(0, { seed: 8181, rules: { seasonLen: 41 } });
+    const star2 = A.playersOf(K).find((p) => A.eligibleForNtc(p) && p.teamId != null);
+    star2.teamId = null; K.freeAgents.push(star2.id);
+    A.signPlayer(K, star2.id, 0, 12, 4, { ntc: false });
+    ok(!A.hasNtc(star2), "and none when you don't give one");
+    // An unhappy man doesn't re-sign at the going rate.
+    const U = A.newGame(0, { seed: 8181, rules: { seasonLen: 41, demands: true } });
+    const guy = A.rosterOf(U, 0)[0];
+    const before = A.askingPrice(U, guy.id, 0, 3);
+    guy.demand = { kind: "trade", day: 1, year: U.year, want: 18, got: 9 };
+    ok(A.askingPrice(U, guy.id, 0, 3) > before, "a player who asked out costs more to keep");
+    ok(A.termAdjust(U, A.rosterOf(U, 0)[1], null) === 1, "and a content one costs what he always did");
+
+    section("Answering a demand");
+    const D = A.newGame(0, { seed: 9292, rules: { seasonLen: 82, demands: true } });
+    A.simDays(D, 120);
+    /* Built rather than waited for. Letting the sim decide whether these paths
+       run at all means the day it stops producing demands the checks quietly
+       pass without testing anything. */
+    const asker = A.rosterOf(D, D.userTeam)[0];
+    asker.demand = { kind: "minutes", day: D.day, year: D.year, want: 18, got: 9 };
+    ok(A.answerDemand(D, asker.id, "promise").ok, "you can promise him minutes");
+    ok(asker.demand.answered === "promise" && asker.demand.base != null,
+      "and what he was playing when you gave your word is written down");
+    // A promise you don't keep is worse than a refusal.
+    asker.demand.promisedAt = D.day - A.PROMISE_WINDOW - 1;
+    asker.demand.base = 99;                 // minutes he was never going to reach
+    A.checkPromises(D);
+    ok(asker.demand && asker.demand.kind === "trade" && asker.demand.broken,
+      "a broken promise turns into a trade demand");
+    // And one you DO keep settles it.
+    const kept = A.rosterOf(D, D.userTeam)[1];
+    kept.demand = { kind: "minutes", day: D.day, year: D.year, want: 18, got: 9,
+      answered: "promise", promisedAt: D.day - A.PROMISE_WINDOW - 1, base: 0 };
+    A.checkPromises(D);
+    ok(!kept.demand, "a promise you keep ends it");
+
+    const wantsOut = A.rosterOf(D, D.userTeam)[2];
+    wantsOut.demand = { kind: "trade", day: D.day, year: D.year, want: 18, got: 9 };
+    ok(A.answerDemand(D, wantsOut.id, "trade").ok, "you can agree to move him");
+    ok(A.onBlock(D, wantsOut.id), "which puts him on the block");
+
+    /* Holdouts. `steady` decides who actually goes through with it, so the man
+       is chosen by character rather than by luck of the roster order. */
+    const H2 = A.newGame(0, { seed: 9292, rules: { seasonLen: 82, demands: true } });
+    const willing = A.rosterOf(H2, 0).find((p) => A.personalityOf(p).steady < 1.3);
+    const loyal = A.rosterOf(H2, 0).find((p) => A.personalityOf(p).steady >= 1.3);
+    [willing, loyal].filter(Boolean).forEach((p) => {
+      p.demand = { kind: "trade", day: 0, year: H2.year, want: 18, got: 9 };
+    });
+    H2.day = A.HOLDOUT_AFTER + 1;
+    A.rollHoldouts(H2);
+    ok(willing && willing.holdout, "a player who won't wear it holds out");
+    ok(!loyal || !loyal.holdout, "a steady one turns up anyway");
+    ok(!A.activeRoster(H2, 0).some((p) => p.holdout), "a holdout cannot be dressed");
+    ok(A.rosterOf(H2, 0).some((p) => p.holdout), "though he is still on the roster");
+    ok(A.endHoldout(H2, willing.id).ok && !willing.holdout && !willing.demand,
+      "and settling it brings him back");
+
+    section("The staff market");
+    const S = A.newGame(0, { seed: 3434, rules: { seasonLen: 41, coachStaff: true, areaScouting: true } });
+    const mkt = A.staffMarket(S, "pp");
+    ok(mkt.length === A.STAFF_MARKET_SIZE, `there is a market (${mkt.length})`);
+    ok(mkt.every((c) => c.name && c.rating >= 25 && c.rating <= 95 && c.cost > 0), "with real people in it");
+    ok(mkt.every((c, i) => i === 0 || c.rating <= mkt[i - 1].rating), "best first");
+    ok(JSON.stringify(A.staffMarket(S, "pp")) === JSON.stringify(mkt), "and it doesn't reshuffle when you look again");
+    ok(JSON.stringify(A.staffMarket(S, "pk")) !== JSON.stringify(mkt), "each job has its own candidates");
+    const wasPP = A.staffOf(S, S.teams[0]).pp;
+    ok(A.hireStaff(S, "pp", mkt[0]).ok, "you can hire one");
+    ok(A.staffOf(S, S.teams[0]).pp === mkt[0].rating, "and he is the man the engine reads");
+    ok(A.fireStaff(S, "pp").ok, "you can fire him");
+    ok(A.staffOf(S, S.teams[0]).pp === wasPP, "and it falls back to who you had");
+    ok(A.hireStaff(S, "scout", A.staffMarket(S, "scout")[0]).ok, "a head scout can be hired too");
+    ok(A.scoutOf(S, S.teams[0]).rating === A.staffMarket(S, "scout")[0].rating, "and he's the one who does the sweeps");
+    const off = A.newGame(0, { seed: 3434, rules: { seasonLen: 41 } });
+    ok(!A.hireStaff(off, "pp", mkt[0]).ok, "with the rule off there is nobody to hire");
+
+    section("Pick protections");
+    const P = A.newGame(0, { seed: 5656, rules: { seasonLen: 41, pickProtection: true } });
+    const pk = P.picks.find((x) => x.year === P.year && x.round === 1 && x.orig === 0);
+    ok(A.protectionOf(pk).k === "none", "a pick is unprotected by default");
+    ok(A.PROTECTIONS.every((x) => x.value <= 1), "and protection only ever costs value");
+    const raw = A.pickValue(P, pk);
+    pk.protect = "top10";
+    ok(A.pickValue(P, pk) < raw, `a protected pick is worth less (${A.pickValue(P, pk).toFixed(1)} vs ${raw.toFixed(1)})`);
+    // It has to actually convey, or not, once the order is known.
+    pk.owner = 1;
+    simSeason(A, P); simPlayoffs(A, P);
+    const slot = A.pickSlot(P, pk);
+    const stayed = pk.owner === 0;
+    ok(slot != null, `the order is drawn (${slot})`);
+    ok(stayed === (slot <= 10), `a top-10 protected pick ${stayed ? "stayed home" : "conveyed"} correctly at ${slot}`);
+    if (stayed) {
+      const next = P.picks.find((x) => x.year === P.year + 1 && x.round === 1 && x.orig === 0);
+      ok(next && next.owner === 1 && next.rolled, "and the obligation rolled to next year");
+    } else ok(true, "it conveyed, so nothing rolled");
+    ok(!pk.protect, "the protection is spent either way");
+
+    section("Draft tiers");
+    ok(A.draftTier(P, { scout: { fog: 0, bias: 0, bias2: 0 }, ovr: 99, pot: 99, r: {} }) >= 4,
+      "a top prospect reads as a high tier");
+    const board = P.draftClass.map((id) => P.players[id]);
+    const tiers = board.map((p) => A.draftTier(P, p));
+    ok(new Set(tiers).size >= 3, `a board splits into several tiers (${new Set(tiers).size})`);
+    ok(tiers.every((t) => t >= 0 && t < A.DRAFT_TIER_LABEL.length), "and every one has a label");
   },
 
   /* Who led each category, year by year. The book kept only the best ever, so a

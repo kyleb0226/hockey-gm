@@ -197,6 +197,25 @@ made "Deep" silently switch the home advantage off. The `depthRules` check pins 
   user, which is right for a deal you propose and exactly wrong for one proposed to you. With the
   user as side A the engine rejected offers for being too generous to him (a pick worth 9 for a
   package worth 12.8, refused because "they want more back").
+- **A promise is a debt.** `answerDemand` is the missing half of the demands system: promise him
+  minutes, tell him no, or agree to move him. `checkPromises` then looks at whether his minutes
+  ACTUALLY moved — so this is the one place in the game where saying the easy thing costs more
+  than saying the hard one, and a broken promise lands harder than the original complaint.
+  `rollHoldouts` is the end of the line; `activeRoster` filters holdouts exactly as it filters
+  injuries, so the engine needs no special case anywhere.
+- **`staffMarket` / `hireStaff`** — a staff you can see and cannot change is furniture. The market
+  is derived from the YEAR, so it is stable all offseason, costs no save size and shifts no draw.
+  `t.staffHired` overrides the derived default, which is why a club you take over keeps whoever it
+  had. The head scout is hired the same way and sets how much a region sweep actually reveals.
+- **`PROTECTIONS`** — `G.picks` recorded an owner and an origin and nothing else, so every traded
+  pick was unconditional and no club would ever sell a first. A protection is a range the pick
+  does not convey in; `resolveProtections` runs when the order is drawn and **rolls the obligation
+  to next year** if it's caught. It discounts `pickValue`, because the outcomes it removes are the
+  ones worth having.
+- **`draftTier`** — a ranked list hides the thing scouts actually talk about ("the top four, then
+  a gap"), because the gap between the 4th and 5th names can be enormous or nothing and the
+  numbers look identical either way. Cut off YOUR read, so a badly scouted board draws its lines
+  in the wrong places.
 - **`demands`** — `personalityOf` and `roomMorale` existed from the first build with nothing ever
   coming of them. A demand is earned, never random: a player must be playing measurably less than
   `expectedMinutes` for his standard, and `steady` decides how long he wears it. An ignored
@@ -301,6 +320,20 @@ lie that nothing in the UI would reveal.
 ## Contracts
 - **Demotion is free.** Moving a player between your own NHL roster and your own farm exposes him
   to nobody. Waivers used to gate this and made shuffling depth a gamble.
+- **Three ways out of a contract, and they are not interchangeable.** `terminateContract` ends
+  fringe money outright. `releasePlayer` puts a real contract on waivers, where somebody may claim
+  it. **`buyOut` is the one for a deal nobody will take and you cannot cut**: a fraction of what's
+  owed, spread over DOUBLE the remaining term, which is what makes it a decision rather than an
+  undo — cheap now, still on your books when he has retired. A no-trade clause does **not** protect
+  against a buyout: it is a promise not to move him to another club, not a promise to employ him.
+- **A contract has terms, not just a number.** The no-trade clause used to be a coin flip at
+  signing (`rnd(G) < 0.55`), so it happened TO you. It is now currency: a player who values one
+  takes `NTC_DISCOUNT` less to get it, and `signPlayer`/`extendPlayer` only fall back to the roll
+  when no terms were negotiated — which is what every AI signing still does. Offering one to a
+  player who'd never be moved against his will buys nothing, because he doesn't value it.
+  `UNHAPPY_PREMIUM` is applied unconditionally in `askingPrice` and is still safe for every
+  calibrated seed, because `p.demand` only ever exists on the user's roster and only when the
+  demands rule is on.
 - **Cutting is not the same as releasing, and conflating them jammed the whole league.** Waivers
   are the right process for a player somebody else might want; they are the wrong one for the
   bottom of an organisation. `terminateContract` ends a contract at or under `TERMINATE_MAX_CAP`

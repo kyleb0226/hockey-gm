@@ -156,6 +156,7 @@ const RULES_DEFAULT = {
   demands: false,          // players ask for minutes, or ask out
   coachStaff: false,       // hire assistants rather than one do-everything coach
   rivalryGrowth: false,    // rivalries harden when clubs meet in the spring
+  pickProtection: false,   // traded picks can carry protections
 };
 
 /* The depth toggles, described once. `group` buckets them on the settings
@@ -199,6 +200,9 @@ const DEPTH_RULES = [
     opts: [[false, "Off"], [true, "On"]] },
   { k: "coachStaff", deep: true, group: "The game", label: "Coaching staff",
     blurb: "Hire a power play, penalty kill and development coach rather than one man who does everything.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "pickProtection", deep: true, group: "Draft", label: "Pick protections",
+    blurb: "A traded pick can be protected — if it lands in the range you keep it, and the obligation rolls to next year.",
     opts: [[false, "Off"], [true, "On"]] },
   { k: "rivalryGrowth", deep: true, group: "The game", label: "Rivalries build",
     blurb: "Meeting in the playoffs makes it personal, and it stays that way.",
@@ -386,10 +390,121 @@ function rollDemands(G) {
   return G;
 }
 /* Unhappiness is a real cost, not a news item. A man who has asked out is not
-   giving you his best, which is what makes meeting the demand worth something. */
+   giving you his best, which is what makes meeting the demand worth something.
+   A holdout isn't playing at all, so he never reaches this. */
 function demandDrag(G, p) {
   if (!depthOn(G, "demands") || !p.demand) return 1;
   return p.demand.kind === "trade" ? 0.965 : 0.985;
+}
+
+/* ---------------------------- answering a demand --------------------------
+ * A demand you can only respond to by quietly changing the lines is half a
+ * mechanic. These are the three things a manager actually does: promise him
+ * something, tell him no, or agree he should go.
+ *
+ * A PROMISE IS A DEBT. It buys peace now and costs you if you don't keep it —
+ * `checkPromises` looks at whether his minutes actually moved, and a broken
+ * promise lands harder than the original complaint ever did. Refusing is
+ * cheaper today and worse for the room. Agreeing to move him puts him on the
+ * block, where the trade machinery already lives.
+ * ------------------------------------------------------------------------- */
+const PROMISE_WINDOW = 21;     // days you have to make good on it
+const PROMISE_MARGIN = 1.0;    // minutes you have to find for it to count
+
+function answerDemand(G, pid, how) {
+  const p = G.players[pid];
+  if (!p || !p.demand) return { ok: false, why: "he hasn't asked for anything" };
+  if (p.teamId !== G.userTeam) return { ok: false, why: "not your player" };
+  if (how === "promise") {
+    if (p.demand.kind !== "minutes") return { ok: false, why: "it's past that — he wants out" };
+    p.demand = { ...p.demand, answered: "promise", promisedAt: G.day,
+      // What he was playing when you gave your word, so it can be checked.
+      base: round1(p.season.toi / Math.max(1, p.season.gp)) };
+    news(G, `You promised ${fullName(p)} more ice time.`, "info");
+    return { ok: true, why: "he'll wait and see" };
+  }
+  if (how === "refuse") {
+    p.demand = { ...p.demand, answered: "refuse", answeredAt: G.day };
+    // Telling a man no is allowed to be the right call. It just isn't free.
+    G.roomHit = (G.roomHit || 0) + (p.demand.kind === "trade" ? 4 : 2);
+    news(G, `You told ${fullName(p)} he isn't going anywhere.`, "bad");
+    return { ok: true, why: "he didn't take it well" };
+  }
+  if (how === "trade") {
+    p.demand = { ...p.demand, answered: "trade", answeredAt: G.day };
+    setBlock(G, pid, true);
+    generateOffers(G);
+    news(G, `${fullName(p)} has been made available.`, "info");
+    return { ok: true, why: "clubs will call" };
+  }
+  return { ok: false, why: "no such answer" };
+}
+
+/* Did you keep your word? Run with the demand roll, so it is checked on the
+   same rhythm everything else in the room is. */
+function checkPromises(G) {
+  rosterOf(G, G.userTeam, true).forEach((p) => {
+    const d = p.demand;
+    if (!d || d.answered !== "promise" || d.year !== G.year) return;
+    if (G.day - d.promisedAt < PROMISE_WINDOW) return;
+    const now = p.season.toi / Math.max(1, p.season.gp);
+    if (now >= d.base + PROMISE_MARGIN) {
+      p.demand = null;
+      news(G, `${fullName(p)} has got his minutes and is happy again.`, "good");
+    } else {
+      // A broken promise is worse than a refusal — he asked, you said yes, and
+      // nothing changed.
+      p.demand = { kind: "trade", day: G.day, year: G.year, want: d.want, got: round1(now), broken: true };
+      G.roomHit = (G.roomHit || 0) + 6;
+      news(G, `${fullName(p)} never got the minutes he was promised and wants out.`, "bad");
+    }
+  });
+  return G;
+}
+
+/* A trade demand should bring the phone to life. `generateOffers` already
+   prices a listed player; this simply makes sure a man who has asked out is
+   listed, so the two systems meet instead of running past each other. */
+function demandOffers(G) {
+  if (!depthOn(G, "demands")) return G;
+  let any = false;
+  rosterOf(G, G.userTeam, true).forEach((p) => {
+    if (!p.demand || p.demand.kind !== "trade" || p.demand.answered === "refuse") return;
+    if (onBlock(G, p.id)) return;
+    setBlock(G, p.id, true);
+    any = true;
+  });
+  if (any) generateOffers(G);
+  return G;
+}
+
+/* ---------------------------------- holdouts ------------------------------
+ * The end of the line. A man who asked out, was refused or ignored, and is
+ * still there stops turning up. `p.holdout` is read by `activeRoster`, so he
+ * is simply unavailable — no special case in the engine, the same as an injury.
+ * ------------------------------------------------------------------------- */
+const HOLDOUT_AFTER = 35;      // days of being ignored after asking to leave
+function rollHoldouts(G) {
+  if (!depthOn(G, "demands")) return G;
+  rosterOf(G, G.userTeam).forEach((p) => {
+    if (p.holdout || !p.demand || p.demand.kind !== "trade") return;
+    const since = G.day - (p.demand.answeredAt || p.demand.day);
+    if (since < HOLDOUT_AFTER) return;
+    // Character decides who actually goes through with it.
+    if (personalityOf(p).steady >= 1.3) return;
+    p.holdout = true;
+    G.teams[p.teamId].lines = null;
+    news(G, `${fullName(p)} has not reported. He is holding out.`, "bad");
+  });
+  return G;
+}
+/* Ending one. Moving him ends it by itself — this is the other way. */
+function endHoldout(G, pid) {
+  const p = G.players[pid];
+  if (!p || !p.holdout) return { ok: false, why: "he isn't holding out" };
+  p.holdout = false; p.demand = null;
+  if (p.teamId != null) G.teams[p.teamId].lines = null;
+  return { ok: true };
 }
 
 /* ------------------------------- player roles -----------------------------
@@ -563,6 +678,54 @@ const derivedRating = (seed, tier) => Math.round(clamp(tier - 14 + hashUnit(seed
 const derivedName = (seed) =>
   COACH_FIRST[Math.floor(hashUnit(seed * 7 + 11) * COACH_FIRST.length)] + " " +
   COACH_LAST[Math.floor(hashUnit(seed * 13 + 5) * COACH_LAST.length)];
+
+/* ------------------------------ the staff market --------------------------
+ * A staff you can see and cannot change is furniture. This is the market: a
+ * handful of people looking for work, derived from the YEAR rather than drawn
+ * from the PRNG so the list is stable all offseason, costs no save size, and
+ * doesn't shift a single downstream draw.
+ *
+ * Hiring writes to `t.staffHired`, which `staffOf` already prefers over the
+ * derived default — so the club you took over keeps whoever it had until you
+ * do something about it.
+ * ------------------------------------------------------------------------- */
+const STAFF_MARKET_SIZE = 6;
+function staffMarket(G, role) {
+  const out = [];
+  for (let i = 0; i < STAFF_MARKET_SIZE; i++) {
+    const seed = G.year * 7717 + i * 131 + role.charCodeAt(0) * 29;
+    /* A spread that always contains somebody worth hiring and somebody who
+       plainly isn't, so the market is a choice rather than a queue. */
+    const rating = derivedRating(seed, 40 + hashUnit(seed * 3 + 1) * 40);
+    out.push({ id: `${G.year}-${role}-${i}`, name: derivedName(seed), role, rating,
+      // What he costs, against the club's own budget for such things.
+      cost: round1(0.4 + Math.max(0, rating - 40) * 0.035) });
+  }
+  return out.sort((a, b) => b.rating - a.rating);
+}
+function hireStaff(G, role, cand) {
+  // The scout belongs to the scouting rule, the coaches to the staff rule.
+  const gate = role === "scout" ? "areaScouting" : "coachStaff";
+  if (!depthOn(G, gate))
+    return { ok: false, why: role === "scout" ? "you do your own scouting" : "you run a one-man bench" };
+  if (!cand || !(role === "scout" || STAFF_ROLES.some((r) => r.k === role)))
+    return { ok: false, why: "no such job" };
+  const t = G.teams[G.userTeam];
+  t.staffHired = t.staffHired || {};
+  t.staffHired[role] = { name: cand.name, rating: cand.rating, hired: G.year };
+  const label = role === "scout" ? "head scout"
+    : `${(STAFF_ROLES.find((r) => r.k === role) || {}).label} coach`;
+  news(G, `${cand.name} hired as ${label}.`, "good");
+  return { ok: true };
+}
+function fireStaff(G, role) {
+  const t = G.teams[G.userTeam];
+  if (!t.staffHired || !t.staffHired[role]) return { ok: false, why: "he isn't yours to fire" };
+  const gone = t.staffHired[role].name;
+  delete t.staffHired[role];
+  news(G, `${gone} has been let go.`, "info");
+  return { ok: true };
+}
 
 function staffOf(G, t) {
   const head = t.coach || { pp: 55, pk: 55, dev: 55 };
@@ -998,7 +1161,10 @@ const playersOf = (G) => Object.values(G.players);
 function rosterOf(G, teamId, includeFarm) {
   return playersOf(G).filter((p) => p.teamId === teamId && (includeFarm || !p.farm));
 }
-const activeRoster = (G, teamId) => rosterOf(G, teamId).filter((p) => p.inj <= 0);
+/* Who can actually be dressed tonight. A holdout is unavailable in exactly the
+   way an injury is — no special case anywhere in the engine, which is why it
+   belongs here rather than in the lineup builder. */
+const activeRoster = (G, teamId) => rosterOf(G, teamId).filter((p) => p.inj <= 0 && !p.holdout);
 const teamOf = (G, teamId) => G.teams[teamId];
 
 /* ----------------------------- lines & pairings ---------------------------- */
@@ -2324,6 +2490,9 @@ function simDay(G) {
   // A stint is served in games, so it only ticks for clubs that actually played.
   tickStints(G, playedToday);
   rollDemands(G);
+  if (G.day % DEMAND_EVERY === 0 && G.day > 0) {
+    checkPromises(G); demandOffers(G); rollHoldouts(G);
+  }
   checkMilestones(G);
   // Clubs ring about listed players every few days rather than instantly.
   if ((G.block || []).length && G.day % 5 === 0) generateOffers(G);
@@ -3357,6 +3526,17 @@ function scoutProspect(G, pid) {
  * ------------------------------------------------------------------------- */
 const AREA_SCOUT_COST = 3;
 const AREA_SCOUT_CUT = 0.82;   // vs 0.45 for a personal viewing
+
+/* Your head scout. Derived like the coaching staff, hired from the same market,
+   and he is the reason a sweep is worth different amounts at different clubs —
+   a good one comes back knowing more. Only consulted when area scouting is on,
+   so the one-at-a-time path is untouched. */
+function scoutOf(G, t) {
+  const hired = t.staffHired && t.staffHired.scout;
+  if (hired) return hired;
+  const seed = t.id * 101 + 557;
+  return { name: derivedName(seed), rating: derivedRating(seed, 46 + (t.mkt || 3) * 2) };
+}
 function scoutArea(G, kind, value) {
   if (!depthOn(G, "areaScouting")) return { ok: false, why: "area scouting is switched off" };
   if ((G.scoutPoints || 0) < AREA_SCOUT_COST)
@@ -3365,8 +3545,13 @@ function scoutArea(G, kind, value) {
     p && p.scout && p.scout.fog > 0.06 && (kind === "junior" ? p.junior === value : p.pos === value));
   if (!hit.length) return { ok: false, why: "nobody left there to watch" };
   G.scoutPoints -= AREA_SCOUT_COST;
-  hit.forEach((p) => { p.scout.fog = Math.max(0.05, p.scout.fog * AREA_SCOUT_CUT); });
-  return { ok: true, seen: hit.length };
+  /* A better scout cuts more fog per sweep. At 55 it is the plain rate; a great
+     one gets close to what a personal viewing achieves, a poor one barely
+     more than a rumour. */
+  const s = scoutOf(G, G.teams[G.userTeam]).rating;
+  const cut = clamp(AREA_SCOUT_CUT - (s - 55) * 0.004, 0.55, 0.95);
+  hit.forEach((p) => { p.scout.fog = Math.max(0.05, p.scout.fog * cut); });
+  return { ok: true, seen: hit.length, scout: s };
 }
 
 /* ------------------------------- bust risk --------------------------------
@@ -3394,6 +3579,19 @@ function riskLabel(v) {
 
 // What a club thinks he's worth: potential first, but only what it can see.
 const draftValue = (p) => scoutedPot(p) * 0.68 + scoutedOvr(p) * 0.32;
+
+/* Tiers, the way a scout talks about a board — "the top four, then a gap". A
+   ranked list hides exactly that: the difference between the 4th and 5th names
+   can be enormous or nothing, and the numbers beside them look the same either
+   way. Cut off YOUR read, so a club that has scouted badly draws its lines in
+   the wrong places, which is the whole point of scouting at all. */
+const DRAFT_TIER_LABEL = ["—", "fringe", "depth", "middle", "top", "elite"];
+const DRAFT_TIER_TONE = ["text-slate-600", "text-slate-500", "text-slate-400",
+  "text-sky-300", "text-emerald-300", "text-amber-300"];
+function draftTier(G, p) {
+  const v = draftValue(p);
+  return v >= 88 ? 5 : v >= 80 ? 4 : v >= 72 ? 3 : v >= 64 ? 2 : v >= 56 ? 1 : 0;
+}
 
 /* --------------------------- clubs ringing you up -------------------------
  * Draft trading was entirely user-initiated: you could call anybody, and nobody
@@ -3556,6 +3754,8 @@ function buildDraftClass(G) {
   // Which year this order belongs to. Without it last June's order looks like
   // this June's for the whole offseason before the class is built.
   G.draftYear = G.year;
+  // The order is known, so a protected pick now knows whether it conveys.
+  resolveProtections(G);
   return G.draftClass;
 }
 function inPlayoffs(G, teamId) {
@@ -3811,7 +4011,7 @@ function contractOffer(G, p, amt, yrs) {
   const yearBonus = yrs >= 4 ? 0.94 : yrs === 1 ? 1.08 : 1;
   return amt >= want * yearBonus * (0.92 + rnd(G) * 0.16);
 }
-function signPlayer(G, pid, teamId, amt, yrs) {
+function signPlayer(G, pid, teamId, amt, yrs, opts) {
   const p = G.players[pid];
   if (!p) return { ok: false, why: "no such player" };
   const R = rules(G);
@@ -3819,7 +4019,11 @@ function signPlayer(G, pid, teamId, amt, yrs) {
   if (rosterOf(G, teamId, true).length >= ROSTER_MAX + FARM_MAX) return { ok: false, why: "roster full" };
   p.teamId = teamId; p.farm = rosterOf(G, teamId).length >= ROSTER_MAX;
   p.contract = { amt: round1(amt), yrs };
-  p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
+  /* A clause you AGREED to is not a coin flip. When the deal was negotiated
+     with one on the table he gets it; otherwise it falls back to the old roll,
+     which is what every AI signing still does. */
+  if (opts && opts.ntc !== undefined) p.ntc = !!opts.ntc && valuesNtc(G, p) && yrs >= 2;
+  else p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
   p.ntcWaived = false;
   const i = G.freeAgents.indexOf(pid);
   if (i >= 0) G.freeAgents.splice(i, 1);
@@ -3893,8 +4097,10 @@ function pickValue(G, pk) {
   /* 1.5 at first overall, 0.75 at the end of the round, and — because the mean
      of (1-d)² over a uniform draw is exactly a third — an average of 1. Convex
      rather than linear because that's how pick value actually behaves: the gap
-     between 1st and 5th dwarfs the gap between 25th and 29th. */
-  return base * decay * (0.75 + 0.75 * Math.pow(1 - depth, 2));
+     between 1st and 5th dwarfs the gap between 25th and 29th.
+     A protection discounts it, because the outcomes it removes are the ones
+     worth having. */
+  return base * decay * (0.75 + 0.75 * Math.pow(1 - depth, 2)) * protectionOf(pk).value;
 }
 /* The deadline. Trades run from the offseason through roughly three quarters of
    the schedule, then the rosters are locked for the run-in and the playoffs. */
@@ -3912,6 +4118,51 @@ function daysToDeadline(G) {
    waived, but only if the player has a reason to want out. */
 function eligibleForNtc(p) { return p.ovr >= 76 && p.age >= 26; }
 function hasNtc(p) { return !!p.ntc && !p.ntcWaived; }
+
+/* ------------------------------ buying it out ------------------------------
+ * `terminateContract` handles fringe money and waivers handle players somebody
+ * else might want, which left the case that actually hurts untouched: a big
+ * contract with years to run that nobody will take and you can't cut. There was
+ * no way out of a bad deal at all.
+ *
+ * A buyout pays a FRACTION of what's left, spread over DOUBLE the remaining
+ * term — the real trade, and the reason a buyout is a decision rather than an
+ * undo. Two years at $8M becomes four years of dead cap at a third of it: much
+ * cheaper now, and still on your books when the player is retired.
+ * ------------------------------------------------------------------------- */
+const BUYOUT_PCT = 1 / 3;
+const BUYOUT_TERM_MULT = 2;
+function buyoutCost(G, pid) {
+  const p = G.players[pid];
+  if (!p) return null;
+  const yrs = Math.max(1, p.contract.yrs);
+  const owed = p.contract.amt * yrs;
+  const term = yrs * BUYOUT_TERM_MULT;
+  return { perYear: round1((owed * BUYOUT_PCT) / term), yrs: term, total: round1(owed * BUYOUT_PCT) };
+}
+function canBuyOut(G, p) {
+  return !!(p && p.teamId != null && !p.retired && p.contract.yrs >= 1
+    && p.contract.amt > TERMINATE_MAX_CAP);
+}
+function buyOut(G, pid) {
+  const p = G.players[pid];
+  if (!p) return { ok: false, why: "no such player" };
+  if (!canBuyOut(G, p))
+    return { ok: false, why: p.contract.amt <= TERMINATE_MAX_CAP
+      ? "he's cheap enough to simply cut" : "he isn't yours to buy out" };
+  /* A no-trade clause does NOT protect against a buyout — it is a promise not
+     to move him to another club, not a promise to employ him. That is also
+     what makes it the escape hatch of last resort for a deal you regret. */
+  const c = buyoutCost(G, pid);
+  const from = p.teamId;
+  G.retained = G.retained || [];
+  G.retained.push({ pid, from, amt: c.perYear, yrs: c.yrs, dead: true, buyout: true });
+  releaseToPool(G, p);
+  if (from === G.userTeam) {
+    news(G, `${fullName(p)} bought out — $${c.perYear}M a year for ${c.yrs} years.`, "bad");
+  }
+  return { ok: true, ...c };
+}
 function requestNtcWaiver(G, pid) {
   const p = G.players[pid];
   if (!p || !p.ntc) return { ok: false, why: "no clause to waive" };
@@ -4031,6 +4282,53 @@ function tradablePicks(G, teamId) {
   });
   return out.sort((a, b) => a.year - b.year || a.round - b.round
     || ((pickSlot(G, a) || 99) - (pickSlot(G, b) || 99)));
+}
+
+/* ------------------------------ pick protections ---------------------------
+ * `G.picks` recorded an owner and an origin and nothing else, so every traded
+ * pick was unconditional — you could not sell a first without risking the first
+ * overall, which is why real clubs almost never do.
+ *
+ * A protection is a range the pick does NOT convey in. If it lands there the
+ * original club keeps it and the obligation rolls to the next year, which is
+ * the whole mechanism and the reason a protected pick is worth less.
+ * ------------------------------------------------------------------------- */
+const PROTECTIONS = [
+  { k: "none", label: "Unprotected", blurb: "conveys wherever it lands", top: 0, value: 1 },
+  { k: "lottery", label: "Lottery protected", blurb: "you keep it if it wins the lottery", top: 1, value: 0.92 },
+  { k: "top5", label: "Top-5 protected", blurb: "you keep it in the top five", top: 5, value: 0.74 },
+  { k: "top10", label: "Top-10 protected", blurb: "you keep it in the top ten", top: 10, value: 0.58 },
+];
+const protectionOf = (pk) => PROTECTIONS.find((x) => x.k === ((pk && pk.protect) || "none")) || PROTECTIONS[0];
+
+/* Does it convey THIS year? Only meaningful once the order is drawn — before
+   that the honest answer is "we don't know yet". */
+function pickConveys(G, pk) {
+  const prot = protectionOf(pk);
+  if (!prot.top) return true;
+  const slot = pickSlot(G, pk);
+  if (slot == null) return true;
+  return !(pk.round === 1 && slot <= prot.top);
+}
+/* Run when the order is known. A pick caught by its protection goes back to the
+   club that owns it and the debt moves to next year's pick instead. */
+function resolveProtections(G) {
+  if (!depthOn(G, "pickProtection")) return G;
+  (G.picks || []).forEach((pk) => {
+    if (pk.year !== G.year || !pk.protect || pk.protect === "none") return;
+    if (pk.owner === pk.orig) return;
+    if (pickConveys(G, pk)) { pk.protect = null; return; }
+    const to = pk.owner;
+    pk.owner = pk.orig;                       // he keeps it
+    pk.protect = null;
+    // The obligation rolls: next year's pick of the same round goes instead.
+    const next = (G.picks || []).find((x) => x.year === G.year + 1 && x.round === pk.round
+      && x.orig === pk.orig && x.owner === pk.orig);
+    if (next) { next.owner = to; next.rolled = true; }
+    if (pk.orig === G.userTeam) news(G, `Your protected ${pk.round === 1 ? "first" : "pick"} stayed home — it rolls to ${G.year + 1}.`, "good");
+    else if (to === G.userTeam) news(G, `${G.teams[pk.orig].abbr}'s pick was protected. You get next year's instead.`, "bad");
+  });
+  return G;
 }
 
 /* Where a pick is likely to land. A round number alone doesn't distinguish the
@@ -4591,13 +4889,13 @@ function extendEarlyYears(p) { return Math.max(0, (p && p.contract ? p.contract.
 
 /* `yrs` is the TOTAL length of the new deal, so the number the UI shows and the
    number he's signing for are the same thing. */
-function extensionAsk(G, pid, teamId, yrs) {
+function extensionAsk(G, pid, teamId, yrs, opts) {
   const p = G.players[pid];
   const early = extendEarlyYears(p);
-  const base = askingPrice(G, pid, teamId, yrs) * EXTEND_LOYALTY;
+  const base = askingPrice(G, pid, teamId, yrs, opts) * EXTEND_LOYALTY;
   return round1(Math.max(MIN_SALARY, base * (1 + early * EXTEND_EARLY_PREMIUM)));
 }
-function extendPlayer(G, pid, amt, yrs) {
+function extendPlayer(G, pid, amt, yrs, opts) {
   const p = G.players[pid];
   if (!p) return { ok: false, why: "no such player" };
   if (!canExtend(G, p))
@@ -4608,7 +4906,7 @@ function extendPlayer(G, pid, amt, yrs) {
     return { ok: false, why: `he's already signed for ${p.contract.yrs} years` };
   if (yrs > EXTEND_TERM_MAX) return { ok: false, why: `${EXTEND_TERM_MAX} years is the limit` };
   const R = rules(G);
-  const want = extensionAsk(G, pid, p.teamId, yrs);
+  const want = extensionAsk(G, pid, p.teamId, yrs, opts);
   if (amt < want * 0.82) return { ok: false, want, why: "not interested at that number" };
   if (amt < want) return { ok: false, counter: want, counterYrs: yrs, why: `he wants $${want}M × ${yrs}` };
   // The extension replaces his existing deal, so only the DIFFERENCE is new money.
@@ -4616,9 +4914,13 @@ function extendPlayer(G, pid, amt, yrs) {
     return { ok: false, why: "no cap space for that" };
   const added = yrs - p.contract.yrs;
   p.contract = { amt: round1(amt), yrs };
-  p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
+  if (opts && opts.ntc !== undefined) p.ntc = !!opts.ntc && valuesNtc(G, p) && yrs >= 2;
+  else p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
   p.ntcWaived = false;
-  return { ok: true, want, added };
+  // Re-signing settles it: a man who has just agreed a new deal is not asking
+  // to leave any more.
+  p.demand = null;
+  return { ok: true, want, added, ntc: p.ntc };
 }
 
 /* What an AI club does with its own expiring players. It is not a blanket
@@ -4718,10 +5020,38 @@ function processWaivers(G) {
  * it, and lowballing gets you a counter rather than a signature.
  * ------------------------------------------------------------------------- */
 
-function askingPrice(G, pid, teamId, yrs) {
+/* ---------------------------- terms, not just money ------------------------
+ * A contract was a number and a length. The no-trade clause — the one term in
+ * hockey players genuinely trade money for — was decided by a coin flip at
+ * signing (`rnd(G) < 0.55`), so it happened TO you rather than being something
+ * you negotiated.
+ *
+ * It is now currency. A player who values one will take real money less to get
+ * it, which is the actual bargain: you buy him cheap and you lose the right to
+ * move him. Only players who'd have been eligible for a clause care — offering
+ * one to a fourth-liner buys nothing, because he was never going to be traded
+ * against his will anyway.
+ *
+ * `UNHAPPY_PREMIUM` is the other half. A man who has asked to be traded does
+ * not re-sign at the going rate, and it is safe to apply unconditionally here:
+ * `p.demand` only ever exists on the user's roster and only when the demands
+ * rule is on, so no AI valuation and no calibrated seed sees it.
+ * ------------------------------------------------------------------------- */
+const NTC_DISCOUNT = 0.07;
+const UNHAPPY_PREMIUM = 0.12;
+// Whether the clause is worth anything TO HIM, which is what he'd pay for.
+function valuesNtc(G, p) { return eligibleForNtc(p); }
+function termAdjust(G, p, opts) {
+  let m = 1;
+  if (opts && opts.ntc && valuesNtc(G, p)) m *= 1 - NTC_DISCOUNT;
+  if (p.demand && p.demand.kind === "trade") m *= 1 + UNHAPPY_PREMIUM;
+  return m;
+}
+
+function askingPrice(G, pid, teamId, yrs, opts) {
   const p = G.players[pid];
   if (!p) return 0;
-  let want = marketValue(G, p) * diff(G).askPrice;
+  let want = marketValue(G, p) * diff(G).askPrice * termAdjust(G, p, opts);
   // Long term is security, so it comes a little cheaper per year; a one-year
   // "prove it" deal costs a premium.
   want *= yrs >= 5 ? 0.9 : yrs === 4 ? 0.95 : yrs === 1 ? 1.12 : 1;
@@ -4734,14 +5064,15 @@ function askingPrice(G, pid, teamId, yrs) {
   }
   return round1(Math.max(MIN_SALARY, want));
 }
-function negotiate(G, pid, teamId, amt, yrs) {
+function negotiate(G, pid, teamId, amt, yrs, opts) {
   const p = G.players[pid];
   if (!p) return { ok: false, why: "no such player" };
-  const want = askingPrice(G, pid, teamId, yrs);
-  if (amt >= want) return { ok: true, want };
+  const want = askingPrice(G, pid, teamId, yrs, opts);
+  const ntc = !!(opts && opts.ntc && valuesNtc(G, p));
+  if (amt >= want) return { ok: true, want, ntc };
   // Close offers get one counter; insulting ones get a flat no.
-  if (amt >= want * 0.82) return { ok: false, counter: want, counterYrs: yrs, why: `he wants $${want}M × ${yrs}` };
-  return { ok: false, want, why: "not interested at that number" };
+  if (amt >= want * 0.82) return { ok: false, counter: want, counterYrs: yrs, ntc, why: `he wants $${want}M × ${yrs}` };
+  return { ok: false, want, ntc, why: "not interested at that number" };
 }
 
 /* --------------------------- prospect development -------------------------
@@ -6043,6 +6374,60 @@ function GoalieReport({ G, p }) {
   );
 }
 
+/* A demand, and the three things you can do about it. A promise is a debt —
+   `checkPromises` looks at whether his minutes actually moved — so this is the
+   one place in the game where saying the easy thing costs more than saying the
+   hard one. */
+function DemandNote({ G, setG, p }) {
+  if (!depthOn(G, "demands") || !p.demand || p.demand.year !== G.year || !setG) return null;
+  const d = p.demand;
+  const answer = (how) => {
+    const g2 = migrate(JSON.parse(JSON.stringify(G)));
+    answerDemand(g2, p.id, how);
+    setG(g2);
+  };
+  const yours = p.teamId === G.userTeam;
+  return (
+    <div className={`${card} px-3 py-2 space-y-1.5`}>
+      <div className={`text-xs ${d.kind === "trade" ? "text-rose-300" : "text-amber-300"}`}>
+        {p.holdout ? <b>He is holding out and has not reported. </b> : null}
+        {d.kind === "trade"
+          ? <>{d.broken ? "You promised him minutes and they never came. " : ""}He has asked to be traded.</>
+          : <>He wants more ice time.</>}
+        <span className="text-slate-500">
+          {" "}{d.got} a night against the {d.want} a player of his standard expects.
+        </span>
+      </div>
+      {d.answered ? (
+        <div className="text-[11px] text-slate-500">
+          {d.answered === "promise" ? `You promised him more. He's watching the lines.`
+            : d.answered === "refuse" ? `You told him no.`
+            : `You've agreed to move him — he's on the block.`}
+        </div>
+      ) : null}
+      {yours && !d.answered ? (
+        <div className="flex flex-wrap gap-1.5">
+          {d.kind === "minutes" ? (
+            <button className={`${btnGhost} text-xs px-2 py-1`}
+              title="Buys you three weeks. If his minutes haven't moved by then it's worse than saying no."
+              onClick={() => answer("promise")}>Promise him minutes</button>
+          ) : null}
+          <button className={`${btnGhost} text-xs px-2 py-1`}
+            title="Cheaper today, and the room notices" onClick={() => answer("refuse")}>Tell him no</button>
+          <button className={`${btnGhost} text-xs px-2 py-1 text-amber-300`}
+            title="Puts him on the block and invites offers" onClick={() => answer("trade")}>Agree to move him</button>
+        </div>
+      ) : null}
+      {p.holdout ? (
+        <button className={`${btnGhost} text-xs px-2 py-1`}
+          onClick={() => { const g2 = migrate(JSON.parse(JSON.stringify(G))); endHoldout(g2, p.id); setG(g2); }}>
+          Settle it and bring him back
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 /* What a young player works on over the summer. It is a REDISTRIBUTION of the
    year's improvement, not a bonus — `progress` takes the share off his other
    ratings — so the choice is what kind of player he becomes, not how good.
@@ -6264,15 +6649,7 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
           <DraftLine G={G} p={p} />
           {/* A demand is the only thing in the game that makes character cost
               something, so it belongs at the top of his page, not in the wire. */}
-          {depthOn(G, "demands") && p.demand && p.demand.year === G.year ? (
-            <div className={`${card} px-3 py-2 text-xs ${p.demand.kind === "trade" ? "text-rose-300" : "text-amber-300"}`}>
-              {p.demand.kind === "trade"
-                ? <>He has asked to be traded. <span className="text-slate-500">
-                    {p.demand.got} minutes a night when he expects {p.demand.want} — and he's stopped asking.</span></>
-                : <>He wants more ice time. <span className="text-slate-500">
-                    {p.demand.got} a night against the {p.demand.want} a player of his standard expects.</span></>}
-            </div>
-          ) : null}
+          <DemandNote G={G} setG={setG} p={p} />
           <DevFocusPicker G={G} setG={setG} p={p} />
           <Section title="Ratings"
             right={p.pos !== "G" ? <span className="text-xs text-sky-300">{roleOf(p).label}</span> : null}
@@ -7299,6 +7676,18 @@ function RosterTab({ G, setG, openPlayer, notify }) {
     notify(r.ok ? `${fullName(p)} placed on waivers for release.` : r.why);
   };
 
+  /* A buyout is expensive, permanent and lands on your cap for twice the term.
+     It gets the same confirmation a release does, with the real numbers. */
+  const buyout = (p) => {
+    const c = buyoutCost(G, p.id);
+    if (!window.confirm(
+      `Buy out ${fullName(p)}?\n\nHe has ${p.contract.yrs} year${p.contract.yrs === 1 ? "" : "s"} left at `
+      + `$${p.contract.amt}M.\n\nYou'd pay $${c.perYear}M a year for ${c.yrs} years — $${c.total}M in all — `
+      + `and he becomes a free agent immediately.\n\nThis cannot be undone.`)) return;
+    const r = upd((g) => buyOut(g, p.id));
+    notify(r.ok ? `${fullName(p)} bought out — $${r.perYear}M a year for ${r.yrs} years.` : r.why);
+  };
+
   const condition = (p) => {
     const r = upd((g) => startStint(g, p.id, STINT_MAX_GAMES));
     notify(r.ok ? `${fullName(p)} sent down for a ${r.games}-game conditioning stint.` : r.why);
@@ -7401,11 +7790,22 @@ function RosterTab({ G, setG, openPlayer, notify }) {
           Cut
         </button>
       ) : (
-        <button className={`${btnGhost} text-xs px-2 py-1 text-rose-300 hover:text-rose-200`}
-          title="He's paid too much to simply cut — he has to clear waivers first"
-          onClick={(e) => { e.stopPropagation(); cut(p); }}>
-          Release
-        </button>
+        <span className="flex gap-1.5 justify-end whitespace-nowrap">
+          <button className={`${btnGhost} text-xs px-2 py-1 text-rose-300 hover:text-rose-200`}
+            title="He's paid too much to simply cut — he has to clear waivers first"
+            onClick={(e) => { e.stopPropagation(); cut(p); }}>
+            Release
+          </button>
+          {/* The way out of a deal nobody will take and you can't cut. */}
+          {canBuyOut(G, p) ? (
+            <button className={`${btnGhost} text-xs px-2 py-1 text-amber-300 hover:text-amber-200`}
+              title={(() => { const c = buyoutCost(G, p.id);
+                return `Buy him out — $${c.perYear}M a year for ${c.yrs} years, and he's gone`; })()}
+              onClick={(e) => { e.stopPropagation(); buyout(p); }}>
+              Buy out
+            </button>
+          ) : null}
+        </span>
       )
     ) },
   ];
@@ -8206,6 +8606,14 @@ function TradeTab({ G, setG, notify, openPlayer }) {
   const toggle = (list, set, id) => set(list.includes(id) ? list.filter((x) => x !== id) : list.concat(id));
 
   const selPicks = (tid, ids) => picksOf(tid).filter((pk) => ids.includes(pkId(pk)));
+  /* Attaching a protection writes it onto the pick record itself, so the
+     valuation the other club sees updates as you change the terms. */
+  const setProtect = (pk, v) => {
+    const g2 = migrate(JSON.parse(JSON.stringify(G)));
+    const rec = (g2.picks || []).find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig);
+    if (rec) rec.protect = v === "none" ? null : v;
+    setG(g2);
+  };
   const ev = useMemo(
     () => evalTrade(G, G.userTeam, mine, selPicks(G.userTeam, myPicks), other, theirs, selPicks(other, theirPicks), { retain }),
     [G, mine, theirs, myPicks, theirPicks, other, retain]);
@@ -8259,6 +8667,21 @@ function TradeTab({ G, setG, notify, openPlayer }) {
               <input type="checkbox" checked={pickSel.includes(pkId(pk))} onChange={() => toggle(pickSel, setPickSel, pkId(pk))} />
               <span className="flex-1 truncate">{L.text}</span>
               {L.note ? <span className={`text-[11px] tnum ${L.tone}`}>{L.note}</span> : null}
+              {/* A protection is agreed when the pick moves, so it belongs on
+                  the pick as you're offering it — and it visibly cuts what the
+                  other club will give you for it. */}
+              {depthOn(G, "pickProtection") && tid === G.userTeam && pk.round === 1
+                && pickSel.includes(pkId(pk)) ? (
+                <select className="bg-[#0d1728] border border-[#243250] rounded text-[11px] px-1 py-0.5"
+                  value={pk.protect || "none"} onClick={(e) => e.preventDefault()}
+                  onChange={(e) => setProtect(pk, e.target.value)}>
+                  {PROTECTIONS.map((x) => <option key={x.k} value={x.k}>{x.label}</option>)}
+                </select>
+              ) : pk.protect && pk.protect !== "none" ? (
+                <span className="text-[11px] text-amber-300" title={protectionOf(pk).blurb}>
+                  {protectionOf(pk).label}
+                </span>
+              ) : null}
               <span className="text-slate-500 tnum text-xs w-10 text-right"
                 title="what the AI values this pick at">{pickValue(G, pk).toFixed(1)}</span>
             </label>
@@ -8705,6 +9128,61 @@ function AllStarTab({ G, openPlayer }) {
 
 /* ---------------------------------- the room ------------------------------- */
 
+/* The market. Derived from the YEAR, so the list is stable all offseason and
+   costs nothing — and hiring is the point: a staff you can see and cannot
+   change is furniture. */
+function StaffMarket({ G, setG, notify }) {
+  const [role, setRole] = useState(null);
+  const t = G.teams[G.userTeam];
+  const jobs = (depthOn(G, "coachStaff") ? STAFF_ROLES.map((r) => ({ k: r.k, label: r.label })) : [])
+    .concat(depthOn(G, "areaScouting") ? [{ k: "scout", label: "Head scout" }] : []);
+  if (!jobs.length) return null;
+  const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); const r = fn(g2); setG(g2); return r; };
+  const current = (k) => (k === "scout" ? scoutOf(G, t) : (staffOf(G, t).people || {})[k]) || {};
+  return (
+    <div className="border-t border-[#1e2b45] pt-2 mt-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-slate-400">Hire</span>
+        {jobs.map((j) => (
+          <button key={j.k} onClick={() => setRole(role === j.k ? null : j.k)}
+            className={`text-xs px-2 py-1 rounded ${role === j.k
+              ? "bg-sky-500/25 text-sky-200" : "bg-[#0d1728] border border-[#243250] text-slate-400 hover:text-slate-200"}`}>
+            {j.label}
+          </button>
+        ))}
+        {role && t.staffHired && t.staffHired[role] ? (
+          <button className="text-xs px-2 py-1 text-rose-300 hover:underline"
+            onClick={() => { const r = upd((g) => fireStaff(g, role));
+              notify(r.ok ? "Let go." : r.why); }}>
+            Fire {current(role).name}
+          </button>
+        ) : null}
+      </div>
+      {role ? (
+        <div className="mt-2 space-y-0.5">
+          <div className="text-[11px] text-slate-500">
+            Currently {current(role).name} · {current(role).rating}
+          </div>
+          {staffMarket(G, role).map((c) => (
+            <div key={c.id} className="flex items-center gap-2 text-sm py-0.5">
+              <span className="flex-1 truncate">{c.name}</span>
+              <span className={`tnum ${c.rating > current(role).rating ? "text-emerald-300" : "text-slate-500"}`}>
+                {c.rating}
+              </span>
+              <span className="text-slate-600 text-xs tnum w-12 text-right">${c.cost}M</span>
+              <button className={`${btnGhost} text-xs px-2 py-0.5`}
+                onClick={() => { const r = upd((g) => hireStaff(g, role, c));
+                  notify(r.ok ? `${c.name} hired.` : r.why); }}>
+                Hire
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function RoomTab({ G, setG, openPlayer, notify }) {
   const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); fn(g2); setG(g2); };
   const t = G.teams[G.userTeam];
@@ -8783,6 +9261,15 @@ function RoomTab({ G, setG, openPlayer, notify }) {
                     <span className="text-slate-600"> — his is the number that counts for anyone in the minors.</span>
                   </div>
                 ) : null}
+                {depthOn(G, "areaScouting") ? (
+                  <div className="text-xs text-slate-400">
+                    <span className="text-slate-500">Head scout </span>
+                    {scoutOf(G, G.teams[G.userTeam]).name}
+                    <span className="text-slate-500"> · {scoutOf(G, G.teams[G.userTeam]).rating}</span>
+                    <span className="text-slate-600"> — how much a sweep of a region actually tells you.</span>
+                  </div>
+                ) : null}
+                {!st.head || depthOn(G, "areaScouting") ? <StaffMarket G={G} setG={setG} notify={notify} /> : null}
               </>
             );
           })()}
@@ -9097,9 +9584,119 @@ function DraftClassReport({ G, openPlayer }) {
   );
 }
 
+/* ---------------------------- the year in review ---------------------------
+ * Everything needed to tell the story of a season is now in the save — the
+ * table, the ballots, the leaders, the draft class, the grudges — and it was
+ * spread over five screens as five tables. This is the one page that reads like
+ * a season rather than a database, built entirely from what is already there.
+ * ------------------------------------------------------------------------- */
+function SeasonReview({ G, openPlayer, openTeam }) {
+  const years = (G.history || []).map((h) => h.year).sort((a, b) => b - a);
+  const [year, setYear] = useState(years[0]);
+  const h = (G.history || []).find((x) => x.year === (years.includes(year) ? year : years[0]));
+  if (!h) return null;
+  const me = G.teams[G.userTeam];
+  const nm = (id) => (id != null && G.players[id] ? fullName(G.players[id]) : null);
+  const table = (h.standings || []).slice().sort((a, b) => b.pts - a.pts);
+  const myRow = table.findIndex((s) => s.id === G.userTeam) + 1;
+  const cls = draftClassReport(G, h.year);
+  return (
+    <Section title="The year in review"
+      right={
+        <div className="flex gap-1 flex-wrap justify-end">
+          {years.slice(0, 10).map((y) => (
+            <button key={y} onClick={() => setYear(y)}
+              className={`text-[11px] px-1.5 py-0.5 rounded ${h.year === y
+                ? "bg-sky-500/25 text-sky-200" : "text-slate-500 hover:text-slate-300"}`}>{y}</button>
+          ))}
+        </div>
+      }>
+      <div className="p-3 space-y-3 text-sm">
+        {/* The season in a sentence, assembled rather than stored. */}
+        <div className="text-slate-300">
+          <b>{h.year}.</b>{" "}
+          {h.champion != null && G.teams[h.champion]
+            ? <>{G.teams[h.champion].city} {G.teams[h.champion].name} won the Cup. </>
+            : <>Nobody has lifted it yet. </>}
+          {h.userRecord ? (
+            <>You finished {h.userRecord.w}-{h.userRecord.l}-{h.userRecord.otl}
+              {myRow ? <>, {ordinal(myRow)} of {table.length}</> : null}
+              {h.champion === G.userTeam ? <b className="text-amber-300"> — and it was yours.</b> : "."}
+            </>
+          ) : null}
+        </div>
+
+        <div className="grid sm:grid-cols-2 gap-x-6 gap-y-2">
+          {h.awards ? (
+            <div>
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">Silverware</div>
+              {["mvp", "scoring", "goals", "defence", "goalie", "rookie"].map((k) => (
+                h.awards[k] != null && nm(h.awards[k]) ? (
+                  <div key={k} className="flex justify-between gap-2 py-0.5">
+                    <span className="text-slate-500 text-xs">{AWARD_LABEL[k]}</span>
+                    <button className="hover:text-sky-300 text-right" onClick={() => openPlayer(h.awards[k])}>
+                      {nm(h.awards[k])}
+                    </button>
+                  </div>
+                ) : null
+              ))}
+              {h.retroAwards ? <div className="text-[11px] text-slate-600 mt-1">Reconstructed from the record.</div> : null}
+            </div>
+          ) : null}
+          {h.leaders ? (
+            <div>
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">Led the league</div>
+              {RECORD_DEFS.map((d) => {
+                const L = h.leaders[d.key];
+                if (!L) return null;
+                return (
+                  <div key={d.key} className="flex justify-between gap-2 py-0.5">
+                    <span className="text-slate-500 text-xs">{d.label}</span>
+                    <span className="text-right">
+                      <button className="hover:text-sky-300" onClick={() => openPlayer(L.pid)}>{L.name}</button>
+                      <span className="text-slate-500 tnum text-xs"> {L.v}</span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+
+        {cls ? (
+          <div className="text-xs text-slate-400 border-t border-[#1e2b45] pt-2">
+            <span className="text-slate-500">That June: </span>
+            {cls.rows.length} players drafted
+            {cls.graded ? <> · {cls.hits} have beaten their slot, {cls.busts} have missed it</> : null}
+            {cls.mine.length ? <> · you took {cls.mine.length}
+              {cls.mine[0] ? <>, starting with{" "}
+                <button className="hover:text-sky-300" onClick={() => openPlayer(cls.mine[0].p.id)}>
+                  {fullName(cls.mine[0].p)}</button></> : null}</> : null}
+          </div>
+        ) : null}
+
+        {/* Grudges are the closest the save has to a memory of bad blood. */}
+        {depthOn(G, "rivalryGrowth") && me.grudges && Object.keys(me.grudges).length ? (
+          <div className="text-xs text-slate-400 border-t border-[#1e2b45] pt-2">
+            <span className="text-slate-500">Bad blood: </span>
+            {Object.entries(me.grudges).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([id, n], i) => (
+              <span key={id}>
+                {i ? " · " : ""}
+                <button className="hover:text-sky-300" onClick={() => openTeam(+id)}>{G.teams[+id].name}</button>
+                <span className="text-slate-600"> ({n} spring{n === 1 ? "" : "s"})</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </Section>
+  );
+}
+
 function HistoryTab({ G, openPlayer, openTeam }) {
   return (
     <div className="space-y-3">
+      <SeasonReview G={G} openPlayer={openPlayer} openTeam={openTeam} />
       <Section title="League history">
         <SortTable min={560} rows={G.history} initial="year" rowKey={(h) => h.year}
           cols={[
@@ -9520,6 +10117,13 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
                   title={stars.includes(p.id) ? "on your list" : "add to your list"}
                   onClick={(e) => { e.stopPropagation(); upd((g) => toggleStar(g, p.id)); }}>★</button>
               ) },
+            /* Tiers are how scouts actually talk about a board — "the top four,
+               then a gap" — and a flat ranked list hides exactly that. Derived
+               from your own read, so a club that has scouted badly sees the
+               tiers in the wrong places, which is the point. */
+            { key: "tier", label: "Tier", get: (p) => -draftTier(G, p), cls: "text-xs",
+              cell: (p) => { const t = draftTier(G, p);
+                return <span className={DRAFT_TIER_TONE[t] || "text-slate-500"}>{DRAFT_TIER_LABEL[t]}</span>; } },
             { key: "name", label: "Prospect", get: (p) => p.ln,
               cell: (p) => <span className="whitespace-nowrap">{fullName(p)}</span> },
             { key: "pos", label: "Pos", get: (p) => POS.indexOf(p.pos),
