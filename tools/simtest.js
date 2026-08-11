@@ -78,6 +78,7 @@ const EXPORTS = [
   "staffMarket", "hireStaff", "fireStaff", "scoutOf", "STAFF_MARKET_SIZE",
   "PROTECTIONS", "protectionOf", "pickConveys", "resolveProtections",
   "draftTier", "DRAFT_TIER_LABEL",
+  "playoffDev", "DEV_PLAYOFF", "DEV_PLAYOFF_FULL", "DEV_DOUBLE_DIP", "DOUBLE_DIP_MIN_FARM",
   "tradeValue", "roomHitOf", "addRoomHit", "decayRoomHits", "gateFor", "staffBill", "budgetLeft",
   "hireHeadCoach", "unhappyMarket", "canLtir", "placeLtir", "activateLtir", "onLtir",
   "LTIR_MIN_GAMES", "ROOM_HIT_DECAY",
@@ -3184,6 +3185,79 @@ const CHECKS = {
     ok(tiers.every((t) => t >= 0 && t < A.DRAFT_TIER_LABEL.length), "and every one has a label");
   },
 
+  /* Playoff hockey as a teacher, and the double dip — a farm season AND a
+     spring in the NHL is two developmental years in one. */
+  playoffDevelopment(A) {
+    section("The spring teaches");
+    const F = A.DEV_FARM;
+    const full = { gp: 82, g: 20, a: 25 };
+    const run = (gp) => ({ gp });
+
+    ok(A.playoffDev(null, null) === 0, "no playoffs, no bonus");
+    ok(A.playoffDev(null, run(0)) === 0, "and none for a club that missed out");
+    ok(A.devEnvironment({ pos: "C" }, null, full) === F,
+      `a farm season with no spring is still exactly DEV_FARM (${F})`);
+
+    // A run is worth more the deeper it goes, and it caps out.
+    const short = A.playoffDev(null, run(4)), deep = A.playoffDev(null, run(A.DEV_PLAYOFF_FULL));
+    ok(short > 0 && deep > short, `a deep run teaches more than a first-round exit (${deep.toFixed(2)} vs ${short.toFixed(2)})`);
+    ok(Math.abs(deep - A.DEV_PLAYOFF) < 1e-9, `and a full run is worth DEV_PLAYOFF (${A.DEV_PLAYOFF})`);
+    ok(A.playoffDev(null, run(40)) === deep, "a longer one can't be worth more than the distance");
+
+    /* THE DOUBLE DIP. The same spring is worth substantially more to a man who
+       earned it with a real season in the minors first — he got the minutes
+       there and the intensity here, which is what neither path gives alone. */
+    const alone = A.playoffDev(run(0), run(A.DEV_PLAYOFF_FULL));
+    const dipped = A.playoffDev({ gp: A.DOUBLE_DIP_MIN_FARM }, run(A.DEV_PLAYOFF_FULL));
+    ok(dipped > alone, `a farm season plus a run beats the run alone (${dipped.toFixed(2)} vs ${alone.toFixed(2)})`);
+    ok(Math.abs(dipped - (A.DEV_PLAYOFF + A.DEV_DOUBLE_DIP)) < 1e-9, "by exactly the double-dip bonus");
+    ok(dipped > alone * 1.7, "which is worth roughly doubling it");
+    const cameo = A.playoffDev({ gp: A.DOUBLE_DIP_MIN_FARM - 1 }, run(A.DEV_PLAYOFF_FULL));
+    ok(cameo === alone, "a handful of farm games doesn't count as having earned it");
+
+    // It stacks on the year rather than replacing it.
+    const farmOnly = A.devEnvironment({ pos: "C" }, null, full);
+    const farmPlus = A.devEnvironment({ pos: "C" }, null, full, null, run(A.DEV_PLAYOFF_FULL));
+    ok(farmPlus > farmOnly, `the spring is added to the year (${farmPlus.toFixed(2)} vs ${farmOnly.toFixed(2)})`);
+    ok(Math.abs(farmPlus - (farmOnly + dipped)) < 1e-9, "exactly, and nothing else moves");
+    // A man who played nowhere but the postseason still learned something.
+    ok(A.devEnvironment({ pos: "C" }, null, null, null, run(8)) > 0, "a callup for the run alone counts");
+    ok(A.devEnvironment({ pos: "C" }, null, null, null, null) === 0, "and playing nowhere at all is still nothing");
+
+    /* And it reaches `progress` — the whole reason this didn't work before was
+       that `p.po` was cleared at the rollover BEFORE development ran. */
+    const G = A.newGame(0, { seed: 1212, rules: { seasonLen: 41 } });
+    simSeason(A, G);
+    const kid = A.playersOf(G).find((p) => p.age <= 21 && p.teamId != null && !p.retired);
+    kid.stats = { gp: 0 }; kid.farmSeason = { gp: 40, g: 15, a: 20 };
+    const withRun = A.devEnvironment(kid, kid.stats, kid.farmSeason, null, run(12));
+    const without = A.devEnvironment(kid, kid.stats, kid.farmSeason, null, null);
+    ok(withRun > without, "a prospect's year is worth more when it ends in the NHL playoffs");
+
+    /* End to end. Two identical leagues on the same seed, the same player, and
+       the only difference is a playoff run — `progress` consumes the same
+       number of `rnd` calls either way, so the gauss draws are identical and
+       any gap is the spring alone. This is what actually failed before: the
+       maths was reachable and the caller never passed it. */
+    const mk = () => {
+      const g = A.newGame(0, { seed: 4321, rules: { seasonLen: 41 } });
+      const q = A.playersOf(g).find((x) => x.age <= 21 && x.teamId != null && !x.retired);
+      q.stats = { gp: 0 }; q.farmSeason = { gp: 40, g: 15, a: 20 };
+      return { g, q };
+    };
+    const a1 = mk(), a2 = mk();
+    ok(a1.q.id === a2.q.id && a1.q.ovr === a2.q.ovr, "the same prospect in two identical leagues");
+    A.progress(a1.g, a1.q, { gp: A.DEV_PLAYOFF_FULL });
+    A.progress(a2.g, a2.q, null);
+    ok(a1.q.ovr > a2.q.ovr,
+      `the one who played the spring came out better (${a1.q.ovr} vs ${a2.q.ovr})`);
+
+    simPlayoffs(A, G);
+    // finishSeason has run: every playoff line is archived and cleared.
+    ok(A.playersOf(G).every((p) => !p.po), "the playoff line is cleared after the rollover");
+    ok(A.playersOf(G).some((p) => p.careerPO && p.careerPO.gp), "but the record of it survives");
+  },
+
   /* The threads that were left hanging: a room that remembers, a budget that
      pays for people, and injuries that finally mean something to the cap. */
   clubLife(A) {
@@ -3275,6 +3349,15 @@ const CHECKS = {
     ok(!A.activateLtir(L, man.id).ok, "activating him is refused when the room is gone");
     L.rules.capAmount = 200;
     ok(A.activateLtir(L, man.id).ok && !A.onLtir(man), "and allowed when there's space");
+    /* Nobody stays on reserve once he's fit. A player stuck there is off the
+       cap and out of every lineup, and `autoLines` hands his minutes to
+       whoever is left — which is how a defenceman reaches forty a night. */
+    man.ltir = true; man.inj = 0;
+    A.migrate(L);
+    ok(!man.ltir, "a healthy player is taken off long-term reserve on load");
+    man.ltir = true; man.inj = 30;
+    A.migrate(L);
+    ok(man.ltir, "but one who is still hurt stays there");
 
     section("Unhappy elsewhere");
     const U = A.newGame(0, { seed: 6969, rules: { seasonLen: 82, demands: true } });

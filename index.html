@@ -1752,6 +1752,11 @@ function migrate(G) {
       (p.career || []).forEach((c) => { if (!c.total) stampShares(G, p, c); });
       if (p.stats && p.stats.gp) stampShares(G, p, p.stats);
     }
+    /* Nobody stays on long-term reserve once he's fit. Without this a player
+       whose injury ran out could sit there indefinitely — off the cap, out of
+       every lineup — and `autoLines` would quietly hand his minutes to whoever
+       was left, which is how a defenceman ends up at forty minutes a night. */
+    if (p.ltir && p.inj <= 0) p.ltir = false;
     if (!p.trophies) p.trophies = [];
     if (!p.rings) p.rings = [];
     if (!p.allStars) p.allStars = [];
@@ -3445,6 +3450,10 @@ function finishSeason(G) {
       });
       p.poRuns = (p.poRuns || 0) + 1;
     }
+    /* Held until AFTER `progress`. The spring is part of what the year taught
+       him — clearing it here meant development could never see it, which is
+       why a prospect called up for a playoff run learned nothing from it. */
+    const poLine = p.po;
     p.po = null;
     /* Rookie status is about his first season IN THE LEAGUE, not his first
        season after being drafted. Clearing it unconditionally meant a prospect
@@ -3457,7 +3466,7 @@ function finishSeason(G) {
     // A summer is long enough to heal anything and shake off any rust.
     p.inj = 0; p.injDesc = ""; p.fatigue = 0;
     p.rust = 0; p.rustFrom = 0; p.rustKey = null; p.injGames = 0;
-    progress(G, p);
+    progress(G, p, poLine);
     if (p.contract.yrs > 0) p.contract.yrs--;
   });
   playersOf(G).forEach((p) => {
@@ -5711,22 +5720,52 @@ function farmRoomBonus(room) {
   return edge * DEV_WIN_SWING + (room.title ? DEV_WIN_TITLE : 0);
 }
 
-function devEnvironment(p, st, farm, room) {
+/* ------------------------- the spring, and doing both ----------------------
+ * Playoff hockey is the hardest the sport gets and it taught a young player
+ * NOTHING — `p.po` was cleared at the rollover before `progress` ever ran, so a
+ * prospect called up for a Cup run developed exactly as if he had sat at home.
+ *
+ * DOUBLE DIPPING is the case worth paying for: a kid who plays a full season on
+ * the farm, carries a real role there, and is then thrown into the NHL
+ * postseason has had two developmental years in one. He got the minutes AND the
+ * intensity, which is precisely the thing neither path gives on its own. It is
+ * worth roughly twice what the run alone is.
+ *
+ * Scaled by how deep the run went, so a first-round exit is a taste and a final
+ * is an education. A player with no playoff games is completely unaffected —
+ * the term is additive and starts at zero.
+ * ------------------------------------------------------------------------- */
+const DEV_PLAYOFF = 1.1;          // a deep run, on top of whatever the year was worth
+const DEV_PLAYOFF_FULL = 16;      // games that count as having gone the distance
+const DEV_DOUBLE_DIP = 0.9;       // and again, for a man who earned it in the minors first
+const DOUBLE_DIP_MIN_FARM = 20;   // a real season down there, not a cameo
+
+function playoffDev(farm, po) {
+  const pGp = (po && po.gp) || 0;
+  if (!pGp) return 0;
+  const fGp = (farm && farm.gp) || 0;
+  const dip = fGp >= DOUBLE_DIP_MIN_FARM ? DEV_DOUBLE_DIP : 0;
+  return (DEV_PLAYOFF + dip) * clamp(pGp / DEV_PLAYOFF_FULL, 0, 1);
+}
+
+function devEnvironment(p, st, farm, room, po) {
   const nGp = (st && st.gp) || 0;
   const fGp = (farm && farm.gp) || 0;
-  if (!nGp && !fGp) return 0;                       // played nowhere, learned nothing
+  const spring = playoffDev(farm, po);
+  // Played nowhere, learned nothing — but a spring on its own still counts.
+  if (!nGp && !fGp) return spring;
   const r = nhlDevRead(p, st);
   const nhl = r ? DEV_NHL_LO + (DEV_NHL_HI - DEV_NHL_LO) * r.role * (0.3 + 0.7 * ((r.perf + 1) / 2)) : 0;
   // The room only weighs on the part of the year he actually spent down there.
   const onFarm = DEV_FARM + farmRoomBonus(room);
-  return (nhl * nGp + onFarm * fGp) / (nGp + fGp);
+  return (nhl * nGp + onFarm * fGp) / (nGp + fGp) + spring;
 }
 // Where he plays stops mattering once he's made. Ages are post-birthday.
 function devAgeWeight(age) { return age <= 21 ? 1 : age <= 23 ? 0.75 : age <= 25 ? 0.4 : 0; }
 
 /* ------------------------------ the rollover ------------------------------ */
 
-function progress(G, p) {
+function progress(G, p, po) {
   const peak = p.pos === "G" ? 28 : 26;
   const keys = p.pos === "G" ? GOALIE_KEYS : SKATER_KEYS;
   let delta;
@@ -5739,7 +5778,7 @@ function progress(G, p) {
   /* `farmRoom` reads `t.farmRec` and `p.farmTitles`, both of which are still
      intact here — the table is reset in `startNextSeason` and the title was
      awarded by `runFarmPlayoffs` back at the end of the regular season. */
-  delta += devEnvironment(p, p.stats, p.farmSeason, farmRoom(G, p)) * devAgeWeight(p.age);
+  delta += devEnvironment(p, p.stats, p.farmSeason, farmRoom(G, p), po) * devAgeWeight(p.age);
   // A coach who develops players is worth real progression on top of that —
   // and on the farm it's the affiliate's coach whose job that is.
   if (p.age <= 24 && p.teamId != null) {
@@ -6764,7 +6803,8 @@ function DevelopmentNote({ G, p }) {
   const clubGp = p.teamId != null && G.teams[p.teamId] ? G.teams[p.teamId].gp : 0;
   if (!nGp && !fGp && !clubGp) return null;
   const room = farmRoom(G, p);
-  const env = devEnvironment(p, p.season, p.farmSeason, room);
+  // `p.po` is the run in progress, so this reads live during the playoffs.
+  const env = devEnvironment(p, p.season, p.farmSeason, room, p.po);
   const read = nhlDevRead(p, p.season);
   const band =
     env >= DEV_FARM * 1.5 ? { t: "Thriving", bar: "bg-emerald-500", tone: "text-emerald-300" } :
@@ -6788,6 +6828,12 @@ function DevelopmentNote({ G, p }) {
     why.push(`${fGp} on the farm${kind}`);
   }
   if (!nGp && !fGp) why.push(`no games · his club has played ${clubGp}`);
+  /* The spring, and the one case worth going out of your way for: a full farm
+     season AND a playoff run is two developmental years in one. */
+  if (p.po && p.po.gp) {
+    const dip = fGp >= DOUBLE_DIP_MIN_FARM;
+    why.push(`${p.po.gp} playoff game${p.po.gp === 1 ? "" : "s"}${dip ? " on top of a farm season" : ""}`);
+  }
   // Order matters: "in over his head" is only true of a player drowning in BIG
   // minutes. A third-liner who isn't scoring is a different problem, and telling
   // the user to cut his ice time would be the wrong call.

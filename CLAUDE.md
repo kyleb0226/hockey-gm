@@ -593,6 +593,18 @@ a flat "+1.5 if he's on the farm", which gave every prospect the same answer.
   ~0.02. The room is an OPTIONAL fourth argument to `devEnvironment`, so every existing call (and
   every harness assertion pinning the farm term to exactly `DEV_FARM`) is unchanged, and it only
   weighs on the share of the year actually spent down there.
+- **The spring teaches, and doing BOTH teaches most.** `p.po` was cleared at the rollover *before*
+  `progress` ran, so a prospect called up for a Cup run developed exactly as if he'd sat at home —
+  the maths was reachable and the caller never passed it. `finishSeason` now holds the playoff line
+  until after `progress`. A run is worth up to `DEV_PLAYOFF`, scaled by how deep it went; a player
+  who also played a real farm season (`DOUBLE_DIP_MIN_FARM`) gets `DEV_DOUBLE_DIP` on top, roughly
+  doubling it — he got the minutes down there and the intensity up here, which is exactly what
+  neither path gives alone. **The term is additive and starts at zero**, so a player with no
+  playoff games is unaffected and every existing `devEnvironment` assertion still holds.
+- **Nobody stays on LTIR once he's fit.** `migrate` clears it, because a player stuck on reserve is
+  off the cap and out of every lineup and `autoLines` hands his minutes to whoever is left — which
+  is how a defenceman reaches forty minutes a night. Measured in clean leagues the skater maximum
+  is 25–32; a stuck reserve was what produced 41.5.
 - `devAgeWeight` tapers it out: full to 21, 0.75 to 23, 0.4 to 25, nothing after — where a player
   spends the year stops mattering once he's made.
 - **Read `p.stats`, not `p.season`.** By the time `progress` runs, `finishSeason` has already done
