@@ -78,6 +78,9 @@ const EXPORTS = [
   "staffMarket", "hireStaff", "fireStaff", "scoutOf", "STAFF_MARKET_SIZE",
   "PROTECTIONS", "protectionOf", "pickConveys", "resolveProtections",
   "draftTier", "DRAFT_TIER_LABEL",
+  "tradeValue", "roomHitOf", "addRoomHit", "decayRoomHits", "gateFor", "staffBill", "budgetLeft",
+  "hireHeadCoach", "unhappyMarket", "canLtir", "placeLtir", "activateLtir", "onLtir",
+  "LTIR_MIN_GAMES", "ROOM_HIT_DECAY",
   "canTerminate", "terminateContract", "releaseToPool", "enforceRosterLimits", "enforceCap",
   "capFreeAgentPool", "TERMINATE_MAX_CAP", "DRESS_MIN", "FA_POOL_MAX",
   "playoffBerths", "clinchState", "shadowTable", "inFieldOf", "CLINCH_LABEL",
@@ -3179,6 +3182,122 @@ const CHECKS = {
     const tiers = board.map((p) => A.draftTier(P, p));
     ok(new Set(tiers).size >= 3, `a board splits into several tiers (${new Set(tiers).size})`);
     ok(tiers.every((t) => t >= 0 && t < A.DRAFT_TIER_LABEL.length), "and every one has a label");
+  },
+
+  /* The threads that were left hanging: a room that remembers, a budget that
+     pays for people, and injuries that finally mean something to the cap. */
+  clubLife(A) {
+    section("The room remembers");
+    const G = A.newGame(0, { seed: 2020, rules: { seasonLen: 82, demands: true } });
+    ok(A.roomHitOf(G.teams[0]) === 0, "a club starts with a clear conscience");
+    const before = A.roomMorale(G, 0);
+    A.addRoomHit(G, 0, 8);
+    ok(A.roomHitOf(G.teams[0]) === 8, "a hard call is remembered");
+    ok(A.roomMorale(G, 0) < before, `and the room is worse for it (${A.roomMorale(G, 0)} vs ${before})`);
+    ok(A.roomHitOf(G.teams[1]) === 0, "it belongs to the club, not the league");
+    /* An earlier version put this on `G`, which quietly meant thirty-two clubs
+       shared one conscience. */
+    A.decayRoomHits(G);
+    ok(A.roomHitOf(G.teams[0]) < 8, "and it fades if you stop making them");
+    for (let i = 0; i < 40; i++) A.decayRoomHits(G);
+    ok(A.roomHitOf(G.teams[0]) === 0, "all the way to nothing");
+    // An unhappy dressing room is a worse one even before you answer anybody.
+    const M = A.newGame(0, { seed: 2020, rules: { seasonLen: 82, demands: true } });
+    const clean = A.roomMorale(M, 0);
+    A.rosterOf(M, 0)[0].demand = { kind: "trade", day: 1, year: M.year, want: 18, got: 9 };
+    ok(A.roomMorale(M, 0) < clean, "an unhappy player drags the room down");
+
+    section("The club as a business");
+    const B = A.newGame(0, { seed: 3131, rules: { seasonLen: 82, coachStaff: true } });
+    ok(B.teams.every((t) => t.revenue === 0), "nobody has taken a gate yet");
+    const gate = A.gateFor(B, 0);
+    ok(gate > 0, `a home date is worth something (${gate})`);
+    /* Winning fills a building. Both clubs are identical here except for their
+       record, which is the only thing that should move the number. */
+    B.teams[0].gp = 40; B.teams[0].pts = 64;      // a good side
+    B.teams[1].gp = 40; B.teams[1].pts = 24;      // a bad one
+    B.teams[1].mkt = B.teams[0].mkt;              // same market, so it's the record
+    ok(A.gateFor(B, 0) > A.gateFor(B, 1),
+      `a winner draws better (${A.gateFor(B, 0)} vs ${A.gateFor(B, 1)})`);
+    A.simDays(B, 40);
+    ok(B.teams.some((t) => t.revenue > 0), "the gate accrues over a season");
+
+    // Staff salaries are charged, which is what makes the market a choice.
+    const mkt = A.staffMarket(B, "pp");
+    B.teams[B.userTeam].budget = 1;
+    const dear = mkt[0];
+    ok(dear.cost > 1, `the best man costs real money ($${dear.cost}M)`);
+    ok(!A.hireStaff(B, "pp", dear).ok, "and you can't hire him without the budget");
+    B.teams[B.userTeam].budget = 40;
+    ok(A.hireStaff(B, "pp", dear).ok, "with the money, you can");
+    ok(A.staffBill(B, B.userTeam) === dear.cost, "his salary is on the books");
+    ok(A.budgetLeft(B, B.userTeam) === 40 - dear.cost, "and comes out of the budget");
+
+    // Last year's gate becomes this year's budget.
+    const R = A.newGame(0, { seed: 3131, rules: { seasonLen: 41, coachStaff: true } });
+    simSeason(A, R); simPlayoffs(A, R); A.autoDraft(R, false); A.startNextSeason(R);
+    ok(R.teams.every((t) => t.budget > 0), "every club has a budget for the new year");
+    ok(R.teams.every((t) => t.revenue === 0), "and the books are reset");
+    const rich = R.teams.slice().sort((a, b) => b.budget - a.budget)[0];
+    const poor = R.teams.slice().sort((a, b) => a.budget - b.budget)[0];
+    ok(rich.budget > poor.budget, `clubs differ in what they can spend ($${rich.budget}M vs $${poor.budget}M)`);
+
+    section("The head coach");
+    const C = A.newGame(0, { seed: 4747, rules: { seasonLen: 41 } });
+    C.teams[C.userTeam].budget = 40;
+    const cands = A.staffMarket(C, "head");
+    ok(cands.every((c) => c.system), "a head coach brings a system with him");
+    const was = A.coachOf(C.teams[C.userTeam]).name;
+    ok(A.hireHeadCoach(C, cands[0]).ok, "you can replace him");
+    ok(A.coachOf(C.teams[C.userTeam]).name === cands[0].name, "and the new man is behind the bench");
+    ok(A.coachOf(C.teams[C.userTeam]).name !== was, "the old one has gone");
+    ok(A.systemOf(C.teams[C.userTeam]), "the club still has a system");
+    C.teams[C.userTeam].budget = 0.1;
+    ok(!A.hireHeadCoach(C, cands[1]).ok, "and you can't hire one you can't pay");
+
+    section("Long-term injured reserve");
+    const L = A.newGame(0, { seed: 5858, rules: { seasonLen: 82 } });
+    const man = A.rosterOf(L, 0).slice().sort((a, b) => b.contract.amt - a.contract.amt)[0];
+    man.inj = 5;
+    ok(!A.canLtir(L, man), "a short injury doesn't qualify");
+    man.inj = A.LTIR_MIN_GAMES;
+    ok(A.canLtir(L, man), "a long one does");
+    const capBefore = A.capHit(L, 0), hit = A.effectiveCap(L, man);
+    const r = A.placeLtir(L, man.id);
+    ok(r.ok && A.onLtir(man), "he can be placed on it");
+    ok(Math.abs(A.capHit(L, 0) - (capBefore - hit)) < 0.05,
+      `and his whole hit comes off the cap ($${hit}M)`);
+    ok(!A.activeRoster(L, 0).some((p) => p.ltir), "he cannot be dressed while he's there");
+    ok(A.rosterOf(L, 0).some((p) => p.ltir), "though he's still on the roster");
+    /* The catch: the relief was never really yours. Spend it and you can't have
+       him back until you clear the room again. */
+    L.rules.capAmount = A.capHit(L, 0) + 0.5;
+    ok(!A.activateLtir(L, man.id).ok, "activating him is refused when the room is gone");
+    L.rules.capAmount = 200;
+    ok(A.activateLtir(L, man.id).ok && !A.onLtir(man), "and allowed when there's space");
+
+    section("Unhappy elsewhere");
+    const U = A.newGame(0, { seed: 6969, rules: { seasonLen: 82, demands: true } });
+    ok(!A.unhappyMarket(U).length, "nobody is unhappy on day one");
+    const theirs = A.rosterOf(U, 5)[0];
+    theirs.demand = { kind: "trade", day: 1, year: U.year, want: 18, got: 9 };
+    const mine = A.rosterOf(U, U.userTeam)[0];
+    mine.demand = { kind: "trade", day: 1, year: U.year, want: 18, got: 9 };
+    const mk = A.unhappyMarket(U);
+    ok(mk.length === 1, "the market is other clubs' players");
+    ok(mk[0].p.id === theirs.id, "not your own");
+    // A club with an unhappy man is negotiating from behind.
+    const plain = A.newGame(0, { seed: 6969, rules: { seasonLen: 82, demands: true } });
+    const same = A.rosterOf(plain, 5)[0];
+    ok(A.tradeValue(U, theirs) < A.tradeValue(plain, same),
+      "and he costs less to prise away");
+    theirs.holdout = true;
+    ok(A.tradeValue(U, theirs) < A.tradeValue(plain, same) * 0.9, "a holdout costs less still");
+    // Demands are league-wide now, which is what makes any of this possible.
+    const W = A.newGame(0, { seed: 7070, rules: { seasonLen: 82, demands: true } });
+    A.simDays(W, 130);
+    const clubs = new Set(A.playersOf(W).filter((p) => p.demand && p.teamId != null).map((p) => p.teamId));
+    ok(clubs.size > 1, `unhappiness happens all over the league (${clubs.size} clubs)`);
   },
 
   /* Who led each category, year by year. The book kept only the best ever, so a

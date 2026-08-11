@@ -367,16 +367,26 @@ function demandCase(G, p) {
 function rollDemands(G) {
   if (!depthOn(G, "demands")) return G;
   if (G.phase !== "regular" || G.day % DEMAND_EVERY !== 0 || G.day === 0) return G;
-  rosterOf(G, G.userTeam).forEach((p) => {
+  /* THE WHOLE LEAGUE, not just your club. Demands started as a thing that
+     happened to you, which made them a tax rather than a system — an unhappy
+     star in Boise is exactly the kind of thing that should turn up on your
+     deadline board, and it can't if only your players are ever unhappy. */
+  G.teams.forEach((t) => rosterOf(G, t.id).forEach((p) => {
     if (p.demand) return;                     // he's already said his piece
     const c = demandCase(G, p);
     if (!c) return;
     p.demand = { kind: c.kind, day: G.day, year: G.year, want: c.want, got: c.got };
-    news(G, c.kind === "trade"
-      ? `${fullName(p)} has asked to be traded — ${c.got} minutes a night and he wants out.`
-      : `${fullName(p)} wants more ice time — ${c.got} a night when he expects ${c.want}.`,
-      c.kind === "trade" ? "bad" : "info");
-  });
+    // Your own room is news; a rumble elsewhere is only news when it's a
+    // player worth hearing about.
+    if (t.id === G.userTeam) {
+      news(G, c.kind === "trade"
+        ? `${fullName(p)} has asked to be traded — ${c.got} minutes a night and he wants out.`
+        : `${fullName(p)} wants more ice time — ${c.got} a night when he expects ${c.want}.`,
+        c.kind === "trade" ? "bad" : "info");
+    } else if (c.kind === "trade" && p.ovr >= 72) {
+      news(G, `${fullName(p)} has asked out of ${t.city}.`, "info");
+    }
+  }));
   /* A demand you meet goes away on its own; one you ignore long enough stops
      being a request. This is the only thing that reads `p.demand` back. */
   rosterOf(G, G.userTeam, true).forEach((p) => {
@@ -426,7 +436,7 @@ function answerDemand(G, pid, how) {
   if (how === "refuse") {
     p.demand = { ...p.demand, answered: "refuse", answeredAt: G.day };
     // Telling a man no is allowed to be the right call. It just isn't free.
-    G.roomHit = (G.roomHit || 0) + (p.demand.kind === "trade" ? 4 : 2);
+    addRoomHit(G, p.teamId, p.demand.kind === "trade" ? 4 : 2);
     news(G, `You told ${fullName(p)} he isn't going anywhere.`, "bad");
     return { ok: true, why: "he didn't take it well" };
   }
@@ -455,7 +465,7 @@ function checkPromises(G) {
       // A broken promise is worse than a refusal — he asked, you said yes, and
       // nothing changed.
       p.demand = { kind: "trade", day: G.day, year: G.year, want: d.want, got: round1(now), broken: true };
-      G.roomHit = (G.roomHit || 0) + 6;
+      addRoomHit(G, p.teamId, 6);
       news(G, `${fullName(p)} never got the minutes he was promised and wants out.`, "bad");
     }
   });
@@ -486,7 +496,9 @@ function demandOffers(G) {
 const HOLDOUT_AFTER = 35;      // days of being ignored after asking to leave
 function rollHoldouts(G) {
   if (!depthOn(G, "demands")) return G;
-  rosterOf(G, G.userTeam).forEach((p) => {
+  // League-wide, like the demands themselves — a holdout elsewhere weakens that
+  // club, which is exactly the kind of thing a rival should be able to exploit.
+  G.teams.forEach((t) => rosterOf(G, t.id).forEach((p) => {
     if (p.holdout || !p.demand || p.demand.kind !== "trade") return;
     const since = G.day - (p.demand.answeredAt || p.demand.day);
     if (since < HOLDOUT_AFTER) return;
@@ -494,8 +506,9 @@ function rollHoldouts(G) {
     if (personalityOf(p).steady >= 1.3) return;
     p.holdout = true;
     G.teams[p.teamId].lines = null;
-    news(G, `${fullName(p)} has not reported. He is holding out.`, "bad");
-  });
+    if (t.id === G.userTeam) news(G, `${fullName(p)} has not reported. He is holding out.`, "bad");
+    else if (p.ovr >= 72) news(G, `${fullName(p)} is holding out in ${t.city}.`, "info");
+  }));
   return G;
 }
 /* Ending one. Moving him ends it by itself — this is the other way. */
@@ -600,6 +613,28 @@ const letterFor = (G, p) => {
 /* How settled the room is, 0-100. Winning and leadership hold it up; a losing
    run and a roster full of hotheads drag it down. It feeds the board's read of
    the season and nudges how a club performs when things are going badly. */
+/* How you treat people, as a number the room remembers. Refusing a demand or
+   breaking a promise pushes this up; it decays a little every week, so a hard
+   call fades if you don't keep making them. It lives on the CLUB, not on `G` —
+   an earlier version put it on the game object, which quietly meant every
+   club in the league shared one conscience. */
+const ROOM_HIT_DECAY = 0.88;
+function roomHitOf(t) { return (t && t.roomHit) || 0; }
+function addRoomHit(G, teamId, n) {
+  const t = G.teams[teamId];
+  if (!t) return G;
+  t.roomHit = Math.min(40, roomHitOf(t) + n);
+  return G;
+}
+function decayRoomHits(G) {
+  G.teams.forEach((t) => {
+    if (!t.roomHit) return;
+    t.roomHit = t.roomHit * ROOM_HIT_DECAY;
+    if (t.roomHit < 0.4) t.roomHit = 0;
+  });
+  return G;
+}
+
 function roomMorale(G, teamId) {
   const t = G.teams[teamId];
   const r = rosterOf(G, teamId).filter((p) => p.pos !== "G");
@@ -608,7 +643,12 @@ function roomMorale(G, teamId) {
   const form = (t.l10 || []).reduce((s, x) => s + (x === "W" ? 1 : x === "O" ? 0.4 : -0.8), 0);
   const { captain } = letters(G, teamId);
   const capBonus = captain ? personalityOf(captain).lead * 2.2 : 0;
-  return Math.round(clamp(50 + form * 3.4 + (steady - 1.1) * 18 + capBonus, 0, 100));
+  /* Unhappiness in the room and the way you have handled it. Both are zero
+     unless the demands rule is on, so this is the same number it always was
+     for a club that isn't running that system. */
+  const unhappy = rosterOf(G, teamId, true).filter((p) => p.demand).length;
+  return Math.round(clamp(50 + form * 3.4 + (steady - 1.1) * 18 + capBonus
+    - roomHitOf(t) - unhappy * 2.5, 0, 100));
 }
 
 /* ------------------------------ the staff ---------------------------------
@@ -689,6 +729,47 @@ const derivedName = (seed) =>
  * derived default — so the club you took over keeps whoever it had until you
  * do something about it.
  * ------------------------------------------------------------------------- */
+/* ---------------------------- the club as a business -----------------------
+ * `t.revenue` was initialised to zero and referenced nowhere in the file, and
+ * `t.budget` was set once at generation and displayed in the club picker. So
+ * the staff market showed a salary beside every candidate and charged nothing:
+ * you always hired the best man available, which is not a decision.
+ *
+ * This is deliberately SMALL. It is not a business simulation and it must never
+ * become one — it exists so that the people you employ cost something, and so
+ * that winning pays for them. Revenue accrues per home date from a market size
+ * and how the club is doing; the budget is what's left after the staff are
+ * paid. The salary CAP is untouched by any of it: players are a separate
+ * economy, and mixing the two would quietly rewrite every cap check.
+ * ------------------------------------------------------------------------- */
+const GATE_BASE = 0.42;        // $M a home date for the smallest market
+const GATE_PER_MKT = 0.16;     // and what a bigger market adds
+function gateFor(G, teamId) {
+  const t = G.teams[teamId];
+  if (!t) return 0;
+  // Winning fills a building; losing empties it. Points percentage, not luck.
+  const pace = t.gp ? clamp(t.pts / (2 * t.gp), 0.2, 0.8) : 0.5;
+  const room = clamp(roomMorale(G, teamId) / 100, 0.6, 1.1);
+  return round1((GATE_BASE + (t.mkt || 3) * GATE_PER_MKT) * (0.7 + pace) * room);
+}
+/* Charged once a season, at the rollover, so a hire mid-year is paid for the
+   year it happens in rather than pro-rated — the simplest rule that still
+   makes a big signing hurt. */
+function staffBill(G, teamId) {
+  const t = G.teams[teamId];
+  if (!t) return 0;
+  // The head coach is paid out of the same budget — he lives on `t.coach`
+  // rather than in `t.staffHired`, and leaving him out of the bill meant you
+  // could hire one you had no money for.
+  const head = (t.coach && t.coach.cost) || 0;
+  const rest = t.staffHired ? Object.values(t.staffHired).reduce((s, x) => s + (x.cost || 0), 0) : 0;
+  return round1(head + rest);
+}
+function budgetLeft(G, teamId) {
+  const t = G.teams[teamId];
+  return round1((t.budget || 0) - staffBill(G, teamId));
+}
+
 const STAFF_MARKET_SIZE = 6;
 function staffMarket(G, role) {
   const out = [];
@@ -698,12 +779,34 @@ function staffMarket(G, role) {
        plainly isn't, so the market is a choice rather than a queue. */
     const rating = derivedRating(seed, 40 + hashUnit(seed * 3 + 1) * 40);
     out.push({ id: `${G.year}-${role}-${i}`, name: derivedName(seed), role, rating,
+      // A head coach brings a system with him — the one thing about him you
+      // can't change after the fact.
+      system: Object.keys(SYSTEMS)[Math.floor(hashUnit(seed * 5 + 3) * Object.keys(SYSTEMS).length)],
       // What he costs, against the club's own budget for such things.
       cost: round1(0.4 + Math.max(0, rating - 40) * 0.035) });
   }
   return out.sort((a, b) => b.rating - a.rating);
 }
+/* The head coach is hired from the same market and stored differently, because
+   he isn't a rating — he's a SYSTEM plus three competences, and the system is
+   the club's identity. He is always hireable: unlike the assistants he existed
+   from the first build, so there is no rule to gate him behind. */
+function hireHeadCoach(G, cand) {
+  if (!cand) return { ok: false, why: "nobody there" };
+  const t = G.teams[G.userTeam];
+  const left = budgetLeft(G, G.userTeam) + ((t.coach && t.coach.cost) || 0);
+  if (cand.cost > left) return { ok: false, why: `you can't afford him — $${left}M left` };
+  const old = coachOf(t).name;
+  t.coach = { name: cand.name, system: cand.system || coachOf(t).system,
+    pp: cand.rating, pk: cand.rating, dev: cand.rating,
+    cost: cand.cost, years: ri(G, 2, 4) };
+  t.lines = null;
+  news(G, `${cand.name} takes over from ${old} behind the bench.`, "good");
+  return { ok: true };
+}
+
 function hireStaff(G, role, cand) {
+  if (role === "head") return hireHeadCoach(G, cand);
   // The scout belongs to the scouting rule, the coaches to the staff rule.
   const gate = role === "scout" ? "areaScouting" : "coachStaff";
   if (!depthOn(G, gate))
@@ -712,7 +815,15 @@ function hireStaff(G, role, cand) {
     return { ok: false, why: "no such job" };
   const t = G.teams[G.userTeam];
   t.staffHired = t.staffHired || {};
-  t.staffHired[role] = { name: cand.name, rating: cand.rating, hired: G.year };
+  /* You have to be able to pay him. The salary was cosmetic until now, which
+     meant the market had one correct answer — hire the best — and therefore
+     wasn't a choice at all. */
+  const after = budgetLeft(G, G.userTeam) - cand.cost
+    + ((t.staffHired[role] && t.staffHired[role].cost) || 0);
+  if (after < 0) return { ok: false, why: `you can't afford him — $${budgetLeft(G, G.userTeam)}M left` };
+  t.staffHired[role] = { name: cand.name, rating: cand.rating, hired: G.year, cost: cand.cost,
+    // A staff contract runs out, which is what makes the market live year to year.
+    until: G.year + ri(G, 2, 4) };
   const label = role === "scout" ? "head scout"
     : `${(STAFF_ROLES.find((r) => r.k === role) || {}).label} coach`;
   news(G, `${cand.name} hired as ${label}.`, "good");
@@ -1147,8 +1258,49 @@ function effectiveCap(G, p) {
   const face = p.farm && isTwoWay(G, p) ? p.contract.amt * TWO_WAY_MINORS_PCT : p.contract.amt;
   return Math.max(0, round1(face - retained));
 }
+/* ------------------------------------ LTIR --------------------------------
+ * `rollInjuries` has always produced long absences and nothing ever did
+ * anything with them, so a club that lost a star for half a season carried his
+ * full cap hit while icing a man short. That is the worst of both worlds, and
+ * it got worse when `enforceCap` started being strict.
+ *
+ * A player out for `LTIR_MIN_GAMES` or more can be placed on long-term injured
+ * reserve: his hit comes off the books while he is there. The catch is the real
+ * one — the relief VANISHES the moment he is activated, so a club that spends
+ * it all has to clear the space again to get him back.
+ * ------------------------------------------------------------------------- */
+const LTIR_MIN_GAMES = 20;
+function canLtir(G, p) {
+  return !!(p && p.teamId != null && !p.retired && !p.ltir && p.inj >= LTIR_MIN_GAMES);
+}
+function placeLtir(G, pid) {
+  const p = G.players[pid];
+  if (!p) return { ok: false, why: "no such player" };
+  if (p.ltir) return { ok: false, why: "he's already there" };
+  if (!canLtir(G, p))
+    return { ok: false, why: `he has to be out at least ${LTIR_MIN_GAMES} games` };
+  p.ltir = true;
+  if (p.teamId != null) G.teams[p.teamId].lines = null;
+  return { ok: true, relief: effectiveCap(G, p) };
+}
+/* Coming back. Refused when the club has spent the room, which is the whole
+   point of the mechanism — the relief was never really yours. */
+function activateLtir(G, pid) {
+  const p = G.players[pid];
+  if (!p || !p.ltir) return { ok: false, why: "he isn't on long-term reserve" };
+  const R = rules(G);
+  if (R.hardCap && capHit(G, p.teamId) + effectiveCap(G, p) > R.capAmount)
+    return { ok: false, why: "no room for his cap hit — clear space first" };
+  p.ltir = false;
+  G.teams[p.teamId].lines = null;
+  return { ok: true };
+}
+// A man on long-term reserve is off the books, and off them entirely.
+const onLtir = (p) => !!p.ltir;
+
 function capHit(G, teamId) {
-  const roster = rosterOf(G, teamId, true).reduce((s, p) => s + effectiveCap(G, p), 0);
+  const roster = rosterOf(G, teamId, true)
+    .reduce((s, p) => s + (onLtir(p) ? 0 : effectiveCap(G, p)), 0);
   const dead = retainedBy(G, teamId).reduce((s, r) => s + r.amt, 0);
   return round1(roster + dead);
 }
@@ -1164,7 +1316,8 @@ function rosterOf(G, teamId, includeFarm) {
 /* Who can actually be dressed tonight. A holdout is unavailable in exactly the
    way an injury is — no special case anywhere in the engine, which is why it
    belongs here rather than in the lineup builder. */
-const activeRoster = (G, teamId) => rosterOf(G, teamId).filter((p) => p.inj <= 0 && !p.holdout);
+const activeRoster = (G, teamId) =>
+  rosterOf(G, teamId).filter((p) => p.inj <= 0 && !p.holdout && !p.ltir);
 const teamOf = (G, teamId) => G.teams[teamId];
 
 /* ----------------------------- lines & pairings ---------------------------- */
@@ -2484,12 +2637,16 @@ function simDay(G) {
       ot: res.ot, so: res.so, events: res.events || [], boxes: res.boxes };
   });
   playedToday.forEach((tid) => { G.lastPlayed[tid] = G.day; });
+  // The gate. Only the home side takes one, which is what makes a home date
+  // worth something off the ice as well as on it.
+  day.forEach((fx) => { const t = G.teams[fx.home]; if (t) t.revenue = round1((t.revenue || 0) + gateFor(G, fx.home)); });
   processWaivers(G);
   // The affiliates play the mirrored fixtures, so every farm game has a real opponent.
   simFarmDay(G, G.day);
   // A stint is served in games, so it only ticks for clubs that actually played.
   tickStints(G, playedToday);
   rollDemands(G);
+  if (G.day % 7 === 0) decayRoomHits(G);
   if (G.day % DEMAND_EVERY === 0 && G.day > 0) {
     checkPromises(G); demandOffers(G); rollHoldouts(G);
   }
@@ -4025,6 +4182,10 @@ function signPlayer(G, pid, teamId, amt, yrs, opts) {
   if (opts && opts.ntc !== undefined) p.ntc = !!opts.ntc && valuesNtc(G, p) && yrs >= 2;
   else p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
   p.ntcWaived = false;
+  /* A real contract is a ONE-WAY deal: he is paid the same wherever he is, so
+     he cannot be buried in the minors for cap relief. This is what `isTwoWay`
+     has always checked for and nothing ever set. */
+  p.oneWay = round1(amt) > TERMINATE_MAX_CAP;
   const i = G.freeAgents.indexOf(pid);
   if (i >= 0) G.freeAgents.splice(i, 1);
   G.teams[teamId].lines = null;
@@ -4070,7 +4231,27 @@ function tradeValue(G, p) {
   // A contract well above market is a liability, not an asset.
   const mv = marketValue(G, p);
   v *= clamp(1 + (mv - p.contract.amt) * 0.09, 0.35, 1.6);
+  /* A motivated seller. A club holding a man who has asked out — or who has
+     stopped turning up — is negotiating from a worse position than one that
+     doesn't have to move anybody, and that is the whole reason to watch other
+     clubs' rooms. Zero effect unless the demands rule is on, since nobody
+     carries a demand otherwise. */
+  if (p.demand && p.demand.kind === "trade") v *= p.holdout ? 0.72 : 0.85;
   return Math.max(0.2, v);
+}
+
+/* Who is unhappy, and where. The half of the demands system that makes it a
+   market rather than a tax: your own room is a problem, everybody else's is an
+   opportunity. */
+function unhappyMarket(G) {
+  if (!depthOn(G, "demands")) return [];
+  return playersOf(G)
+    .filter((p) => p.teamId != null && p.teamId !== G.userTeam && !p.retired
+      && p.demand && p.demand.kind === "trade")
+    .sort((a, b) => b.ovr - a.ovr)
+    .slice(0, 12)
+    .map((p) => ({ p, team: p.teamId, holdout: !!p.holdout,
+      discount: Math.round((1 - (p.holdout ? 0.72 : 0.85)) * 100) }));
 }
 /* What a pick is worth in a trade.
  *
@@ -4359,12 +4540,17 @@ function pickLabel(G, pk, teamId) {
   const rd = pk.round === 1 ? "1st" : pk.round === 2 ? "2nd" : pk.round === 3 ? "3rd" : `${pk.round}th`;
   const from = pk.orig !== teamId && G.teams[pk.orig] ? ` (from ${G.teams[pk.orig].abbr})` : "";
   const slot = pickSlot(G, pk);
-  const exact = !!(G.draftOrder && G.draftOrder.length);
+  const exact = !!(G.draftYear === G.year && G.draftOrder && G.draftOrder.length);
+  /* The OVERALL number, not just the place in the round. "12th of the round" in
+     a second round is pick 44, and the number everybody actually quotes is 44 —
+     the draft board says it that way, so the trade screen should too. */
+  const overall = slot == null ? null : (pk.round - 1) * G.teams.length + slot;
   return {
     text: `${pk.year} ${rd}${from}`,
-    slot,
+    slot, overall,
     // A projection is a projection and is labelled as one.
-    note: slot == null ? null : `${exact ? "" : "proj. "}${ordinal(slot)} of the round`,
+    note: slot == null ? null
+      : `${exact ? "" : "proj. "}${overall} overall`,
     // Roughly how good the asset is, for colour: an early pick is a real prize.
     tone: slot == null ? "text-slate-500"
       : slot <= 5 ? "text-emerald-300" : slot <= 15 ? "text-sky-300" : "text-slate-400",
@@ -4813,7 +4999,11 @@ function enforceCap(G) {
       // rewriting a signed contract to paper over it would be worse.
       if (!cand) break;
       const name = fullName(cand);
-      releaseToPool(G, cand);
+      /* A real contract gets BOUGHT OUT rather than handed away for nothing —
+         the same tool the user has, and the reason an AI club's cap trouble
+         now leaves dead money behind it the way yours does. */
+      if (canBuyOut(G, cand)) { buyOut(G, cand.id); }
+      else releaseToPool(G, cand);
       if (t.id === G.userTeam) {
         news(G, `${name} was let go to get under the cap.`, "bad");
       }
@@ -5607,6 +5797,27 @@ function startNextSeason(G) {
   enforceCap(G);
   capFreeAgentPool(G);
   // Reset the league.
+  /* Settle the books before the season is wiped. Last year's gate becomes this
+     year's budget — so a club that filled its building can afford people, and
+     one that didn't has to choose. The floor keeps a bad year from making the
+     staff market unusable for a decade. */
+  G.teams.forEach((t) => {
+    const earned = t.revenue || 0;
+    t.budget = round1(Math.max(6, earned * 0.42));
+    t.revenue = 0;
+    // Staff contracts run out, which is what keeps the market alive year to year.
+    if (t.staffHired) {
+      Object.keys(t.staffHired).forEach((k) => {
+        const s = t.staffHired[k];
+        if (s.until && s.until <= G.year) {
+          delete t.staffHired[k];
+          if (t.id === G.userTeam) news(G, `${s.name}'s contract is up — he has left.`, "info");
+        }
+      });
+    }
+    // A hard call fades if you stop making them.
+    if (t.roomHit) t.roomHit = t.roomHit * 0.5;
+  });
   G.teams.forEach((t) => {
     t.w = 0; t.l = 0; t.otl = 0; t.pts = 0; t.gf = 0; t.ga = 0; t.gp = 0; t.streak = 0; t.l10 = [];
     t.farmRec = blankFarmRec();
@@ -7770,6 +7981,26 @@ function RosterTab({ G, setG, openPlayer, notify }) {
           </button>
         ) : null}
         {p.stint ? <span className="text-xs text-amber-300" title="on a conditioning stint">{p.stint}g</span> : null}
+        {/* Long-term reserve: his hit comes off the books until you need him
+            back, and then you have to find the room again. */}
+        {canLtir(G, p) ? (
+          <button className="text-xs text-sky-300 hover:underline"
+            title={`Out ${p.inj} games — put him on long-term reserve and his $${effectiveCap(G, p)}M comes off the cap`}
+            onClick={(e) => { e.stopPropagation();
+              const r = upd((g) => placeLtir(g, p.id));
+              notify(r.ok ? `${fullName(p)} placed on long-term reserve — $${r.relief}M freed.` : r.why); }}>
+            LTIR
+          </button>
+        ) : null}
+        {p.ltir ? (
+          <button className="text-xs text-emerald-300 hover:underline"
+            title="Bring him back — you need the cap room for his hit again"
+            onClick={(e) => { e.stopPropagation();
+              const r = upd((g) => activateLtir(g, p.id));
+              notify(r.ok ? `${fullName(p)} activated.` : r.why); }}>
+            Activate
+          </button>
+        ) : null}
         <button className="text-xs text-sky-400 hover:underline"
           onClick={(e) => { e.stopPropagation(); move(p); }}>
           {p.farm ? "Recall" : "Send down"}
@@ -9134,15 +9365,22 @@ function AllStarTab({ G, openPlayer }) {
 function StaffMarket({ G, setG, notify }) {
   const [role, setRole] = useState(null);
   const t = G.teams[G.userTeam];
-  const jobs = (depthOn(G, "coachStaff") ? STAFF_ROLES.map((r) => ({ k: r.k, label: r.label })) : [])
+  /* The head coach is always here. He predates the staff rule, and he is the
+     one who sets the system — the club's whole identity — so being unable to
+     replace him was the most conspicuous gap the staff market left. */
+  const jobs = [{ k: "head", label: "Head coach" }]
+    .concat(depthOn(G, "coachStaff") ? STAFF_ROLES.map((r) => ({ k: r.k, label: r.label })) : [])
     .concat(depthOn(G, "areaScouting") ? [{ k: "scout", label: "Head scout" }] : []);
-  if (!jobs.length) return null;
   const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); const r = fn(g2); setG(g2); return r; };
-  const current = (k) => (k === "scout" ? scoutOf(G, t) : (staffOf(G, t).people || {})[k]) || {};
+  const current = (k) => (k === "head" ? { name: coachOf(t).name, rating: coachOf(t).dev }
+    : k === "scout" ? scoutOf(G, t) : (staffOf(G, t).people || {})[k]) || {};
   return (
     <div className="border-t border-[#1e2b45] pt-2 mt-1">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-slate-400">Hire</span>
+        <span className="text-[11px] text-slate-500">
+          ${budgetLeft(G, G.userTeam)}M of ${t.budget || 0}M left
+        </span>
         {jobs.map((j) => (
           <button key={j.k} onClick={() => setRole(role === j.k ? null : j.k)}
             className={`text-xs px-2 py-1 rounded ${role === j.k
@@ -10049,7 +10287,19 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
                     ) : <span className="text-[11px] text-slate-600">yours</span>}
                   </>
                 ) : isNow ? (
-                  <span className="flex-1 text-sky-300 text-xs">on the clock</span>
+                  <>
+                    <span className="flex-1 text-sky-300 text-xs">on the clock</span>
+                    {/* The club on the clock is the one you most want to deal
+                        with — jumping in front of the room is the whole reason
+                        to trade up, and it was the one pick you couldn't buy. */}
+                    {r.owner !== G.userTeam && r.round <= PICK_ROUNDS ? (
+                      <button className="text-[11px] text-sky-400 hover:underline"
+                        onClick={() => setDeal({ kind: "pick", owner: r.owner, pick: r.pick, orig: r.orig,
+                          pk: { year: G.year, round: r.round, orig: r.orig, owner: r.owner } })}>
+                        trade for
+                      </button>
+                    ) : null}
+                  </>
                 ) : (
                   <>
                     <span className="flex-1 text-slate-600 text-xs">upcoming</span>
@@ -10510,6 +10760,41 @@ function DeadlineTab({ G, go, openPlayer, openTeam }) {
           ? "You're in the race. A rental costs a pick and walks in July — you're buying months, not years."
           : "You're out of it. The men below are worth more to a contender in March than they are to you in October."}
       </div>
+
+      {/* Other clubs' rooms. Your own unhappiness is a problem; everybody
+          else's is an opportunity, and a club holding a man who has asked out
+          is negotiating from a worse position than one that isn't. */}
+      {(() => {
+        const un = unhappyMarket(G);
+        if (!un.length) return null;
+        return (
+          <Section title={`Unhappy elsewhere (${un.length})`}
+            right={<span className="text-xs text-slate-500">they're negotiating from behind</span>}>
+            <div>
+              {un.map(({ p, team, holdout, discount }) => (
+                <div key={p.id} className="flex flex-wrap items-center gap-2 px-3 py-1.5 border-b border-[#16223a] last:border-0 text-sm">
+                  <PosBadge pos={p.pos} />
+                  <button className="font-medium hover:text-sky-300" onClick={() => openPlayer(p.id)}>
+                    {fullName(p)}
+                  </button>
+                  <span className="text-slate-400 tnum text-xs">{p.ovr}</span>
+                  <button className="text-slate-500 text-xs hover:text-sky-300" onClick={() => openTeam(team)}>
+                    {G.teams[team].abbr}
+                  </button>
+                  <span className={`text-xs ${holdout ? "text-rose-300" : "text-amber-300"}`}>
+                    {holdout ? "holding out" : "asked out"}
+                  </span>
+                  <span className="flex-1" />
+                  <span className="text-emerald-300 text-xs tnum" title="what his club's position is worth to you">
+                    −{discount}%
+                  </span>
+                  <span className="text-slate-500 tnum text-xs">${effectiveCap(G, p)}M</span>
+                </div>
+              ))}
+            </div>
+          </Section>
+        );
+      })()}
 
       <Section title={b.youBuy ? "Available — what a contender pays" : "Available around the league"}
         right={<span className="text-xs text-slate-400">asking price is the pick the AI actually pays</span>}>

@@ -145,6 +145,36 @@ which is what makes line construction and last change matter.
   nobody is credited with** — the team's score goes up and no skater's total does, exactly as in
   real bookkeeping. The harness accounts for this; don't "fix" it by crediting a player.
 
+## The room, the money, and LTIR
+Four things were declared and never wired, three of them by me. They are joined up now.
+
+- **`t.roomHit` lives on the CLUB.** An earlier version put it on `G`, which quietly meant all
+  thirty-two clubs shared one conscience. Refusing a demand or breaking a promise raises it,
+  `roomMorale` subtracts it, and it decays weekly — so a hard call fades if you stop making them.
+  `roomMorale` also subtracts for each unhappy player, and both terms are zero unless the demands
+  rule is on.
+- **`t.revenue` had no source and `t.budget` was decoration.** A home date now takes a gate priced
+  off market size, points percentage and morale; at the rollover last year's gate becomes this
+  year's budget. **This is not a business simulation and must not become one** — it exists so the
+  people you employ cost something. The salary CAP is untouched by it: players are a separate
+  economy and mixing the two would rewrite every cap check.
+- **Staff salaries are charged.** The market showed a price and charged nothing, so there was one
+  correct answer — hire the best — and therefore no decision. `staffBill` must include the head
+  coach, who lives on `t.coach` rather than in `t.staffHired`; leaving him out let you hire a man
+  you couldn't pay.
+- **The head coach is hireable**, always, with no rule gating him: he predates the staff system and
+  he sets the SYSTEM, which is the club's identity. He brings his system with him.
+- **`p.oneWay` is now set** when a contract above `TERMINATE_MAX_CAP` is signed — `isTwoWay` has
+  checked it since it was written and nothing ever wrote it.
+- **LTIR** — `rollInjuries` always produced long absences and nothing did anything with them, so a
+  club losing a star for half a season carried his full hit while icing a man short. The relief
+  **vanishes on activation**, which is the whole mechanism: spend it and you have to clear the
+  space again to get him back.
+- **Demands and holdouts are LEAGUE-WIDE.** They began as something that happened to you, which
+  made them a tax rather than a system. `unhappyMarket` is the payoff — a club holding a man who
+  has asked out negotiates from behind (`tradeValue` discounts him, more so if he is holding out),
+  so other clubs' rooms become something to watch.
+
 ## Depth rules
 `DEPTH_RULES` is a list of optional systems, each **defaulting to the behaviour the game already
 had**. That default is not politeness — `false` means an existing save loads into the league it was
