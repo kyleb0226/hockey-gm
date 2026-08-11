@@ -69,6 +69,9 @@ const EXPORTS = [
   "farmCoachOf", "devCoachRating", "staffOf", "STAFF_ROLES", "hashUnit",
   "homeEdge", "HOME_EDGE", "rivalryHeat", "grudgeBetween", "addGrudge",
   "volatilityOf", "scoutArea", "AREA_SCOUT_COST", "UNDRAFTED_KEEP", "DEV_FOCUS_SHARE",
+  "draftUpOffers", "acceptDraftUp", "TRADE_UP_HORIZON",
+  "rollDemands", "demandCase", "demandDrag", "expectedMinutes", "DEMAND_EVERY", "DEMAND_PATIENCE",
+  "stockAffiliates", "FARM_DEPTH_EACH", "callUpCost", "draftClassReport", "rookieGames",
   "canTerminate", "terminateContract", "releaseToPool", "enforceRosterLimits", "enforceCap",
   "capFreeAgentPool", "TERMINATE_MAX_CAP", "DRESS_MIN", "FA_POOL_MAX",
   "playoffBerths", "clinchState", "shadowTable", "inFieldOf", "CLINCH_LABEL",
@@ -2906,6 +2909,118 @@ const CHECKS = {
       `the best of the undrafted reach the market (${fresh.length})`);
     ok(U.freeAgents.length > poolBefore, "which is a bigger pool than before");
     ok(fresh.every((id) => U.players[id].teamId == null), "and none of them belongs to anybody");
+  },
+
+  /* The last three systems, and the four views that need no switch. */
+  depthExtras(A) {
+    section("Trade-up offers");
+    const G = A.newGame(0, { seed: 4141, rules: { seasonLen: 41, draftTradeUp: true } });
+    simSeason(A, G); simPlayoffs(A, G);
+    ok(!A.draftUpOffers(A.newGame(0, { seed: 4141, rules: { seasonLen: 41 } })).length,
+      "with the rule off nobody rings");
+    // Sim to the user's pick so there is something to be offered.
+    A.autoDraft(G, true);
+    const offers = A.draftUpOffers(G);
+    ok(offers.length > 0, `clubs call to move up (${offers.length})`);
+    ok(offers.length <= 4, "and not so many that it's noise");
+    ok(offers.every((o) => o.from !== G.userTeam), "none of them is you");
+    ok(offers.every((o) => o.theirAt > o.at), "every one of them picks later than you do");
+    ok(offers.every((o) => o.myPick.owner === G.userTeam), "and wants the pick you actually hold");
+    /* They have to be OFFERING more than they get, or it isn't a trade up. */
+    ok(offers.every((o) => {
+      const give = A.pickValue(G, o.theirPick) + o.extras.reduce((s, pk) => s + A.pickValue(G, pk), 0);
+      return give >= A.pickValue(G, o.myPick);
+    }), "each pays a premium over the raw value of the slot");
+    ok(offers.every((o) => G.players[o.want] && G.draftClass.includes(o.want)),
+      "and is after somebody still on the board");
+    // Computed, not stored: the same board gives the same offers.
+    ok(JSON.stringify(A.draftUpOffers(G).map((o) => o.from))
+       === JSON.stringify(offers.map((o) => o.from)), "the offers are stable across reads");
+
+    const o0 = offers[0];
+    const myPicksBefore = A.tradablePicks(G, G.userTeam).length;
+    const r = A.acceptDraftUp(G, o0);
+    ok(r.ok, "an offer can be accepted");
+    ok(A.tradablePicks(G, G.userTeam).length === myPicksBefore + o0.extras.length,
+      "and you come out of it with more picks than you went in with");
+    ok(A.pickOwner(G, o0.at - 1) === o0.from, "the club that moved up now holds the slot");
+
+    section("Player demands");
+    const D = A.newGame(0, { seed: 5252, rules: { seasonLen: 82, demands: true } });
+    A.simDays(D, 120);
+    const asked = A.rosterOf(D, D.userTeam, true).filter((p) => p.demand);
+    ok(asked.length > 0, `somebody spoke up (${asked.length})`);
+    ok(asked.length < 12, "but not the whole room");
+    ok(asked.every((p) => p.demand.kind === "minutes" || p.demand.kind === "trade"),
+      "each asking for one of two things");
+    /* A demand has to be EARNED — every one of them must be playing less than a
+       player of his standard expects, or it's just noise. */
+    ok(asked.every((p) => p.season.toi / p.season.gp < A.expectedMinutes(p)),
+      "and every one of them is genuinely under-used");
+    ok(asked.every((p) => p.pos !== "G"), "goalies don't count minutes this way");
+    // Unhappiness costs something on the ice, which is what makes it matter.
+    const unhappy = asked[0];
+    ok(A.demandDrag(D, unhappy) < 1, "an unhappy player is worth less than a happy one");
+    ok(A.demandDrag(D, A.rosterOf(D, D.userTeam).find((p) => !p.demand)) === 1, "and a content one is not penalised");
+    const off = A.newGame(0, { seed: 5252, rules: { seasonLen: 82 } });
+    A.simDays(off, 120);
+    ok(!A.rosterOf(off, off.userTeam, true).some((p) => p.demand), "with the rule off nobody asks for anything");
+    ok(A.demandDrag(off, unhappy) === 1, "and nobody is dragged down by it");
+
+    section("Named affiliate depth");
+    const F = A.newGame(0, { seed: 6363, rules: { seasonLen: 41, farmDepth: true } });
+    simSeason(A, F); simPlayoffs(A, F); A.autoDraft(F, false); A.startNextSeason(F);
+    const stocked = F.teams.map((t) => A.rosterOf(F, t.id, true).filter((p) => p.affiliate).length);
+    ok(Math.max(...stocked) > 0, `affiliates carry real players (${Math.max(...stocked)} at most)`);
+    ok(stocked.every((n) => n <= A.FARM_DEPTH_EACH), "and never more than the rule allows");
+    ok(F.teams.every((t) => A.rosterOf(F, t.id, true).length <= A.ROSTER_MAX + A.FARM_MAX),
+      "without pushing an organisation past its limit");
+    ok(F.teams.every((t) => A.capHit(F, t.id) <= A.rules(F).capAmount), "or over the cap");
+    const plain = A.newGame(0, { seed: 6363, rules: { seasonLen: 41 } });
+    simSeason(A, plain); simPlayoffs(A, plain); A.autoDraft(plain, false); A.startNextSeason(plain);
+    ok(!A.playersOf(plain).some((p) => p.affiliate), "with the rule off the farm stays phantom");
+
+    section("The views");
+    // The lottery is recorded rather than resolved and thrown away.
+    ok(G.lottery && G.lottery.year === G.year, "the lottery draw is kept");
+    ok(G.lottery.winner === G.draftOrder[0], "the winner picks first");
+    ok(G.lottery.from >= 1 && G.lottery.from <= 10, `from somewhere in the bottom ten (${G.lottery.from})`);
+    ok(G.lottery.odds > 0 && G.lottery.odds < 1, "with the odds he beat");
+    ok(G.lottery.passed.length === G.lottery.from - 1, "and everyone he jumped");
+
+    // Farm awards.
+    ok(F.farmAwards === null || F.farmAwards, "farm awards exist as a concept");
+    const FA = A.newGame(0, { seed: 6363, rules: { seasonLen: 41 } });
+    simSeason(A, FA); simPlayoffs(A, FA);
+    ok(FA.farmAwards && FA.farmAwards.year === FA.year, "a farm season produces awards");
+    ok(FA.farmAwards.scoring && FA.farmAwards.scoring.name, "with a named leading scorer");
+    ok(FA.farmAwards.scoring.v > 0, "who actually scored");
+    ok(!FA.farmAwards.goalie || FA.farmAwards.goalie.v > 80, "and a goaltender with a real save percentage");
+
+    // Call-up cost.
+    const prospect = A.playersOf(FA).find((p) => p.farm && p.teamId != null && p.pos !== "G");
+    const cost = A.callUpCost(FA, prospect);
+    ok(cost && cost.rank >= 1 && cost.rank <= FA.teams.length, "a call-up says where the affiliate sits");
+    ok(cost.now > 0 && cost.after > 0, "and what it is worth with and without him");
+    ok(A.callUpCost(FA, A.rosterOf(FA, 0)[0]) === null, "an NHL player has no call-up cost");
+
+    // Draft class report. The class has to have been TAKEN first — a season
+    // and a postseason leave `p.draft` unstamped on everybody.
+    A.autoDraft(FA, false);
+    const rep = A.draftClassReport(FA, FA.year);
+    ok(rep && rep.rows.length > 100, `a class can be graded (${rep ? rep.rows.length : 0})`);
+    ok(rep.rows.every((r) => r.p.draft.year === FA.year), "with only that year's picks");
+    ok(rep.rows.every((r, i) => i === 0 || r.p.draft.pick >= rep.rows[i - 1].p.draft.pick),
+      "in the order they were taken");
+    /* Grading is against the SLOT, so a first overall is held to a far higher
+       standard than a seventh-rounder — otherwise the table just re-sorts the
+       league by ability and says nothing about the draft. */
+    const early = rep.rows.filter((r) => r.p.draft.pick <= 10);
+    const late = rep.rows.filter((r) => r.p.draft.pick > 150);
+    ok(early.length && late.length && early[0].par > late[0].par,
+      `an early pick is expected to be better (${early[0].par} vs ${late[0].par})`);
+    ok(rep.rows.every((r) => r.gp >= 0 && r.pts >= 0), "and every row has real career numbers");
+    ok(A.draftClassReport(FA, FA.year - 40) === null, "a year nobody was drafted in has no report");
   },
 
   /* Who led each category, year by year. The book kept only the best ever, so a

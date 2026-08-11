@@ -315,6 +315,83 @@ const PERSONALITIES = [
 ];
 const personalityOf = (p) => PERSONALITIES[(p.id * 2749) % PERSONALITIES.length];
 
+/* ------------------------------ player demands ----------------------------
+ * `personalityOf` and `roomMorale` have existed since the room was built and
+ * nothing has ever come of them — a moody winger buried on the fourth line was
+ * exactly as content as a quiet pro playing twenty minutes. A demand is what
+ * turns character into something you have to manage.
+ *
+ * Two of them, and both are earned rather than random: a player good enough to
+ * be playing more asks for minutes, and a player who has been ignored long
+ * enough — or is rotting on a club going nowhere — asks out. `steady` is what
+ * decides how long he'll wear it, which is what that rating was always for.
+ *
+ * `p.demand` holds one at a time, with the day it was made, so the UI can say
+ * how long you have been ignoring him.
+ * ------------------------------------------------------------------------- */
+const DEMAND_EVERY = 21;        // days between a club's players speaking up
+const DEMAND_MIN_GP = 12;       // before this nobody has a case
+const DEMAND_PATIENCE = 40;     // days a demand stands before it curdles
+
+/* What a player of his quality expects to be playing, in minutes. Measured off
+   the engine's own deployment rather than invented: a top-six forward runs
+   ~17, a depth man ~11, and a defenceman more of both. */
+function expectedMinutes(p) {
+  const base = p.pos === "D" ? 15.5 : 12.5;
+  return base + Math.max(0, p.ovr - 55) * 0.28;
+}
+function demandCase(G, p) {
+  if (p.pos === "G" || !p.season || p.season.gp < DEMAND_MIN_GP) return null;
+  const mins = p.season.toi / Math.max(1, p.season.gp);
+  const want = expectedMinutes(p);
+  const short = want - mins;
+  const per = personalityOf(p);
+  // A steady character puts up with more before he says anything.
+  const bar = 1.6 * per.steady;
+  if (short < bar) return null;
+  const t = G.teams[p.teamId];
+  const pos = t ? standings(G).findIndex((x) => x.id === p.teamId) : 0;
+  /* Asking OUT is the bigger step: he has to be badly under-used AND either
+     senior enough to have run out of patience or stuck on a club going
+     nowhere. Anything less is a conversation about ice time. */
+  const hopeless = pos >= 24 && p.age >= 28;
+  const buried = short >= bar * 2;
+  return { kind: buried && (hopeless || p.age >= 30) ? "trade" : "minutes",
+    short: round1(short), want: round1(want), got: round1(mins) };
+}
+
+function rollDemands(G) {
+  if (!depthOn(G, "demands")) return G;
+  if (G.phase !== "regular" || G.day % DEMAND_EVERY !== 0 || G.day === 0) return G;
+  rosterOf(G, G.userTeam).forEach((p) => {
+    if (p.demand) return;                     // he's already said his piece
+    const c = demandCase(G, p);
+    if (!c) return;
+    p.demand = { kind: c.kind, day: G.day, year: G.year, want: c.want, got: c.got };
+    news(G, c.kind === "trade"
+      ? `${fullName(p)} has asked to be traded — ${c.got} minutes a night and he wants out.`
+      : `${fullName(p)} wants more ice time — ${c.got} a night when he expects ${c.want}.`,
+      c.kind === "trade" ? "bad" : "info");
+  });
+  /* A demand you meet goes away on its own; one you ignore long enough stops
+     being a request. This is the only thing that reads `p.demand` back. */
+  rosterOf(G, G.userTeam, true).forEach((p) => {
+    if (!p.demand || p.demand.year !== G.year) return;
+    if (!demandCase(G, p)) { p.demand = null; return; }      // you fixed it
+    if (p.demand.kind === "minutes" && G.day - p.demand.day > DEMAND_PATIENCE) {
+      p.demand = { ...p.demand, kind: "trade", day: G.day };
+      news(G, `${fullName(p)} has stopped asking for minutes and asked to be traded.`, "bad");
+    }
+  });
+  return G;
+}
+/* Unhappiness is a real cost, not a news item. A man who has asked out is not
+   giving you his best, which is what makes meeting the demand worth something. */
+function demandDrag(G, p) {
+  if (!depthOn(G, "demands") || !p.demand) return 1;
+  return p.demand.kind === "trade" ? 0.965 : 0.985;
+}
+
 /* ------------------------------- player roles -----------------------------
  * What a skater is FOR. Every rate stat used to come from a narrow curve around
  * one rating, which meant nobody specialised: the league's hits leader finished
@@ -1039,8 +1116,10 @@ function pairChemistry(t, lines) {
 function lineOff(G, ids) {
   const ps = ids.map((id) => G.players[id]).filter(Boolean);
   if (!ps.length) return 1;
-  const v = ps.reduce((s, p) => s + 0.44 * ratingNow(p, "sht") + 0.32 * ratingNow(p, "pss")
-    + 0.24 * ratingNow(p, "hnd"), 0) / ps.length;
+  /* An unhappy man is not giving you his best. `demandDrag` is 1 for everybody
+     when the rule is off, so this is the same average it always was. */
+  const v = ps.reduce((s, p) => s + demandDrag(G, p) * (0.44 * ratingNow(p, "sht")
+    + 0.32 * ratingNow(p, "pss") + 0.24 * ratingNow(p, "hnd")), 0) / ps.length;
   return 0.55 + v / 110;
 }
 function unitDef(G, fIds, dIds) {
@@ -2244,6 +2323,7 @@ function simDay(G) {
   simFarmDay(G, G.day);
   // A stint is served in games, so it only ticks for clubs that actually played.
   tickStints(G, playedToday);
+  rollDemands(G);
   checkMilestones(G);
   // Clubs ring about listed players every few days rather than instantly.
   if ((G.block || []).length && G.day % 5 === 0) generateOffers(G);
@@ -3315,6 +3395,94 @@ function riskLabel(v) {
 // What a club thinks he's worth: potential first, but only what it can see.
 const draftValue = (p) => scoutedPot(p) * 0.68 + scoutedOvr(p) * 0.32;
 
+/* --------------------------- clubs ringing you up -------------------------
+ * Draft trading was entirely user-initiated: you could call anybody, and nobody
+ * ever called you. That removes the best moment the draft has — a club that has
+ * fallen for somebody offering you the earth to jump in front of the room and
+ * take him.
+ *
+ * COMPUTED ON DEMAND, not stored and not random. Every input is already on the
+ * board, and a stored offer would go stale the instant a pick was made; the
+ * per-club preference that makes thirty-two clubs disagree comes from
+ * `hashUnit` on the club id, so the same board always produces the same offers
+ * and a render can't shuffle them.
+ * ------------------------------------------------------------------------- */
+const TRADE_UP_HORIZON = 24;   // slots ahead a club will look
+const TRADE_UP_PREMIUM = 1.18; // what moving up costs over the raw pick value
+
+function draftUpOffers(G) {
+  if (!depthOn(G, "draftTradeUp")) return [];
+  if (!G.draftClass || !G.draftClass.length || G.draftYear !== G.year) return [];
+  const total = draftPicksTotal(G);
+  // The next pick that is actually yours.
+  let mine = -1;
+  for (let i = G.draftPick; i < total; i++) if (pickOwner(G, i) === G.userTeam) { mine = i; break; }
+  if (mine < 0) return [];
+  const myPk = (G.picks || []).find((pk) => pk.year === G.year
+    && pk.round === Math.floor(mine / G.teams.length) + 1
+    && pk.orig === G.draftOrder[mine % G.teams.length]);
+  if (!myPk) return [];
+
+  // The board as each club reads it — same values, a different eye.
+  const board = G.draftClass.map((id) => G.players[id]).filter(Boolean)
+    .sort((a, b) => draftValue(b) - draftValue(a));
+  if (!board.length) return [];
+
+  const offers = [];
+  for (let i = mine + 1; i < Math.min(total, mine + TRADE_UP_HORIZON); i++) {
+    const club = pickOwner(G, i);
+    if (club === G.userTeam) continue;
+    /* Their man: near the top of the board, nudged by a taste of their own so
+       thirty-two clubs don't all covet the same player. */
+    const lean = Math.floor(hashUnit(club * 7919 + G.draftPick) * 3);
+    const want = board[Math.min(lean, board.length - 1)];
+    if (!want) continue;
+    // He has to be somebody they will genuinely miss — expected gone well
+    // before their own turn, or there is nothing to trade up for.
+    const expectedAt = G.draftPick + board.indexOf(want);
+    if (expectedAt >= i - 2) continue;
+
+    const theirPk = (G.picks || []).find((pk) => pk.year === G.year
+      && pk.round === Math.floor(i / G.teams.length) + 1
+      && pk.orig === G.draftOrder[i % G.teams.length] && pk.owner === club);
+    if (!theirPk) continue;
+
+    // What they have to make up, and what they can add to make it up with.
+    const gap = pickValue(G, myPk) * TRADE_UP_PREMIUM - pickValue(G, theirPk);
+    const extras = [];
+    let made = 0;
+    tradablePicks(G, club)
+      .filter((pk) => !(pk.year === theirPk.year && pk.round === theirPk.round && pk.orig === theirPk.orig))
+      .sort((a, b) => pickValue(G, a) - pickValue(G, b))
+      .forEach((pk) => {
+        if (made >= gap) return;
+        extras.push(pk); made += pickValue(G, pk);
+      });
+    if (made < gap) continue;   // they can't reach it, so they don't call
+    offers.push({ from: club, want: want.id, myPick: myPk, at: mine + 1,
+      theirPick: theirPk, theirAt: i + 1, extras });
+  }
+  // Best offer first — the one that gives up the most to get up.
+  return offers.sort((a, b) =>
+    (pickValue(G, b.theirPick) + b.extras.reduce((s, p) => s + pickValue(G, p), 0))
+    - (pickValue(G, a.theirPick) + a.extras.reduce((s, p) => s + pickValue(G, p), 0))).slice(0, 4);
+}
+
+/* Taking one. It routes through `doTrade` like any other deal, so the cap, the
+ * roster limits and the pick records all behave exactly as they do elsewhere.
+ *
+ * THE OFFERING CLUB IS SIDE A. `evalTrade` asks whether side A has given side B
+ * enough, and applies the AI's asking-price margin when side A is the user —
+ * which is right for a deal you propose and exactly wrong for one proposed to
+ * you. Passing the user as side A had the engine rejecting offers for being too
+ * generous to him: a pick worth 9 for a package worth 12.8, refused on the
+ * grounds that they wanted more back. */
+function acceptDraftUp(G, offer) {
+  if (!offer) return { ok: false, why: "no offer" };
+  return doTrade(G, offer.from, [], [offer.theirPick].concat(offer.extras || []),
+    G.userTeam, [], [offer.myPick]);
+}
+
 /* Eligible players BEYOND the number of picks. The class has always been
    exactly as big as the draft is long, which means every prospect is taken and
    "undrafted" can't happen — a real draft has far more eligible players than
@@ -3360,6 +3528,11 @@ function buildDraftClass(G) {
   const order = nonPlayoff.map((t) => t.id);
   // Weighted lottery for the top pick among the bottom ten.
   const pool = order.slice(0, 10);
+  /* The draw was resolved in here and thrown away, so the one genuinely
+     dramatic moment of the offseason — a club jumping the queue for the first
+     pick — happened invisibly. `G.lottery` records what the order would have
+     been and what it became, which is all the reveal needs. */
+  const preOrder = order.slice();
   if (pool.length) {
     const wts = pool.map((_, i) => Math.pow(pool.length - i, 1.6));
     const tot = wts.reduce((a, b) => a + b, 0);
@@ -3367,7 +3540,17 @@ function buildDraftClass(G) {
     for (let i = 0; i < pool.length; i++) { x -= wts[i]; if (x <= 0) { winner = pool[i]; break; } }
     order.splice(order.indexOf(winner), 1);
     order.unshift(winner);
-  }
+    G.lottery = {
+      year: G.year, winner,
+      // Where he would have picked without it, and how far he climbed.
+      from: preOrder.indexOf(winner) + 1,
+      odds: wts[preOrder.indexOf(winner)] / tot,
+      // Everyone the winner jumped, in the order they were pushed back.
+      passed: preOrder.slice(0, preOrder.indexOf(winner)),
+    };
+    if (winner === G.userTeam) news(G, `You won the draft lottery — first overall.`, "good");
+    else if (G.lottery.from > 3) news(G, `${G.teams[winner].name} jumped from ${ordinal(G.lottery.from)} to first in the lottery.`, "info");
+  } else G.lottery = null;
   G.draftOrder = order.concat(playoffTeams.map((t) => t.id));
   G.draftPick = 0;
   // Which year this order belongs to. Without it last June's order looks like
@@ -3420,6 +3603,23 @@ function draftPlayer(G, pid) {
  * left. Which is the point. A draft you sim through is otherwise a draft
  * somebody else's ranking made for you.
  * ------------------------------------------------------------------------- */
+/* What calling him up costs the club he leaves. `farmStrength` has always
+   dropped when a prospect is recalled — the affiliate genuinely gets worse —
+   but it happened silently, so a call-up looked free. This is the half of the
+   decision nobody could see. */
+function callUpCost(G, p) {
+  if (!p || !p.farm || p.teamId == null) return null;
+  const rank = farmStandings(G).findIndex((t) => t.id === p.teamId) + 1;
+  const now = farmStrength(G, p.teamId);
+  const others = farmRoster(G, p.teamId)
+    .filter((x) => x.id !== p.id && x.pos !== "G")
+    .sort((a, b) => b.ovr - a.ovr).slice(0, 12);
+  const after = others.length
+    ? others.reduce((s, x) => s + x.ovr, 0) / Math.max(FARM_ROSTER_FLOOR, others.length) : 38;
+  return { rank, of: G.teams.length, now: round1(now), after: round1(after),
+    drop: round1(now - after), thin: farmRoster(G, p.teamId).length <= FARM_ROSTER_FLOOR + 1 };
+}
+
 function starList(G) {
   return (G.draftStars || []).filter((id) => G.players[id] && G.draftClass.includes(id));
 }
@@ -4262,6 +4462,36 @@ function capFreeAgentPool(G) {
  * It runs LAST, after the market, the top-ups and the body count, because every
  * one of those can add salary.
  * ------------------------------------------------------------------------- */
+/* --------------------------- a face on the farm ---------------------------
+ * An affiliate ices `FARM_DRESSED` skaters and only the parent club's prospects
+ * are real; the rest is phantom weight in the scoring draw. That is the right
+ * trade by default — thirty-two clubs' worth of full farm rosters would put
+ * hundreds of dead rows back in the save for players nobody opens.
+ *
+ * With the rule on, each club gets a HANDFUL of real ones: enough that the farm
+ * has faces and a scoring race with names in it, few enough that the cost is a
+ * tenth of a full roster. They are ordinary players on minimum deals, so
+ * everything downstream — the cap, the trim, the scoring draw — treats them
+ * exactly like anyone else.
+ * ------------------------------------------------------------------------- */
+const FARM_DEPTH_EACH = 3;
+function stockAffiliates(G) {
+  if (!depthOn(G, "farmDepth")) return G;
+  G.teams.forEach((t) => {
+    const have = rosterOf(G, t.id, true).filter((p) => p.farm && p.affiliate && !p.retired).length;
+    const org = rosterOf(G, t.id, true).length;
+    for (let i = have; i < FARM_DEPTH_EACH; i++) {
+      // Never at the cost of a roster spot the club actually needs.
+      if (org + (i - have) >= ROSTER_MAX + FARM_MAX) break;
+      const p = genPlayer(G, pick(G, ["C", "LW", "RW", "D", "G"]), 41, ri(G, 20, 27));
+      p.teamId = t.id; p.farm = true; p.affiliate = true;
+      p.contract = { amt: MIN_SALARY, yrs: ri(G, 1, 2) };
+      G.players[p.id] = p;
+    }
+  });
+  return G;
+}
+
 function enforceCap(G) {
   if (!rules(G).hardCap) return G;
   const cap = rules(G).capAmount;
@@ -4764,6 +4994,23 @@ function runFarmPlayoffs(G) {
   }
   const champ = alive[0];
   G.farmCup = { year: G.year, champion: champ, rounds, field: field.map((t) => t.id) };
+  /* The affiliate league had a table, a playoff and a trophy and no individual
+     honours at all, so a prospect could lead it in scoring and nothing
+     anywhere would say so. Names are stored alongside ids for the same reason
+     the season leaders are: `pruneSave` forgets people. */
+  const farmers = playersOf(G).filter((p) => p.farm && p.farmSeason && p.farmSeason.gp > 0);
+  const top = (list, score) => {
+    const best = list.slice().sort((a, b) => score(b) - score(a))[0];
+    return best ? { pid: best.id, name: fullName(best), team: best.teamId, v: round1(score(best)) } : null;
+  };
+  const skaters = farmers.filter((p) => p.pos !== "G");
+  const keepers = farmers.filter((p) => p.pos === "G" && p.farmSeason.sa >= 200);
+  G.farmAwards = {
+    year: G.year,
+    scoring: top(skaters, (p) => (p.farmSeason.g || 0) + (p.farmSeason.a || 0)),
+    goals: top(skaters, (p) => p.farmSeason.g || 0),
+    goalie: top(keepers, (p) => (p.farmSeason.sv / Math.max(1, p.farmSeason.sa)) * 100),
+  };
   const t = G.teams[champ];
   t.farmCups = (t.farmCups || 0) + 1;
   // The players who won it get it on their record, the same as a Cup ring.
@@ -5017,6 +5264,9 @@ function startNextSeason(G) {
      gets filled in the same pass rather than leaving a club a body short. */
   enforceCap(G);
   fillRosters(G);
+  // Before the limits are enforced, so a stocked affiliate is trimmed like any
+  // other and can never push an organisation over its cap.
+  stockAffiliates(G);
   /* AFTER the market and the top-ups, because both add players — the draft has
      also just put seven more into every organisation. This is the point at
      which the roster about to play a season has to be a legal one. */
@@ -5033,6 +5283,7 @@ function startNextSeason(G) {
     t.lines = null;
   });
   G.farmCup = null;
+  G.farmAwards = null;
   G.farmDay = null;
   G.results = [];
   G.playoffs = null;
@@ -6011,6 +6262,17 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
               tone={p.inj > 0 ? "text-rose-400" : p.rust > 0 ? "text-amber-300" : ""} />
           </div>
           <DraftLine G={G} p={p} />
+          {/* A demand is the only thing in the game that makes character cost
+              something, so it belongs at the top of his page, not in the wire. */}
+          {depthOn(G, "demands") && p.demand && p.demand.year === G.year ? (
+            <div className={`${card} px-3 py-2 text-xs ${p.demand.kind === "trade" ? "text-rose-300" : "text-amber-300"}`}>
+              {p.demand.kind === "trade"
+                ? <>He has asked to be traded. <span className="text-slate-500">
+                    {p.demand.got} minutes a night when he expects {p.demand.want} — and he's stopped asking.</span></>
+                : <>He wants more ice time. <span className="text-slate-500">
+                    {p.demand.got} a night against the {p.demand.want} a player of his standard expects.</span></>}
+            </div>
+          ) : null}
           <DevFocusPicker G={G} setG={setG} p={p} />
           <Section title="Ratings"
             right={p.pos !== "G" ? <span className="text-xs text-sky-300">{roleOf(p).label}</span> : null}
@@ -6174,6 +6436,19 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
                 )}
                 {prospectReady(G, p) ? <span className="ml-2 text-emerald-400">ready for a call-up</span> : null}
               </div>
+              {/* What it costs the club he'd leave. */}
+              {(() => {
+                const c = callUpCost(G, p);
+                if (!c || c.drop <= 0) return null;
+                return (
+                  <div className="text-xs text-slate-500 mt-1">
+                    Calling him up takes the affiliate from {c.now} to {c.after}
+                    <span className="text-amber-300/80"> (−{c.drop})</span>
+                    {c.thin ? <span className="text-rose-300"> — and they're already down to bodies.</span>
+                      : <span> · {ordinal(c.rank)} of {c.of} as it stands.</span>}
+                  </div>
+                );
+              })()}
               {p.teamId != null ? (
                 <div className="text-xs text-slate-500 mt-1">
                   {G.teams[p.teamId].city} affiliate: {farmRec(G.teams[p.teamId]).w}-{farmRec(G.teams[p.teamId]).l}-{farmRec(G.teams[p.teamId]).otl}
@@ -6896,6 +7171,32 @@ function FarmLeaguePanel({ G, openPlayer }) {
                 {rd.map((s) => `${G.teams[s.winner].abbr} over ${G.teams[s.winner === s.hi ? s.lo : s.hi].abbr}`).join(" · ")}
               </div>
             ))}
+          </div>
+        </Section>
+      ) : null}
+
+      {/* The affiliate league had a table, a playoff and a trophy, and no
+          individual honours — a prospect could lead it in scoring and nothing
+          anywhere would say so. */}
+      {G.farmAwards && G.farmAwards.year === G.year ? (
+        <Section title={`${G.farmAwards.year} farm awards`} className="p-3">
+          <div className="grid sm:grid-cols-3 gap-x-4 gap-y-1 pt-1 text-sm">
+            {[["scoring", "Leading scorer", "pts"], ["goals", "Most goals", "g"], ["goalie", "Best goaltender", "SV%"]]
+              .map(([k, label, unit]) => {
+                const a = G.farmAwards[k];
+                return (
+                  <div key={k}>
+                    <div className="text-xs text-slate-500">{label}</div>
+                    {a ? (
+                      <div className={a.team === G.userTeam ? "text-sky-300" : ""}>
+                        <button className="hover:text-sky-300" onClick={() => openPlayer(a.pid)}>{a.name}</button>
+                        <span className="text-slate-500 text-xs tnum"> {a.v}{unit === "SV%" ? "" : ` ${unit}`}</span>
+                        {G.teams[a.team] ? <span className="text-slate-600 text-xs"> · {G.teams[a.team].abbr}</span> : null}
+                      </div>
+                    ) : <div className="text-slate-600">—</div>}
+                  </div>
+                );
+              })}
           </div>
         </Section>
       ) : null}
@@ -8706,6 +9007,96 @@ function ClubModal({ G, teamId, onClose, openPlayer }) {
   );
 }
 
+/* ------------------------- how a draft class turned out --------------------
+ * `p.draft` is stamped for life, so the answer to "was that a good draft?" has
+ * always been sitting in the save — it just had nowhere to be asked. Grading is
+ * against what the pick was WORTH, not against the league: a fourth-rounder who
+ * became an NHL regular is a triumph and a first-overall who did the same is
+ * not, and a table that ranked them together would say nothing.
+ * ------------------------------------------------------------------------- */
+function draftClassReport(G, year) {
+  const men = playersOf(G).filter((p) => p.draft && p.draft.year === year);
+  if (!men.length) return null;
+  const rows = men.map((p) => {
+    const gp = (p.career || []).reduce((s, c) => s + (c.gp || 0), 0) + ((p.season && p.season.gp) || 0);
+    const pts_ = (p.career || []).reduce((s, c) => s + (c.g || 0) + (c.a || 0), 0);
+    /* What a pick in that slot is expected to become, falling away steeply —
+       which is what makes a late-round hit worth more than an early-round one. */
+    const par = 78 - Math.min(70, Math.pow(p.draft.pick, 0.62) * 6.4);
+    return { p, gp, pts: pts_, par: Math.round(par), over: p.ovr - par,
+      // A player nobody has seen in the league yet is incomplete, not a bust.
+      settled: gp >= 60 || p.age >= 24 };
+  }).sort((a, b) => a.p.draft.pick - b.p.draft.pick);
+  const settled = rows.filter((r) => r.settled);
+  const mine = rows.filter((r) => r.p.draft.teamId === G.userTeam);
+  return {
+    year, rows, mine,
+    graded: settled.length,
+    hits: settled.filter((r) => r.over >= 6).length,
+    busts: settled.filter((r) => r.over <= -10).length,
+    nhl: rows.filter((r) => r.gp >= 60).length,
+  };
+}
+
+function DraftClassReport({ G, openPlayer }) {
+  const years = useMemo(() => {
+    const s = new Set();
+    playersOf(G).forEach((p) => { if (p.draft) s.add(p.draft.year); });
+    return Array.from(s).sort((a, b) => b - a);
+  }, [G]);
+  const [year, setYear] = useState(years[0]);
+  const rep = useMemo(() => draftClassReport(G, years.includes(year) ? year : years[0]), [G, year, years]);
+  if (!years.length) return null;
+  return (
+    <Section title="Draft classes"
+      right={
+        <div className="flex gap-1 flex-wrap justify-end">
+          {years.slice(0, 10).map((y) => (
+            <button key={y} onClick={() => setYear(y)}
+              className={`text-[11px] px-1.5 py-0.5 rounded ${(rep && rep.year) === y
+                ? "bg-sky-500/25 text-sky-200" : "text-slate-500 hover:text-slate-300"}`}>{y}</button>
+          ))}
+        </div>
+      }>
+      {!rep ? <div className="px-3 py-4 text-sm text-slate-500">Nothing drafted that year.</div> : (
+        <>
+          <div className="px-3 py-2 text-xs text-slate-400 border-b border-[#1e2b45] flex flex-wrap gap-x-4 gap-y-1">
+            <span>{rep.rows.length} picked</span>
+            <span className="text-emerald-300">{rep.hits} beat their slot</span>
+            <span className="text-rose-300">{rep.busts} missed it</span>
+            <span>{rep.nhl} became regulars</span>
+            <span className="text-slate-600">
+              {rep.graded < rep.rows.length ? `${rep.rows.length - rep.graded} too early to say` : "all settled"}
+            </span>
+            {rep.mine.length ? <span className="text-sky-300">you took {rep.mine.length}</span> : null}
+          </div>
+          <SortTable min={720} rows={rep.rows} initial="pick" rowKey={(r) => r.p.id}
+            onRow={(r) => openPlayer(r.p.id)}
+            rowCls={(r) => (r.p.draft.teamId === G.userTeam ? "bg-sky-950/30" : "")}
+            cols={[
+              { key: "pick", label: "#", get: (r) => -r.p.draft.pick, cell: (r) => r.p.draft.pick },
+              { key: "by", label: "By", get: (r) => (G.teams[r.p.draft.teamId] ? G.teams[r.p.draft.teamId].abbr : ""),
+                cls: "text-slate-400 text-xs" },
+              { key: "name", label: "Player", get: (r) => r.p.ln,
+                cell: (r) => <span className="whitespace-nowrap">{fullName(r.p)}</span> },
+              { key: "pos", label: "Pos", get: (r) => POS.indexOf(r.p.pos), cell: (r) => <PosBadge pos={r.p.pos} /> },
+              { key: "ovr", label: "Now", get: (r) => r.p.ovr, cls: "font-semibold" },
+              { key: "gp", label: "NHL GP", get: (r) => r.gp },
+              { key: "pts", label: "Pts", get: (r) => r.pts },
+              /* The verdict, against the slot rather than against the league. */
+              { key: "over", label: "vs slot", get: (r) => r.over, cell: (r) => {
+                if (!r.settled) return <span className="text-slate-600 text-xs">too early</span>;
+                const c = r.over >= 6 ? "text-emerald-300" : r.over <= -10 ? "text-rose-300" : "text-slate-400";
+                return <span className={`tnum ${c}`} title={`a pick at ${r.p.draft.pick} is expected around ${r.par}`}>
+                  {r.over > 0 ? "+" : ""}{r.over}</span>;
+              } },
+            ]} />
+        </>
+      )}
+    </Section>
+  );
+}
+
 function HistoryTab({ G, openPlayer, openTeam }) {
   return (
     <div className="space-y-3">
@@ -8725,6 +9116,7 @@ function HistoryTab({ G, openPlayer, openTeam }) {
                 : "—" },
           ]} empty="No completed seasons yet." />
       </Section>
+      <DraftClassReport G={G} openPlayer={openPlayer} />
       <Section title="Clubs">
         <SortTable min={560} rows={G.teams} initial="cupWins" rowKey={(t) => t.id}
           onRow={(t) => openTeam(t.id)}
@@ -8888,6 +9280,7 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
   const stars = starList(G);
   const [orderRound, setOrderRound] = useState(round);
   const orderRows = useMemo(() => draftOrderRows(G), [G]);
+  const upOffers = useMemo(() => draftUpOffers(G), [G]);
 
   // What the organisation is actually short of, so the board can flag it.
   const org = rosterOf(G, G.userTeam, true);
@@ -8969,6 +9362,56 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
           </div>
         ) : null}
       </div>
+
+      {/* The lottery, which used to resolve inside `buildDraftClass` and be
+          thrown away — the one dramatic moment of the offseason, invisible. */}
+      {G.lottery && G.lottery.year === G.year ? (
+        <div className={`${card} p-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm`}>
+          <span className="text-slate-400">Lottery</span>
+          <span className={G.lottery.winner === G.userTeam ? "text-emerald-300 font-medium" : "font-medium"}>
+            {G.teams[G.lottery.winner].city} {G.teams[G.lottery.winner].name}
+          </span>
+          <span className="text-slate-400">
+            {G.lottery.from === 1 ? "held on to first overall"
+              : `jumped from ${ordinal(G.lottery.from)} to first`}
+          </span>
+          <span className="text-slate-600 text-xs tnum">{(G.lottery.odds * 100).toFixed(1)}% chance</span>
+          {G.lottery.passed.length ? (
+            <span className="text-slate-500 text-xs">
+              past {G.lottery.passed.map((id) => G.teams[id].abbr).join(", ")}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Clubs ringing you to move up. Computed from the board, so an offer can
+          never be stale — it simply stops being listed. */}
+      {upOffers.length ? (
+        <Section title={`Offers to move up (${upOffers.length})`}
+          right={<span className="text-xs text-slate-500">for your pick at {upOffers[0].at}</span>}>
+          <div>
+            {upOffers.map((o, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[#16223a] last:border-0 text-sm">
+                <span className="font-medium">{G.teams[o.from].abbr}</span>
+                <span className="text-slate-500">want up to {o.at}, offering</span>
+                <span className="text-sky-300">
+                  {pickLabel(G, o.theirPick, o.from).text}
+                  {o.extras.map((pk) => ` + ${pickLabel(G, pk, o.from).text}`).join("")}
+                </span>
+                {G.players[o.want] ? (
+                  <span className="text-slate-600 text-xs">— they're after {shortName(G.players[o.want])}</span>
+                ) : null}
+                <span className="flex-1" />
+                <button className={`${btnPri} text-xs px-2 py-1`}
+                  onClick={() => { const r = upd((g) => acceptDraftUp(g, o));
+                    notify(r.ok ? `Traded down with ${G.teams[o.from].abbr}.` : (r.why || "they pulled out")); }}>
+                  Accept
+                </button>
+              </div>
+            ))}
+          </div>
+        </Section>
+      ) : null}
 
       {/* The order itself: who has picked, what they took, and who is coming. */}
       <Section title="Draft order"

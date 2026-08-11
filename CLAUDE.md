@@ -189,6 +189,23 @@ made "Deep" silently switch the home advantage off. The `depthRules` check pins 
 - **`rivalryGrowth`** — `t.grudges` counts playoff meetings and stacks heat on top of the built-in
   divisional pairing. With the rule off `rivalryHeat` returns the old 0-or-1 exactly.
 
+- **`draftTradeUp`** — clubs ring YOU to move up. `draftUpOffers` is **computed on demand, not
+  stored and not random**: every input is on the board, a stored offer would go stale the moment a
+  pick was made, and the per-club taste that stops thirty-two clubs coveting the same player comes
+  from `hashUnit`. **`acceptDraftUp` passes the OFFERING club as side A** — `evalTrade` asks
+  whether side A gave side B enough and applies the AI's asking-price margin when side A is the
+  user, which is right for a deal you propose and exactly wrong for one proposed to you. With the
+  user as side A the engine rejected offers for being too generous to him (a pick worth 9 for a
+  package worth 12.8, refused because "they want more back").
+- **`demands`** — `personalityOf` and `roomMorale` existed from the first build with nothing ever
+  coming of them. A demand is earned, never random: a player must be playing measurably less than
+  `expectedMinutes` for his standard, and `steady` decides how long he wears it. An ignored
+  ice-time demand curdles into a trade request after `DEMAND_PATIENCE` days, and `demandDrag`
+  makes unhappiness cost something in `lineOff` — which is what makes meeting it worth anything.
+- **`farmDepth`** — `FARM_DEPTH_EACH` real players per affiliate, stocked in `startNextSeason`
+  BEFORE `enforceRosterLimits` so they're trimmed like anyone else and can't push a club over its
+  cap. Deliberately a handful: full farm rosters would put hundreds of dead rows in the save.
+
 **Rookie eligibility is a first season IN THE LEAGUE.** `p.rookie` was cleared at every rollover,
 so a prospect who spent a year on the farm — which is most of them — reached the NHL already
 ineligible for the Calder. It now survives until he actually plays `rookieGames(G)` NHL games
@@ -196,6 +213,20 @@ ineligible for the Calder. It now survives until he actually plays `rookieGames(
 
 **Save export/import** (`exportSave` / `importSave`) is the only way to move a career between
 devices, since a save lives in one browser's localStorage. `migrate` runs on the way in.
+
+**Four views that need no switch.** `G.lottery` records the draw `buildDraftClass` used to resolve
+and throw away — the one dramatic moment of the offseason, previously invisible. `G.farmAwards`
+gives the affiliate league individual honours it never had. `callUpCost` says what recalling a
+prospect does to the club he leaves, which `farmStrength` has always modelled silently.
+`draftClassReport` grades a class **against the SLOT** (`par` falls away steeply with pick number)
+rather than against the league — otherwise the table just re-sorts everyone by ability and says
+nothing about the draft; a player with fewer than 60 NHL games and under 24 reads "too early"
+rather than "bust".
+
+**`index.html` has passed 500KB**, so Babel now logs a deoptimisation note on load. It is benign
+(transpiling still works and the result is cached in localStorage by source hash) but it is the
+first sign the single-file approach is straining — the IndexedDB caching item on the roadmap
+matters more now than it did.
 
 ## Rules, difficulty, money
 - **`G.rules` / `RULES_DEFAULT` / `rules(G)`** — always read through `rules(G)` so a save that
