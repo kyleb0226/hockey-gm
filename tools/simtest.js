@@ -62,7 +62,9 @@ const EXPORTS = [
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
   "lineChemistry", "LINE_CHEM_MAX_GAMES", "pairChemistry", "PAIR_CHEM_MAX_GAMES",
   "seasonBallots", "honoursOf", "HONOUR_MIN_GP",
-  "canTerminate", "terminateContract", "releaseToPool", "enforceRosterLimits",
+  "draftOrigin", "farmRoom", "farmRoomBonus", "DEV_WIN_SWING", "DEV_WIN_TITLE",
+  "seasonLeaders", "ROSTER_MIN",
+  "canTerminate", "terminateContract", "releaseToPool", "enforceRosterLimits", "enforceCap",
   "capFreeAgentPool", "TERMINATE_MAX_CAP", "DRESS_MIN", "FA_POOL_MAX",
   "playoffBerths", "clinchState", "shadowTable", "inFieldOf", "CLINCH_LABEL",
   "stampShares", "lineShares", "careerShares",
@@ -2744,6 +2746,201 @@ const CHECKS = {
     });
   },
 
+  /* Who led each category, year by year. The book kept only the best ever, so a
+     54-goal season left no trace anywhere once somebody beat it. */
+  seasonHistory(A) {
+    section("Leaders by year");
+    const G = A.newGame(0, { seed: 6161, rules: { seasonLen: 41 } });
+    for (let i = 0; i < 3; i++) {
+      simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+    }
+    const rows = G.history.filter((h) => h.leaders);
+    ok(rows.length === 3, `every completed season recorded its leaders (${rows.length}/3)`);
+    ok(rows.every((h) => A.RECORD_DEFS.every((d) => h.leaders[d.key])),
+      "in every category the book tracks");
+    ok(rows.every((h) => A.RECORD_DEFS.every((d) => {
+      const L = h.leaders[d.key];
+      return L.v > 0 && L.pid != null && typeof L.name === "string" && L.name.length;
+    })), "each with a real player, a name and a total");
+
+    /* The name is stored as well as the id, because `pruneSave` eventually
+       forgets the player — a history that goes blank isn't a history. */
+    const someone = rows[0].leaders.goals;
+    delete G.players[someone.pid];
+    ok(rows[0].leaders.goals.name === someone.name, "and the name survives the player being pruned");
+
+    // A leader has to be the best of that season, not of all time.
+    const y0 = G.history[0];
+    ok(y0.leaders.goals.v >= y0.leaders.points.v / 3, "the goal leader is plausible against the scoring leader");
+    ok(G.history.every((h) => h.leaders.wins.v <= A.ruleValue(G, "seasonLen")),
+      "no goalie won more games than were played");
+    ok(G.history.every((h) => h.leaders.shutouts.v <= h.leaders.wins.v + 5), "shutouts track wins");
+
+    /* The all-time record must be one of the yearly leaders — if the book says
+       61 goals, some season's leader scored 61. */
+    A.RECORD_DEFS.forEach((d) => {
+      const rec = G.records[d.key];
+      if (!rec) { ok(true, `${d.key} unset`); return; }
+      const best = Math.max(...G.history.map((h) => h.leaders[d.key].v));
+      ok(rec.v === best, `the ${d.key} record (${rec.v}) is the best season on file (${best})`);
+    });
+
+    // Leaders are captured before the rollover blanks the season.
+    const H = A.newGame(0, { seed: 6161, rules: { seasonLen: 41 } });
+    simSeason(A, H);
+    const live = A.seasonLeaders(H);
+    const topScorer = A.playersOf(H).filter((p) => p.pos !== "G" && p.season.gp)
+      .sort((a, b) => A.pts(b.season) - A.pts(a.season))[0];
+    ok(live.points.pid === topScorer.id, "the points leader is the league's actual points leader");
+    ok(live.points.v === A.pts(topScorer.season), "with his actual total");
+    const topG = A.playersOf(H).filter((p) => p.pos === "G" && p.season.gp)
+      .sort((a, b) => b.season.w - a.season.w)[0];
+    ok(live.wins.pid === topG.id, "and the wins leader is a goaltender");
+  },
+
+  /* Winning on the farm is worth something. The table, the playoffs and the
+     trophy were all decorative as far as the prospects living in them went. */
+  farmDevelopment(A) {
+    section("Winning teaches");
+    const F = A.DEV_FARM, SW = A.DEV_WIN_SWING, TI = A.DEV_WIN_TITLE;
+    const full = { gp: 82, g: 20, a: 25 };
+    const room = (pct, mean, title) => ({ pct, mean, title: !!title });
+
+    // The default is untouched — an unspecified room is worth exactly DEV_FARM.
+    ok(A.devEnvironment({ pos: "C" }, null, full) === F, `no room given is still DEV_FARM (${F})`);
+    ok(A.farmRoomBonus(null) === 0, "and no room is worth no bonus");
+    ok(A.farmRoomBonus(room(0.5, 0.5)) === 0, "an average affiliate is worth nothing either way");
+
+    // Winning pays, losing costs, and it is symmetric about the league.
+    const win = A.devEnvironment({ pos: "C" }, null, full, room(0.75, 0.5));
+    const lose = A.devEnvironment({ pos: "C" }, null, full, room(0.25, 0.5));
+    ok(win > F, `a winning affiliate develops him faster (${win.toFixed(2)} > ${F})`);
+    ok(lose < F, `a losing one slower (${lose.toFixed(2)})`);
+    ok(Math.abs((win - F) + (lose - F)) < 1e-9, "and the two cancel exactly");
+    ok(Math.abs(A.farmRoomBonus(room(1, 0.5)) - SW) < 1e-9, `the best room is worth ${SW}`);
+    ok(Math.abs(A.farmRoomBonus(room(0, 0.5)) + SW) < 1e-9, "and the worst costs the same");
+    ok(A.farmRoomBonus(room(1.5, 0.5)) === A.farmRoomBonus(room(1, 0.5)),
+      "a short season can't post a better percentage than is possible");
+
+    // The championship is worth something on its own.
+    const champ = A.farmRoomBonus(room(0.6, 0.5, true)) - A.farmRoomBonus(room(0.6, 0.5, false));
+    ok(Math.abs(champ - TI) < 1e-9, `winning it outright adds ${TI}`);
+    ok(A.devEnvironment({ pos: "C" }, null, full, room(0.6, 0.5, true)) > win - SW, "on top of the record");
+
+    // It is measured against the league, not a guessed .500 — the loser point
+    // puts the real mean nearer .530, so centring on .500 would inflate everyone.
+    ok(A.farmRoomBonus(room(0.53, 0.53)) === 0, "an average side is average whatever the mean is");
+    ok(A.farmRoomBonus(room(0.53, 0.5)) > 0, "and the mean is what decides it");
+
+    // It only weighs on the part of the year actually spent down there.
+    const callup = A.devEnvironment({ pos: "C" }, { gp: 41, toi: 41 * 20, g: 26, a: 0 }, { gp: 41 }, room(1, 0.5));
+    const callupFlat = A.devEnvironment({ pos: "C" }, { gp: 41, toi: 41 * 20, g: 26, a: 0 }, { gp: 41 });
+    ok(Math.abs((callup - callupFlat) - SW / 2) < 1e-9, "half a season on the farm gets half the room");
+    ok(A.devEnvironment({ pos: "C" }, { gp: 82, toi: 82 * 20, g: 52, a: 0 }, null, room(1, 0.5))
+       === A.devEnvironment({ pos: "C" }, { gp: 82, toi: 82 * 20, g: 52, a: 0 }, null),
+      "a player who never went down is untouched by it");
+
+    /* And it reads a real league. `farmRoom` has to find the club's record and
+       the mean across all thirty-two affiliates. */
+    const G = A.newGame(0, { seed: 8899, rules: { seasonLen: 82 } });
+    simSeason(A, G);
+    const prospect = A.playersOf(G).find((p) => p.farm && p.farmSeason && p.farmSeason.gp > 20);
+    ok(prospect, "a prospect played a farm season");
+    const r = A.farmRoom(G, prospect);
+    ok(r && r.pct >= 0 && r.pct <= 1, `his affiliate has a points percentage (${r ? r.pct.toFixed(3) : "?"})`);
+    ok(r.mean > 0.4 && r.mean < 0.7, `and the league has a mean (${r.mean.toFixed(3)})`);
+    // The mean really is the league's, so the bonuses net out across everybody.
+    const all = A.playersOf(G).filter((p) => p.farm && p.farmSeason && p.farmSeason.gp > 0)
+      .map((p) => A.farmRoomBonus(A.farmRoom(G, p)));
+    const net = all.reduce((s, x) => s + x, 0) / all.length;
+    ok(Math.abs(net) < TI, `the league-wide effect is close to neutral (${net.toFixed(3)})`);
+    ok(all.some((x) => x > 0.1) && all.some((x) => x < -0.1), "with real winners and losers");
+
+    // A player with no farm season gets nothing from any of it.
+    const nhlOnly = A.playersOf(G).find((p) => !p.farm && p.season && p.season.gp > 40);
+    ok(A.devEnvironment(nhlOnly, nhlOnly.season, null, A.farmRoom(G, nhlOnly))
+       === A.devEnvironment(nhlOnly, nhlOnly.season, null),
+      "a full-time NHL player is unaffected by his affiliate");
+
+    // The title is awarded before progress() runs, so it can actually be read.
+    simPlayoffs(A, G);
+    ok(G.farmCup && G.farmCup.champion != null, "a farm champion was crowned");
+    const winners = A.playersOf(G).filter((p) => (p.farmTitles || []).includes(G.year));
+    ok(winners.length > 0, `its players carry the title (${winners.length})`);
+  },
+
+  /* Where a player came from. `p.draft` was stamped for life and exactly one
+     line of code ever read it. */
+  draftOrigins(A) {
+    section("Draft origins");
+    const G = A.newGame(0, { seed: 2626, rules: { seasonLen: 41 } });
+    ok(G.foundingMaxPid > 0, `the founding league is bounded (${G.foundingMaxPid} players)`);
+    /* A founding player was never drafted because there was no draft to be part
+       of. Saying "undrafted" would be a claim about him, not about the save. */
+    const founders = A.playersOf(G).filter((p) => p.id <= G.foundingMaxPid);
+    ok(founders.length > 700, `the world starts full (${founders.length})`);
+    ok(!founders.some((p) => A.draftOrigin(G, p)), "and none of them is labelled at all");
+
+    // An offseason start builds a class; those prospects must fall on the far
+    // side of the line, or they'd read as founding players.
+    const O = A.newGame(0, { seed: 2626, rules: { seasonLen: 41 }, start: "offseason" });
+    ok(O.draftClass.every((id) => id > O.foundingMaxPid), "a class built at kickoff is not founding");
+
+    simSeason(A, G); simPlayoffs(A, G);
+    A.autoDraft(G, false);
+    const drafted = A.playersOf(G).filter((p) => p.draft);
+    ok(drafted.length >= 200, `a draft class was taken (${drafted.length})`);
+
+    const d0 = A.draftOrigin(G, drafted[0]);
+    ok(d0 && d0.kind === "drafted", "a drafted player knows he was drafted");
+    ok(drafted.every((p) => {
+      const d = A.draftOrigin(G, p);
+      return d.year === G.year && d.round >= 1 && d.round <= A.DRAFT_ROUNDS
+        && d.pick >= 1 && d.pick <= A.draftPicksTotal(G);
+    }), "with a real year, round and overall pick");
+    ok(drafted.every((p) => A.draftOrigin(G, p).by), "and a club that took him");
+
+    // The pick number and the round have to agree with each other.
+    ok(drafted.every((p) => {
+      const d = A.draftOrigin(G, p);
+      return d.round === Math.floor((d.pick - 1) / G.teams.length) + 1;
+    }), "the round follows from the overall pick");
+    // Nobody shares a slot.
+    const slots = drafted.map((p) => p.draft.pick);
+    ok(new Set(slots).size === slots.length, "no two players hold the same pick");
+    const first = drafted.find((p) => p.draft.pick === 1);
+    ok(first && A.draftOrigin(G, first).by.id === G.draftOrder[0], "first overall went to the club on the clock");
+
+    /* It survives a trade — where he was taken is permanent, and that a player
+       is still with the club that drafted him is the interesting half. */
+    const stayed = drafted.filter((p) => A.draftOrigin(G, p).stayed).length;
+    ok(stayed > 0 && stayed <= drafted.length, `most draftees are still where they were taken (${stayed})`);
+    const mover = drafted.find((p) => p.teamId != null && p.teamId !== 0 && !A.hasNtc(p));
+    if (mover) {
+      const tookHim = mover.draft.teamId;
+      mover.teamId = tookHim === 0 ? 1 : 0;
+      const d = A.draftOrigin(G, mover);
+      ok(d.by.id === tookHim, "a trade doesn't rewrite who drafted him");
+      ok(!d.stayed, "but he no longer counts as never having left");
+    } else { ok(true, ""); ok(true, ""); }
+
+    // A late arrival with no record really did go undrafted.
+    A.startNextSeason(G);
+    const late = A.playersOf(G).filter((p) => p.id > G.foundingMaxPid && !p.draft && !p.retired);
+    ok(late.length > 0, `undrafted signings exist (${late.length})`);
+    ok(late.every((p) => A.draftOrigin(G, p).kind === "undrafted"), "and are named as such");
+
+    // An old save can't know where the line fell, so it claims nothing.
+    const legacy = JSON.parse(JSON.stringify(G));
+    delete legacy.foundingMaxPid;
+    A.migrate(legacy);
+    ok(legacy.foundingMaxPid === null, "a save from before the line has none");
+    ok(Object.values(legacy.players).filter((p) => !p.draft).every((p) => !A.draftOrigin(legacy, p)),
+      "and nobody in it is wrongly called undrafted");
+    ok(Object.values(legacy.players).some((p) => p.draft && A.draftOrigin(legacy, p)),
+      "while real draft records still read");
+  },
+
   /* Clearing out the bottom of a roster. Measured before this existed: 31 of 32
      clubs sat at or past the org limit from year two, some at 39, and not one
      release happened league-wide in a decade. */
@@ -2819,6 +3016,48 @@ const CHECKS = {
     // Room to move: a jammed league can't sign anybody.
     const withRoom = G.teams.filter((t) => A.rosterOf(G, t.id, true).filter((p) => !p.retired).length < MAXORG);
     ok(withRoom.length >= 24, `most clubs have room to sign somebody (${withRoom.length}/32)`);
+
+    /* And the MONEY is legal too. `draftPlayer` hands out seven entry contracts
+       a club with no cap check anywhere, so a club that finished pressed
+       against the ceiling used to open the next season several million over it
+       — about one club-season in three hundred, measured over ten seeds. */
+    const CAP = A.rules(G).capAmount;
+    ok(G.teams.every((t) => A.capHit(G, t.id) <= CAP),
+      `nobody opens the season over the cap (worst ${Math.max(...G.teams.map((t) => A.capHit(G, t.id))).toFixed(1)}/${CAP})`);
+
+    /* Forced over deliberately, on a FRESH league — a club several seasons deep
+       has already been trimmed to its position minimums, and then there is
+       legitimately nothing it is allowed to cut. */
+    const F = A.newGame(0, { seed: 4242, rules: { seasonLen: 41 } });
+    const t0 = F.teams[5];
+    const squad = A.rosterOf(F, t0.id, true).filter((p) => !A.hasNtc(p));
+    const best = squad.slice().sort((a, b) => b.ovr - a.ovr)[0];
+    const junk = squad.filter((p) => p.ovr < 55 && p.pos !== "G").sort((a, b) => a.ovr - b.ovr)[0];
+    junk.contract.amt = CAP;            // a catastrophic deal, over the cap on its own
+    best.contract.amt = 12;             // expensive, but the club is getting something
+    ok(A.capHit(F, t0.id) > CAP, `a club can be pushed over the cap (${A.capHit(F, t0.id).toFixed(1)})`);
+    A.enforceCap(F);
+    ok(A.capHit(F, t0.id) <= CAP, `and it gets itself back under (${A.capHit(F, t0.id).toFixed(1)})`);
+    ok(junk.teamId == null, "by shedding the contract it gets least for");
+    ok(best.teamId === t0.id, "not the expensive player it gets plenty for");
+    Object.entries(A.DRESS_MIN).forEach(([pos, n]) => {
+      ok(A.rosterOf(F, t0.id, true).filter((p) => p.pos === pos).length >= n,
+        `and it can still field ${n} at ${pos}`);
+    });
+    // A protected contract can't be the one that goes.
+    const P = A.newGame(0, { seed: 4242, rules: { seasonLen: 41 } });
+    const shielded = A.rosterOf(P, 5, true).find((p) => A.hasNtc(p));
+    if (shielded) {
+      shielded.contract.amt = CAP;
+      A.enforceCap(P);
+      ok(shielded.teamId === 5, "a no-trade clause protects him from a cap cut too");
+    } else ok(true, "nobody on that club has a clause");
+    // A soft cap is not a cap: nothing is forced.
+    const soft = A.newGame(0, { seed: 4242, rules: { seasonLen: 41, hardCap: false } });
+    const softBefore = A.rosterOf(soft, 0, true).length;
+    A.rosterOf(soft, 0, true)[0].contract.amt = 200;
+    A.enforceCap(soft);
+    ok(A.rosterOf(soft, 0, true).length === softBefore, "without a hard cap nobody is forced out");
   },
 
   /* Names carrying their honours. The marks are only worth anything if they

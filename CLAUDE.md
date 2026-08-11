@@ -227,6 +227,16 @@ lie that nothing in the UI would reveal.
   it costs the same third of salary a release does; at the rollover it costs nothing** (the roster
   is being rebuilt anyway, and otherwise thirty-two clubs would accrue dead money every year for
   ordinary housekeeping).
+- **`enforceCap` counts the MONEY, and it exists because the draft never did.** `draftPlayer`
+  hands out seven entry contracts per club with no cap check anywhere, so a club that finished the
+  season against the ceiling opened the next one several million over it — **measured at roughly
+  one club-season in three hundred across ten seeds, and present since long before the roster work
+  above** (it surfaced when a development change shifted the RNG onto the harness's seed; the
+  pre-existing worst breach was larger than the one that exposed it). A club over a HARD cap sheds
+  worst-value-per-dollar first — the bad deal, not the cheap body — never below `DRESS_MIN` or
+  `ROSTER_MIN`, and never a no-trade contract. It runs twice in `startNextSeason`: once before
+  `fillRosters` so anything it opens up gets topped back up, once at the end because the market and
+  the top-ups both add salary. A soft cap forces nothing.
 - **`enforceRosterLimits` is the AI's release mechanism as well as the clean-up.** `ROSTER_MAX`
   and `FARM_MAX` were both declared and only the farm one was ever enforced. Surplus on the
   dressed roster reports to the farm, surplus in the ORGANISATION is released worst-first.
@@ -361,6 +371,22 @@ is refused below `RETRO_MIN_POOL` surviving skaters — `pruneSave` eventually c
 old players, and electing an MVP from forty survivors is an invention, not a record. Rebuilt years
 are flagged `h.retroAwards`.
 
+**Leaders are kept year by year, not just all-time.** `seasonLeaders` snapshots who led every
+`RECORD_DEFS` category into `G.history[].leaders` at the rollover — captured there because
+`p.season` is blanked further down — storing the NAME as well as the id, since `pruneSave`
+eventually forgets the player and a history that goes blank isn't a history. The record book only
+ever held the best ever, so a 54-goal season left no trace once somebody beat it. The Records page
+renders it as a season-by-season table and stars the marks that still stand.
+
+**Where a player came from.** `p.draft` was stamped for life from the first draft build and
+exactly one line of code ever read it (a news item about a stalled high pick). `draftOrigin` now
+surfaces it in his bio. The third case is why `G.foundingMaxPid` exists: a founding player has no
+record because there was no draft to be part of, and calling him undrafted would be a claim about
+him rather than about the save — so nothing is said. Anyone with a higher id arrived later, and a
+later arrival with no record really did go undrafted. Stamped BEFORE `buildDraftClass`, or an
+offseason start files its prospects on the wrong side of the line. Old saves get `null` and claim
+nothing.
+
 **Honour marks follow the name, and the ballots run LIVE.** `honoursOf(G, p)` / `HonourMark` put a
 filled amber star (leading or won), a hollow blue star (on the ballot) and an `AS` chip wherever a
 player is listed — stats leaderboards, the roster, the player modal, the Home scoring list. Keying
@@ -411,6 +437,16 @@ a flat "+1.5 if he's on the farm", which gave every prospect the same answer.
 - **A mid-season move gets both**, weighted by games in each league, so a December callup is worth
   exactly the share of the year it covered. Note that AI clubs almost never shuttle players (3 of
   318 under-24s in a sample season), so in practice this mostly matters for the user's own callups.
+- **Winning teaches.** A farm season was worth a flat `DEV_FARM` whether the affiliate won the
+  championship or finished last, which made the farm league's table, playoffs and trophy
+  decorative as far as the prospects living in them were concerned. `farmRoom(G, p)` reads the
+  club's points percentage and whether it won; `farmRoomBonus` turns that into up to
+  `DEV_WIN_SWING` either way plus `DEV_WIN_TITLE` for the title itself. It is **symmetric about
+  the league mean, not about a guessed .500** — the loser point puts the real mean near .530, so
+  centring on .500 would have quietly inflated everybody; measured league-wide the net effect is
+  ~0.02. The room is an OPTIONAL fourth argument to `devEnvironment`, so every existing call (and
+  every harness assertion pinning the farm term to exactly `DEV_FARM`) is unchanged, and it only
+  weighs on the share of the year actually spent down there.
 - `devAgeWeight` tapers it out: full to 21, 0.75 to 23, 0.4 to 25, nothing after — where a player
   spends the year stops mattering once he's made.
 - **Read `p.stats`, not `p.season`.** By the time `progress` runs, `finishSeason` has already done

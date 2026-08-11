@@ -1023,6 +1023,15 @@ function newGame(userTeam, opts) {
   }
   seedPicks(G, G.year, 4);
 
+  /* The founding league. Nobody generated here was ever drafted — the world
+     starts with them already in it — so their bios must not claim they went
+     undrafted, which is a different and much less flattering thing. One integer
+     draws the line: anyone with a higher id arrived later, and a later arrival
+     with no draft record really is an undrafted signing. Stamped BEFORE the
+     draft class is built, or an offseason start would file its prospects on the
+     wrong side of it. */
+  G.foundingMaxPid = G.nextPid - 1;
+
   buildSchedule(G);
   setMandate(G);
 
@@ -1079,6 +1088,10 @@ function migrate(G) {
   if (G.scoutPoints == null) G.scoutPoints = 0;
   if (!G.draftLog) G.draftLog = [];
   if (!G.draftStars) G.draftStars = [];
+  /* A save from before the line was drawn can't know where it fell, and
+     guessing would put "undrafted" on founding players. Null means "don't
+     claim anything", which is the honest reading. */
+  if (G.foundingMaxPid === undefined) G.foundingMaxPid = null;
   // A save from before the order was year-stamped: a class in hand means the
   // order on file is this year's, and anything else means there isn't one.
   if (G.draftYear === undefined) G.draftYear = (G.draftClass || []).length ? G.year : null;
@@ -2395,6 +2408,27 @@ const RECORD_DEFS = [
 ];
 const MILESTONES = { goals: [40, 50, 60], points: [80, 100, 120] };
 
+/* Who led each category THIS season. The record book only ever kept the
+   all-time best, so a year in which somebody scored 54 goals left no trace
+   anywhere once a later season beat it — the league had a record holder and no
+   history. Captured at the rollover, while `p.season` is still the season that
+   just finished, and stored with the NAME as well as the id because
+   `pruneSave` eventually forgets the player. */
+function seasonLeaders(G) {
+  const out = {};
+  RECORD_DEFS.forEach((def) => {
+    let best = null;
+    playersOf(G).forEach((p) => {
+      if ((def.pos === "G") !== (p.pos === "G")) return;
+      if (!p.season.gp) return;
+      const v = def.get(p.season);
+      if (v > 0 && (!best || v > best.v)) best = { v, pid: p.id, name: fullName(p) };
+    });
+    if (best) out[def.key] = best;
+  });
+  return out;
+}
+
 function updateRecords(G) {
   G.records = G.records || {};
   RECORD_DEFS.forEach((def) => {
@@ -2688,6 +2722,8 @@ function finishSeason(G) {
     champion: champ,
     standings: G.teams.map((t) => ({ id: t.id, w: t.w, l: t.l, otl: t.otl, pts: t.pts })),
     awards: G.awards,
+    // Captured here because `p.season` is blanked further down the rollover.
+    leaders: seasonLeaders(G),
     userRecord: { w: G.teams[G.userTeam].w, l: G.teams[G.userTeam].l, otl: G.teams[G.userTeam].otl, pts: G.teams[G.userTeam].pts },
   });
   // Board reaction: making the playoffs is the baseline expectation.
@@ -2888,6 +2924,7 @@ function finishSeason(G) {
    disagreed about the minimums they would fight each other every rollover, and
    the club would start the season a goaltender short. */
 const DRESS_MIN = { G: 2, D: 6, C: 4, LW: 3, RW: 3 };
+const ROSTER_MIN = 20;   // bodies a club has to have dressed
 
 function fillRosters(G) {
   const need = DRESS_MIN;
@@ -2909,13 +2946,13 @@ function fillRosters(G) {
       }
     });
     // Recall from the farm first, and only then sign bodies off the street.
-    const short = 20 - rosterOf(G, t.id).length;
+    const short = ROSTER_MIN - rosterOf(G, t.id).length;
     if (short > 0) {
       rosterOf(G, t.id, true).filter((p) => p.farm).sort((a, b) => b.ovr - a.ovr)
         .slice(0, short).forEach((p) => { p.farm = false; });
     }
     let guard = 0;
-    while (rosterOf(G, t.id).length < 20 && guard++ < 12) {
+    while (rosterOf(G, t.id).length < ROSTER_MIN && guard++ < 12) {
       const p = genPlayer(G, pick(G, ["C", "LW", "RW", "D"]), 40, ri(G, 20, 27));
       p.teamId = t.id;
       p.contract = { amt: MIN_SALARY, yrs: 1 };
@@ -3697,6 +3734,37 @@ function releasePlayer(G, pid) {
   return { ok: true, dead: releaseCost(G, pid), yrs: Math.max(1, p.contract.yrs) };
 }
 
+/* ------------------------------ where he came from -------------------------
+ * `p.draft` has been stamped on every drafted player for life since the draft
+ * was built, and exactly one line of code ever read it — a news item about a
+ * high pick who stalled. It never reached his bio, so the one permanent fact
+ * about a player's origin was invisible.
+ *
+ * Three cases, and the third is why `G.foundingMaxPid` exists. A drafted player
+ * has a record. A player who arrived AFTER the world started and has no record
+ * signed as an undrafted free agent. A founding player has no record because
+ * there was no draft to be part of — calling him undrafted would be a claim
+ * about him rather than about the save, so nothing is said at all.
+ * ------------------------------------------------------------------------- */
+function draftOrigin(G, p) {
+  if (!p) return null;
+  if (p.draft) {
+    const t = G.teams[p.draft.teamId];
+    return {
+      kind: "drafted",
+      year: p.draft.year,
+      round: p.draft.round,
+      pick: p.draft.pick,
+      by: t || null,
+      // Staying where you were taken is worth saying; most players don't.
+      stayed: !!t && p.teamId === p.draft.teamId,
+      junior: p.junior || null,
+    };
+  }
+  if (G.foundingMaxPid != null && p.id > G.foundingMaxPid) return { kind: "undrafted" };
+  return null;
+}
+
 /* --------------------------- cutting a fringe man -------------------------
  * Waivers are the right process for a player somebody else might want. They are
  * the WRONG process for the bottom of an organisation, and that was the whole
@@ -3788,6 +3856,56 @@ function capFreeAgentPool(G) {
     delete G.players[p.id];
   });
   G.freeAgents = G.freeAgents.filter((id) => G.players[id]);
+  return G;
+}
+
+/* ----------------------------- and a legal cap ----------------------------
+ * `enforceRosterLimits` counts bodies. Nothing counted MONEY at the rollover,
+ * and the draft is where that bites: `draftPlayer` hands out seven entry
+ * contracts per club with no cap check anywhere, so a club that finished the
+ * season pressed against the ceiling started the next one several million over
+ * it. Measured across ten seeds, roughly one club-season in three hundred
+ * opened the year illegal — rare enough to hide for a long time, and nothing in
+ * the game ever corrected it.
+ *
+ * A club over a HARD cap sheds its worst contracts until it isn't: worst value
+ * per dollar first, which is the bad deal rather than the cheap body, and never
+ * below what it has to be able to dress. Free, like any other rollover cut —
+ * the roster is being rebuilt and this is the same "didn't tender him" that
+ * `terminateContract` models in the offseason.
+ *
+ * It runs LAST, after the market, the top-ups and the body count, because every
+ * one of those can add salary.
+ * ------------------------------------------------------------------------- */
+function enforceCap(G) {
+  if (!rules(G).hardCap) return G;
+  const cap = rules(G).capAmount;
+  G.teams.forEach((t) => {
+    let guard = 0;
+    while (capHit(G, t.id) > cap && guard++ < 24) {
+      const squad = rosterOf(G, t.id, true).filter((p) => !p.retired);
+      const atPos = (pos) => squad.filter((x) => x.pos === pos).length;
+      const dressed = squad.filter((x) => !x.farm).length;
+      /* Value per dollar, worst first — a club in trouble sheds the contract
+         it is getting least for, not simply the cheapest man on the books.
+         A no-trade clause protects him here as everywhere else, and the club
+         still has to be able to put a side on the ice: cutting a dressed player
+         below the floor would just make `fillRosters` sign a body back. */
+      const cand = squad
+        .filter((p) => !hasNtc(p) && atPos(p.pos) > (DRESS_MIN[p.pos] || 0)
+          && (p.farm || dressed > ROSTER_MIN))
+        .sort((a, b) => (a.ovr / Math.max(0.1, effectiveCap(G, a)))
+                      - (b.ovr / Math.max(0.1, effectiveCap(G, b))))[0];
+      // Nothing left that can legally go: the club is genuinely stuck, and
+      // rewriting a signed contract to paper over it would be worse.
+      if (!cand) break;
+      const name = fullName(cand);
+      releaseToPool(G, cand);
+      if (t.id === G.userTeam) {
+        news(G, `${name} was let go to get under the cap.`, "bad");
+      }
+    }
+  });
   return G;
 }
 
@@ -4394,13 +4512,56 @@ function nhlDevRead(p, st) {
    The two combine so that beating the farm takes roughly top-nine minutes AND
    above-average production; a fourth-liner is better off in the minors even if
    he's scoring there. */
-function devEnvironment(p, st, farm) {
+/* ---------------------------- winning teaches -----------------------------
+ * A farm season was worth a flat `DEV_FARM` whether the affiliate won the
+ * championship or finished last by twenty points, which made the whole farm
+ * league — its table, its playoffs, its trophy — decorative as far as the
+ * prospects living in it were concerned. Playing meaningful games in a winning
+ * room is a real part of how players come through, so it pays.
+ *
+ * SYMMETRIC ABOUT THE LEAGUE, not about zero. The bonus is measured against the
+ * average affiliate, so a good room adds exactly as much as a bad one takes
+ * away and the league-wide rate of development is unchanged. Centring it on a
+ * guessed .500 instead would have quietly inflated everybody, because the
+ * loser point puts the real mean nearer .530.
+ * ------------------------------------------------------------------------- */
+const DEV_WIN_SWING = 0.55;   // best-to-average affiliate, on top of DEV_FARM
+const DEV_WIN_TITLE = 0.35;   // and winning the thing outright
+
+/* The room a prospect spent the year in: how good his affiliate was, measured
+   against the average one, and whether it won. Returns null when there's no
+   farm season to judge, which is what keeps `devEnvironment` unchanged for
+   everyone who never went down. */
+function farmRoom(G, p) {
+  if (!p || p.teamId == null || !G.teams[p.teamId]) return null;
+  const mine = farmRec(G.teams[p.teamId]);
+  if (!mine.gp) return null;
+  let pts = 0, gp = 0;
+  G.teams.forEach((t) => { const r = farmRec(t); pts += r.pts; gp += r.gp; });
+  if (!gp) return null;
+  return {
+    pct: mine.pts / (2 * mine.gp),
+    mean: pts / (2 * gp),
+    title: (p.farmTitles || []).includes(G.year),
+  };
+}
+/* How much that room was worth. Clamped, because a 20-game affiliate can post a
+   points percentage no full season could and shouldn't out-earn a title. */
+function farmRoomBonus(room) {
+  if (!room) return 0;
+  const edge = clamp((room.pct - room.mean) * 2, -1, 1);
+  return edge * DEV_WIN_SWING + (room.title ? DEV_WIN_TITLE : 0);
+}
+
+function devEnvironment(p, st, farm, room) {
   const nGp = (st && st.gp) || 0;
   const fGp = (farm && farm.gp) || 0;
   if (!nGp && !fGp) return 0;                       // played nowhere, learned nothing
   const r = nhlDevRead(p, st);
   const nhl = r ? DEV_NHL_LO + (DEV_NHL_HI - DEV_NHL_LO) * r.role * (0.3 + 0.7 * ((r.perf + 1) / 2)) : 0;
-  return (nhl * nGp + DEV_FARM * fGp) / (nGp + fGp);
+  // The room only weighs on the part of the year he actually spent down there.
+  const onFarm = DEV_FARM + farmRoomBonus(room);
+  return (nhl * nGp + onFarm * fGp) / (nGp + fGp);
 }
 // Where he plays stops mattering once he's made. Ages are post-birthday.
 function devAgeWeight(age) { return age <= 21 ? 1 : age <= 23 ? 0.75 : age <= 25 ? 0.4 : 0; }
@@ -4417,7 +4578,10 @@ function progress(G, p) {
   // Where he played and how it went. `p.stats` is the season that just ended —
   // `p.season` has already been blanked by this point in the rollover — and
   // `p.farmSeason` is still intact until it's archived further down.
-  delta += devEnvironment(p, p.stats, p.farmSeason) * devAgeWeight(p.age);
+  /* `farmRoom` reads `t.farmRec` and `p.farmTitles`, both of which are still
+     intact here — the table is reset in `startNextSeason` and the title was
+     awarded by `runFarmPlayoffs` back at the end of the regular season. */
+  delta += devEnvironment(p, p.stats, p.farmSeason, farmRoom(G, p)) * devAgeWeight(p.age);
   // A coach who develops players is worth real progression on top of that.
   if (p.age <= 24 && p.teamId != null) {
     delta += (coachOf(G.teams[p.teamId]).dev - 55) * 0.035;
@@ -4441,11 +4605,17 @@ function startNextSeason(G) {
   // Ageing and contract expiry already happened at the end of the playoffs.
   // What's left is to fill out the league and rebuild the calendar.
   aiFreeAgency(G);
+  /* Shed illegal money BEFORE topping the roster up, so anything this opens up
+     gets filled in the same pass rather than leaving a club a body short. */
+  enforceCap(G);
   fillRosters(G);
   /* AFTER the market and the top-ups, because both add players — the draft has
      also just put seven more into every organisation. This is the point at
      which the roster about to play a season has to be a legal one. */
   enforceRosterLimits(G);
+  // Bodies are legal; now the money has to be. The draft has just added seven
+  // entry contracts per club and nothing else checks them against the cap.
+  enforceCap(G);
   capFreeAgentPool(G);
   // Reset the league.
   G.teams.forEach((t) => {
@@ -5214,6 +5384,40 @@ function GoalieReport({ G, p }) {
   );
 }
 
+/* Where he came from, in one line. A founding player gets nothing rather than a
+   claim the save can't support — see `draftOrigin`. */
+function DraftLine({ G, p }) {
+  const d = draftOrigin(G, p);
+  if (!d) return null;
+  if (d.kind === "undrafted") {
+    return (
+      <div className={`${card} px-3 py-2 text-xs text-slate-400`}>
+        <span className="text-slate-500">Draft </span>
+        Undrafted — signed as a free agent
+      </div>
+    );
+  }
+  /* First overall is worth saying out loud; so is the fact that a man is still
+     with the club that took him, which most players aren't. */
+  const headline = d.pick === 1 ? "1st overall" : `${ordinal(d.pick)} overall`;
+  return (
+    <div className={`${card} px-3 py-2 text-xs`}>
+      <span className="text-slate-500">Drafted </span>
+      <span className="text-slate-200 font-medium">{d.year}</span>
+      <span className="text-slate-400"> · round {d.round}, </span>
+      <span className={d.pick <= 5 ? "text-emerald-300 font-medium" : "text-slate-200"}>{headline}</span>
+      {d.by ? (
+        <>
+          <span className="text-slate-400"> by </span>
+          <span className="text-slate-200">{d.by.city} {d.by.name}</span>
+          {d.stayed ? <span className="text-sky-300"> — never left</span> : null}
+        </>
+      ) : null}
+      {d.junior ? <span className="text-slate-500"> · out of {d.junior}</span> : null}
+    </div>
+  );
+}
+
 function RatingBar({ label, v }) {
   return (
     <div className="flex items-center gap-2">
@@ -5265,7 +5469,8 @@ function DevelopmentNote({ G, p }) {
   // season has actually started.
   const clubGp = p.teamId != null && G.teams[p.teamId] ? G.teams[p.teamId].gp : 0;
   if (!nGp && !fGp && !clubGp) return null;
-  const env = devEnvironment(p, p.season, p.farmSeason);
+  const room = farmRoom(G, p);
+  const env = devEnvironment(p, p.season, p.farmSeason, room);
   const read = nhlDevRead(p, p.season);
   const band =
     env >= DEV_FARM * 1.5 ? { t: "Thriving", bar: "bg-emerald-500", tone: "text-emerald-300" } :
@@ -5280,7 +5485,14 @@ function DevelopmentNote({ G, p }) {
       ? `${nGp} start${nGp === 1 ? "" : "s"} at ${(svPct(p.season) * 100).toFixed(1)} SV%`
       : `${nGp} NHL game${nGp === 1 ? "" : "s"} at ${mins.toFixed(1)} min`);
   }
-  if (fGp) why.push(`${fGp} on the farm`);
+  if (fGp) {
+    // Say what KIND of farm season it is, not just how many games — the room is
+    // worth real progression now, and it's a thing the user can act on.
+    const edge = room ? room.pct - room.mean : 0;
+    const kind = !room ? "" : room.title ? ", champions" : edge > 0.06 ? ", a winning side"
+      : edge < -0.06 ? ", a losing side" : "";
+    why.push(`${fGp} on the farm${kind}`);
+  }
   if (!nGp && !fGp) why.push(`no games · his club has played ${clubGp}`);
   // Order matters: "in over his head" is only true of a player drowning in BIG
   // minutes. A third-liner who isn't scoring is a different problem, and telling
@@ -5351,6 +5563,7 @@ function PlayerModal({ G, pid, onClose, onGo }) {
                 : p.farm ? "on the farm" : "on the roster"}
               tone={p.inj > 0 ? "text-rose-400" : p.rust > 0 ? "text-amber-300" : ""} />
           </div>
+          <DraftLine G={G} p={p} />
           <Section title="Ratings"
             right={p.pos !== "G" ? <span className="text-xs text-sky-300">{roleOf(p).label}</span> : null}
             className="p-3 space-y-1.5">
@@ -7872,6 +8085,45 @@ function RecordsTab({ G, openPlayer }) {
             );
           })}
         </div>
+      </Section>
+      {/* The record book keeps only the best ever, so a 54-goal season left no
+          trace once somebody beat it. This is who actually led, year by year. */}
+      <Section title="Season by season">
+        <SortTable min={760} rows={(G.history || []).filter((h) => h.leaders || h.awards)}
+          initial="year" rowKey={(h) => h.year}
+          empty="No completed seasons yet — this fills in as the years go by."
+          cols={[
+            { key: "year", label: "Year", get: (h) => h.year, cls: "font-medium" },
+            { key: "champ", label: "Champion", get: (h) => (h.champion != null && G.teams[h.champion] ? G.teams[h.champion].city : ""),
+              cell: (h) => (h.champion != null && G.teams[h.champion]
+                ? <span className="whitespace-nowrap text-amber-300">{G.teams[h.champion].abbr}</span> : "—") },
+            ...RECORD_DEFS.map((d) => ({
+              key: d.key,
+              // Short headings: the full labels are spelled out in the book above.
+              label: { goals: "Goals", points: "Points", assists: "Assists", pim: "PIM",
+                       wins: "Wins", shutouts: "SO" }[d.key] || d.key,
+              get: (h) => ((h.leaders && h.leaders[d.key]) ? h.leaders[d.key].v : 0),
+              cell: (h) => {
+                const L = h.leaders && h.leaders[d.key];
+                if (!L) return <span className="text-slate-600">—</span>;
+                /* A record that still stands gets marked. `G.records` holds the
+                   all-time best, so this is "was this the year". */
+                const rec = (G.records || {})[d.key];
+                const standing = rec && rec.year === h.year && rec.pid === L.pid;
+                return (
+                  <span className="whitespace-nowrap">
+                    <button className="hover:text-sky-300" onClick={() => openPlayer(L.pid)}>
+                      {L.name || (G.players[L.pid] ? fullName(G.players[L.pid]) : "—")}
+                    </button>
+                    <span className={`ml-1 tnum ${standing ? "text-amber-300 font-semibold" : "text-slate-400"}`}
+                      title={standing ? "still the league record" : undefined}>
+                      {L.v}{standing ? "★" : ""}
+                    </span>
+                  </span>
+                );
+              },
+            })),
+          ]} />
       </Section>
       <Section title="Cups won" className="p-3">
         <div className="grid sm:grid-cols-2 gap-x-6 pt-1">
