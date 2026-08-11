@@ -131,7 +131,102 @@ const RULES_DEFAULT = {
   retainedSalary: true,
   injuries: "normal",   // low | normal | high
   fighting: true,
+
+  /* ------------------------------ depth rules ------------------------------
+   * Everything below is a system you can switch OFF, and every one of them
+   * defaults to the behaviour the game already had. That is not politeness: a
+   * default of `false` means an existing save loads into exactly the league it
+   * was saved from, and the several hundred harness assertions calibrated
+   * against the old engine keep measuring the old engine. A depth feature that
+   * changed the baseline would have to re-prove every one of them.
+   *
+   * `DEPTH_RULES` drives the settings screen and the presets, so a new toggle
+   * is added in one place rather than three.
+   * --------------------------------------------------------------------- */
+  twoWayDeals: false,      // cheaper cap hit while a player is in the minors
+  conditioning: false,     // send a rusty player down to play himself fit
+  farmCoach: false,        // the affiliate gets its own bench boss
+  farmDepth: false,        // a few named depth players per affiliate
+  prospectRisk: false,     // bust risk as its own axis, separate from fog
+  areaScouting: false,     // spend scouting on a region or a position
+  draftTradeUp: false,     // clubs ring you to move up for a man they covet
+  undraftedFA: false,      // the best of the undrafted reach the market
+  homeIce: "classic",      // classic | realistic | none
+  devFocus: false,         // a young player works on something over the summer
+  demands: false,          // players ask for minutes, or ask out
+  coachStaff: false,       // hire assistants rather than one do-everything coach
+  rivalryGrowth: false,    // rivalries harden when clubs meet in the spring
 };
+
+/* The depth toggles, described once. `group` buckets them on the settings
+   screen, `opts` is the control, and `blurb` is what it actually does — a
+   switch whose effect you can't discover is a switch nobody touches. */
+const DEPTH_RULES = [
+  { k: "prospectRisk", deep: true, group: "Draft", label: "Bust risk",
+    blurb: "Some prospects are safe, some are boom-or-bust — and that's different from how well you've scouted him.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "areaScouting", deep: true, group: "Draft", label: "Area scouting",
+    blurb: "Spend scouting on a whole region or position instead of one player at a time.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "draftTradeUp", deep: true, group: "Draft", label: "Clubs trade up",
+    blurb: "A club that loves somebody still on the board rings you to jump your pick.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "undraftedFA", deep: true, group: "Draft", label: "Undrafted free agents",
+    blurb: "The best players nobody took reach the market instead of vanishing.",
+    opts: [[false, "Off"], [true, "On"]] },
+
+  { k: "twoWayDeals", deep: true, group: "Farm", label: "Two-way contracts",
+    blurb: "A fringe deal costs the cap far less while he's in the minors.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "conditioning", deep: true, group: "Farm", label: "Conditioning stints",
+    blurb: "Send a player coming back from injury down to play himself fit.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "farmCoach", deep: true, group: "Farm", label: "Farm coach",
+    blurb: "The affiliate gets its own bench boss, and his development rating is the one that counts down there.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "farmDepth", deep: true, group: "Farm", label: "Named affiliate depth",
+    blurb: "A few real players on each farm club instead of anonymous filler.",
+    opts: [[false, "Off"], [true, "On"]] },
+
+  { k: "homeIce", deep: "realistic", group: "The game", label: "Home ice",
+    blurb: "Last change is the whole advantage. Classic is what the engine has always done — and it comes out at about 50%, against a real 52–55%.",
+    opts: [["classic", "Classic"], ["realistic", "Realistic"], ["none", "None"]] },
+  { k: "devFocus", deep: true, group: "The game", label: "Summer development",
+    blurb: "Point a young player at one part of his game over the offseason instead of improving evenly.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "demands", deep: true, group: "The game", label: "Player demands",
+    blurb: "Players ask for ice time, or ask to be traded, according to who they are.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "coachStaff", deep: true, group: "The game", label: "Coaching staff",
+    blurb: "Hire a power play, penalty kill and development coach rather than one man who does everything.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "rivalryGrowth", deep: true, group: "The game", label: "Rivalries build",
+    blurb: "Meeting in the playoffs makes it personal, and it stays that way.",
+    opts: [[false, "Off"], [true, "On"]] },
+];
+
+/* Two ways to have this conversation once instead of thirteen times. */
+const DEPTH_PRESETS = {
+  classic: { label: "Classic", blurb: "The game as it was. Nothing below is switched on." },
+  deep:    { label: "Deep",    blurb: "Every system on. More to manage, and more that manages itself." },
+};
+/* The first option is always the off/legacy one; `deep` names what the full
+   preset should choose. It has to be SPELLED OUT rather than taken as the last
+   option — home ice offers classic / realistic / none, where the richest
+   setting is the middle one and the last would switch the advantage off
+   entirely. Deep would have quietly made home ice mean nothing. */
+function applyDepthPreset(G, name) {
+  DEPTH_RULES.forEach((d) => setRule(G, d.k, name === "deep" ? d.deep : d.opts[0][0]));
+  return G;
+}
+/* Which preset the current settings match, or null for a mix of the two. */
+function depthPreset(G) {
+  if (DEPTH_RULES.every((d) => ruleValue(G, d.k) === d.opts[0][0])) return "classic";
+  if (DEPTH_RULES.every((d) => ruleValue(G, d.k) === d.deep)) return "deep";
+  return null;
+}
+const depthOn = (G, k) => !!ruleValue(G, k);
+
 // Knobs that change the shape of a season must wait for the rollover.
 const STRUCTURAL_RULES = ["seasonLen", "playoffFormat", "seriesLen"];
 
@@ -354,12 +449,119 @@ function genCoach(G, tier) {
     years: ri(G, 1, 4),
   };
 }
+/* ------------------------------ the staff ---------------------------------
+ * One coach object carried `pp`, `pk` and `dev`, so the man who ran your power
+ * play was necessarily the same man who brought your prospects on. Splitting
+ * them into people you hire separately is the whole idea: a club can be
+ * brilliant on the power play and hopeless at development, which one number
+ * can't express.
+ *
+ * With the rule off `staffOf` reports the head coach's own ratings, so every
+ * caller reads the same numbers it always did.
+ * ------------------------------------------------------------------------- */
+const STAFF_ROLES = [
+  { k: "pp", label: "Power play", blurb: "how much a man advantage is worth" },
+  { k: "pk", label: "Penalty kill", blurb: "and how much it costs you" },
+  { k: "dev", label: "Development", blurb: "how fast young players come on" },
+];
+
+/* DERIVED FROM THE CLUB ID, not drawn from the seeded PRNG — the same pattern
+ * `personalityOf`, `goalieHole` and `roleOf` already use, and here it is
+ * load-bearing rather than tidy. Generating these in `newGame` costs `rnd(G)`
+ * calls, which shifts every subsequent draw in the world and desynchronises
+ * every seed the harness calibrates against; two realism checks failed on the
+ * first attempt for exactly that reason. Derived, they cost no save size, no
+ * randomness and no replay, and an existing save gets a staff for free the
+ * moment the rule is switched on.
+ * ------------------------------------------------------------------------- */
+function hashUnit(n) {
+  let t = (n + 0x9e3779b9) | 0;
+  t = Math.imul(t ^ (t >>> 16), 0x21f0aaad);
+  t = Math.imul(t ^ (t >>> 15), 0x735a2d97);
+  return ((t ^ (t >>> 15)) >>> 0) / 4294967296;
+}
+// A rating around the club's own standard, so a big-market side tends to employ
+// better people — the same relationship `genCoach` gets from its tier.
+const derivedRating = (seed, tier) => Math.round(clamp(tier - 14 + hashUnit(seed) * 28, 25, 95));
+const derivedName = (seed) =>
+  COACH_FIRST[Math.floor(hashUnit(seed * 7 + 11) * COACH_FIRST.length)] + " " +
+  COACH_LAST[Math.floor(hashUnit(seed * 13 + 5) * COACH_LAST.length)];
+
+function staffOf(G, t) {
+  const head = t.coach || { pp: 55, pk: 55, dev: 55 };
+  if (!depthOn(G, "coachStaff")) return { pp: head.pp, pk: head.pk, dev: head.dev, head: true };
+  const tier = 48 + (t.mkt || 3) * 3;
+  const out = { head: false, people: {} };
+  STAFF_ROLES.forEach((r, i) => {
+    const seed = t.id * 101 + i * 37 + 1;
+    // A club you took over keeps whoever it hired; `t.staffHired` overrides.
+    const hired = t.staffHired && t.staffHired[r.k];
+    out[r.k] = hired ? hired.rating : derivedRating(seed, tier);
+    out.people[r.k] = hired || { name: derivedName(seed), rating: out[r.k] };
+  });
+  return out;
+}
+/* The affiliate's bench boss, derived the same way and a shade weaker than the
+   parent club's — running a farm team is where coaches start. */
+function farmCoachOf(G, t) {
+  if (!depthOn(G, "farmCoach")) return coachOf(t);
+  const seed = t.id * 101 + 991;
+  return { name: derivedName(seed), dev: derivedRating(seed, 44 + (t.mkt || 3) * 2),
+    pp: 55, pk: 55, system: "balanced" };
+}
+
 const coachOf = (t) => t.coach || { system: "balanced", pp: 55, pk: 55, dev: 55, name: "Interim" };
 const systemOf = (t) => SYSTEMS[coachOf(t).system] || SYSTEMS.balanced;
+
+/* Whose development rating counts for THIS player: the affiliate's boss if he
+   spent the year down there, the head coach if he didn't. Weighted by games,
+   because a callup in December belongs to both of them. */
+function devCoachRating(G, p) {
+  if (p.teamId == null || !G.teams[p.teamId]) return 55;
+  const t = G.teams[p.teamId];
+  const nGp = (p.stats && p.stats.gp) || 0;
+  const fGp = (p.farmSeason && p.farmSeason.gp) || 0;
+  const top = staffOf(G, t).dev;
+  if (!nGp && !fGp) return top;
+  return (top * nGp + farmCoachOf(G, t).dev * fGp) / (nGp + fGp);
+}
 
 /* A rivalry night is louder: both sides push, gloves come off more often, and
    the result moves the room further than an ordinary Tuesday would. */
 const isRivalry = (G, a, b) => G.teams[a] && G.teams[a].rivalId === b;
+
+/* ---------------------------- rivalries that build -------------------------
+ * A rivalry was a fixed pairing inside the division, decided once at generation
+ * and never touched again — which means the club that knocked you out three
+ * springs running is, as far as the game is concerned, just another opponent.
+ *
+ * `t.grudges[id]` counts postseason meetings. It only ever adds heat on top of
+ * the built-in pairing, so with the rule off nothing reads it and the league is
+ * exactly as before.
+ * ------------------------------------------------------------------------- */
+const GRUDGE_PER_SERIES = 0.35;   // extra heat per playoff meeting
+const GRUDGE_MAX = 3;             // beyond this it's already personal
+function grudgeBetween(G, a, b) {
+  if (!depthOn(G, "rivalryGrowth")) return 0;
+  const t = G.teams[a];
+  return Math.min(GRUDGE_MAX, (t && t.grudges && t.grudges[b]) || 0);
+}
+function addGrudge(G, a, b) {
+  [[a, b], [b, a]].forEach(([x, y]) => {
+    const t = G.teams[x];
+    if (!t) return;
+    t.grudges = t.grudges || {};
+    t.grudges[y] = Math.min(GRUDGE_MAX, (t.grudges[y] || 0) + 1);
+  });
+  return G;
+}
+/* How much harder tonight is played. The built-in rivalry is worth its usual
+   amount and history stacks on top, so a divisional rival you have met three
+   times in the playoffs is a genuinely different night. */
+function rivalryHeat(G, a, b) {
+  const base = isRivalry(G, a, b) ? 1 : 0;
+  return base + grudgeBetween(G, a, b) * GRUDGE_PER_SERIES;
+}
 
 const CAP_FLOOR_PCT = 0.76;
 const MIN_SALARY = 0.78;
@@ -686,9 +888,24 @@ const retainedBy = (G, teamId) => (G.retained || []).filter((r) => r.from === te
    that's the half that hits the cap. */
 const retainedOn = (G, pid) => (G.retained || []).filter((r) => r.pid === pid && !r.dead);
 const retainedTraded = (G, teamId) => retainedBy(G, teamId).filter((r) => !r.dead);
+/* A TWO-WAY DEAL costs a fraction of its face value while the player is in the
+ * minors. It is what makes the bottom of an organisation manageable in real
+ * hockey: you can carry fifteen fringe bodies because none of them is charged
+ * against the cap unless he's actually dressed.
+ *
+ * Only fringe contracts qualify — the same bar `canTerminate` uses. A star on a
+ * two-way deal would be an exploit: bury him in the minors, pay nothing, recall
+ * him in April. `p.oneWay` marks a contract as immune, so a player who signs a
+ * real deal can't be buried whatever his salary. Off by default. */
+const TWO_WAY_MINORS_PCT = 0.25;
+function isTwoWay(G, p) {
+  return depthOn(G, "twoWayDeals") && !p.oneWay && p.contract.amt <= TERMINATE_MAX_CAP;
+}
 // What a player actually costs the club that rosters him.
 function effectiveCap(G, p) {
-  return Math.max(0, round1(p.contract.amt - retainedOn(G, p.id).reduce((s, r) => s + r.amt, 0)));
+  const retained = retainedOn(G, p.id).reduce((s, r) => s + r.amt, 0);
+  const face = p.farm && isTwoWay(G, p) ? p.contract.amt * TWO_WAY_MINORS_PCT : p.contract.amt;
+  return Math.max(0, round1(face - retained));
 }
 function capHit(G, teamId) {
   const roster = rosterOf(G, teamId, true).reduce((s, p) => s + effectiveCap(G, p), 0);
@@ -722,6 +939,26 @@ const PAIR_TOI = [0.38, 0.34, 0.28];
 // At home the top line is steered toward the soft pair. Applied as a bend and
 // re-normalised, so it works with whatever split the opposing coach has set.
 const HOME_TOP_LINE_BEND = [0.78, 1.05, 1.28];
+
+/* ------------------------------- home ice ---------------------------------
+ * Last change was the ENTIRE home advantage, on purpose — there was no flat
+ * bonus anywhere. The trouble is it measures out at roughly 50%, against a real
+ * 52–55%: bending which defence pair your top line sees is worth less than a
+ * building full of people is.
+ *
+ * `realistic` adds the rest of it as a shot-rate multiplier, in the same place
+ * `momentum` and `legs` already multiply. `classic` is the engine as it always
+ * was and stays the default, so nothing recalibrates unless you ask. `none`
+ * turns off the last change too, for a neutral-site league.
+ *
+ * HOME_EDGE is SOLVED, not guessed — see the `homeIce` check, which sims two
+ * full seasons and pins the resulting home win rate inside the real band.
+ * ------------------------------------------------------------------------- */
+const HOME_EDGE = 1.045;
+function homeEdge(G, isHome) {
+  if (ruleValue(G, "homeIce") !== "realistic") return 1;
+  return isHome ? HOME_EDGE : 1 / HOME_EDGE;
+}
 
 function autoLines(G, teamId) {
   const r = activeRoster(G, teamId).slice().sort((a, b) => b.ovr - a.ovr);
@@ -1487,14 +1724,18 @@ function simGame(G, homeId, awayId, opts) {
   // ---- rivalry ----
   // A rivalry night is played harder by both sides: more push, more gloves off,
   // and a result the room feels for longer.
-  const rivalNight = isRivalry(G, homeId, awayId);
-  const rivalHeat = rivalNight ? 1.045 : 1;
+  /* Heat is the built-in pairing plus whatever history the two have. With
+     `rivalryGrowth` off `rivalryHeat` returns exactly the old 0-or-1, so this
+     is the same 1.045 it always was. */
+  const heat = rivalryHeat(G, homeId, awayId);
+  const rivalNight = heat > 0;
+  const rivalHeat = 1 + 0.045 * heat;
 
   // ---- fighting ----
   // A fight is five minutes each and a small, real swing in who carries the play
   // afterwards. It never touches the scoreboard directly.
   const momentum = { [homeId]: 1, [awayId]: 1 };
-  if (R.fighting && rnd(G) < (rivalNight ? 0.38 : 0.22)) {
+  if (R.fighting && rnd(G) < (rivalNight ? Math.min(0.55, 0.38 + (heat - 1) * 0.06) : 0.22)) {
     const enforcer = (tid) => {
       const pool = activeRoster(G, tid).filter((p) => p.pos !== "G")
         .sort((x, y) => y.r.phy * roleTrait(y, "fight") - x.r.phy * roleTrait(x, "fight")).slice(0, 5);
@@ -1551,7 +1792,7 @@ function simGame(G, homeId, awayId, opts) {
            scaling them raw handed the home side extra minutes, and hard-coding
            the bent values ignored the opposing coach entirely. */
         let share = oppIce[pi];
-        if (side.isHome && li === 0) {
+        if (side.isHome && li === 0 && ruleValue(G, "homeIce") !== "none") {
           const bent = oppIce.map((v, k) => v * HOME_TOP_LINE_BEND[k]);
           const bt = bent.reduce((a, b) => a + b, 0);
           share = bt > 0 ? bent[pi] / bt : share;
@@ -1574,7 +1815,7 @@ function simGame(G, homeId, awayId, opts) {
         const sys = systemOf(myT), oppSys = systemOf(oppT);
         // Our system pushes our own volume; theirs decides how much they allow.
         const rate = (30.5 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId]
-          * sys.off * oppSys.def * rivalHeat;
+          * sys.off * oppSys.def * rivalHeat * homeEdge(G, side.isHome);
         const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)) * 0.9)));
         resolveShots(G,
           { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },
@@ -1623,7 +1864,9 @@ function simGame(G, homeId, awayId, opts) {
     const pkSets = pkUnits.length ? pkUnits : [side.oppLines.D[0]];
     const ppShare = ppSets.length > 1 ? PP_UNIT_SPLIT : [1];
     const pkShare = pkSets.length > 1 ? PK_UNIT_SPLIT : [1];
-    const ppC = coachOf(G.teams[side.box.teamId]), pkC = coachOf(G.teams[side.opp.teamId]);
+    // Whoever actually runs each unit — the head coach, or the specialist you
+    // hired for the job. `staffOf` reports the head coach when the rule is off.
+    const ppC = staffOf(G, G.teams[side.box.teamId]), pkC = staffOf(G, G.teams[side.opp.teamId]);
     const totalPP = drawn * PP_MIN_PER;
     let firstPk = pkSets[0];
     ppSets.forEach((unit, ui) => {
@@ -1999,6 +2242,8 @@ function simDay(G) {
   processWaivers(G);
   // The affiliates play the mirrored fixtures, so every farm game has a real opponent.
   simFarmDay(G, G.day);
+  // A stint is served in games, so it only ticks for clubs that actually played.
+  tickStints(G, playedToday);
   checkMilestones(G);
   // Clubs ring about listed players every few days rather than instantly.
   if ((G.block || []).length && G.day % 5 === 0) generateOffers(G);
@@ -2245,6 +2490,8 @@ function simSeriesGame(G, s) {
     s.done = true;
     s.winner = s.w[0] >= need ? s.hi : s.lo;
     const loser = s.winner === s.hi ? s.lo : s.hi;
+    // Meeting in the spring is what makes it personal, and it stays that way.
+    addGrudge(G, s.hi, s.lo);
     if (s.winner === G.userTeam) news(G, `You beat ${G.teams[loser].name} ${s.w[0]}–${s.w[1]}.`, "good");
     if (loser === G.userTeam) news(G, `Eliminated by ${G.teams[s.winner].name}.`, "bad");
   }
@@ -2793,7 +3040,13 @@ function finishSeason(G) {
       p.poRuns = (p.poRuns || 0) + 1;
     }
     p.po = null;
-    p.rookie = false;
+    /* Rookie status is about his first season IN THE LEAGUE, not his first
+       season after being drafted. Clearing it unconditionally meant a prospect
+       who spent a year on the farm — which is most of them — arrived in the
+       NHL already ineligible for the Calder, and the award went by default to
+       whoever happened to jump straight from the draft. He stays a rookie until
+       he has actually played a real NHL season. */
+    if (p.rookie && (p.stats.gp || 0) >= rookieGames(G)) p.rookie = false;
     p.age++;
     // A summer is long enough to heal anything and shake off any rust.
     p.inj = 0; p.injDesc = ""; p.fatigue = 0;
@@ -3012,18 +3265,77 @@ function scoutProspect(G, pid) {
   p.scout.fog = Math.max(0.05, p.scout.fog * 0.45);
   return { ok: true, fog: p.scout.fog };
 }
+/* ---------------------------- area scouting -------------------------------
+ * Scouting was one visit, one player. A club's scouting department does not
+ * work that way: you send somebody to a region or to watch goaltenders, and you
+ * come back knowing a bit more about all of them.
+ *
+ * A sweep costs `AREA_SCOUT_COST` visits and cuts fog on everyone matching, but
+ * by much less per player than a personal viewing does — breadth or depth, and
+ * that trade is the decision. Off by default, in which case only the
+ * one-at-a-time path exists.
+ * ------------------------------------------------------------------------- */
+const AREA_SCOUT_COST = 3;
+const AREA_SCOUT_CUT = 0.82;   // vs 0.45 for a personal viewing
+function scoutArea(G, kind, value) {
+  if (!depthOn(G, "areaScouting")) return { ok: false, why: "area scouting is switched off" };
+  if ((G.scoutPoints || 0) < AREA_SCOUT_COST)
+    return { ok: false, why: `a sweep costs ${AREA_SCOUT_COST} visits` };
+  const hit = (G.draftClass || []).map((id) => G.players[id]).filter((p) =>
+    p && p.scout && p.scout.fog > 0.06 && (kind === "junior" ? p.junior === value : p.pos === value));
+  if (!hit.length) return { ok: false, why: "nobody left there to watch" };
+  G.scoutPoints -= AREA_SCOUT_COST;
+  hit.forEach((p) => { p.scout.fog = Math.max(0.05, p.scout.fog * AREA_SCOUT_CUT); });
+  return { ok: true, seen: hit.length };
+}
+
+/* ------------------------------- bust risk --------------------------------
+ * `scout.fog` is how well you have SEEN him. Volatility is how wide the range
+ * of what he might become actually is — two genuinely different kinds of not
+ * knowing, and only the first existed. A safe pick and a boom-or-bust pick can
+ * be equally well scouted and are not the same bet.
+ *
+ * Derived from the player id, so it costs nothing, never drifts, and an
+ * existing prospect has one the moment the rule goes on. It feeds `progress`
+ * as a multiplier on the year-to-year variance — a volatile player's
+ * development swings harder in both directions without changing his mean.
+ * ------------------------------------------------------------------------- */
+function volatilityOf(G, p) {
+  if (!depthOn(G, "prospectRisk") || !p) return 1;
+  // 0.55 (a metronome) to 1.75 (anybody's guess), centred near 1.
+  return 0.55 + hashUnit(p.id * 2654435761 + 17) * 1.2;
+}
+function riskLabel(v) {
+  return v >= 1.45 ? { t: "volatile", c: "text-rose-300" }
+    : v >= 1.15 ? { t: "some risk", c: "text-amber-300" }
+    : v >= 0.85 ? { t: "steady", c: "text-slate-400" }
+    : { t: "safe", c: "text-emerald-300" };
+}
+
 // What a club thinks he's worth: potential first, but only what it can see.
 const draftValue = (p) => scoutedPot(p) * 0.68 + scoutedOvr(p) * 0.32;
 
+/* Eligible players BEYOND the number of picks. The class has always been
+   exactly as big as the draft is long, which means every prospect is taken and
+   "undrafted" can't happen — a real draft has far more eligible players than
+   slots, and the ones nobody calls are the whole point of the rule. Generated
+   only when it's on, so a classic league draws exactly the randomness it
+   always did and every calibrated seed still replays. */
+const UNDRAFTED_POOL = 24;
 function buildDraftClass(G) {
   G.draftClass = [];
-  const total = DRAFT_ROUNDS * G.teams.length;
+  const picks = DRAFT_ROUNDS * G.teams.length;
+  const total = picks + (depthOn(G, "undraftedFA") ? UNDRAFTED_POOL : 0);
   for (let i = 0; i < total; i++) {
-    const p = genPlayer(G, pick(G, ["C", "C", "LW", "RW", "D", "D", "G"]), 42 + (total - i) * 0.055, 18);
+    /* Both curves run off `picks`, not `total`, so the men who would have been
+       in the class anyway are generated exactly as they always were and the
+       extras are simply tacked on below them — turning the rule on deepens the
+       bottom of the board without reshaping the top of it. */
+    const p = genPlayer(G, pick(G, ["C", "C", "LW", "RW", "D", "D", "G"]), 42 + (picks - i) * 0.055, 18);
     p.pot = Math.round(clamp(p.ovr + gauss(G, 18, 7), p.ovr + 2, 99));
     p.rookie = true;
     // The top of the board is public knowledge; nobody has seen the late kids.
-    const known = clamp(0.35 + i / total * 0.75, 0.35, 1);
+    const known = clamp(0.35 + i / picks * 0.75, 0.35, 1);
     p.scout = {
       fog: known,
       bias: clamp(gauss(G, 0, 0.55), -1, 1),
@@ -3203,7 +3515,28 @@ function draftProjection(G) {
 }
 /* Anyone left on the board goes home. Without this every undrafted prospect
    stayed in G.players forever — 100+ dead records a season. */
+/* How many of the undrafted are good enough that somebody would sign them.
+   A real number rather than the whole board: seven rounds already takes 224,
+   and letting all the leftovers through would put a hundred bodies a year into
+   a pool that `capFreeAgentPool` then has to throw away again. */
+const UNDRAFTED_KEEP = 12;
 function closeDraft(G) {
+  /* The best of the men nobody took reach the market instead of vanishing.
+     They keep their scouting fog — you are signing the same uncertainty you
+     passed on, which is the point. */
+  if (depthOn(G, "undraftedFA") && (G.draftClass || []).length) {
+    G.draftClass
+      .map((id) => G.players[id]).filter(Boolean)
+      .sort((a, b) => draftValue(b) - draftValue(a))
+      .slice(0, UNDRAFTED_KEEP)
+      .forEach((p) => {
+        p.teamId = null; p.farm = false;
+        p.undrafted = true;
+        p.contract = { amt: MIN_SALARY, yrs: 1 };
+        if (!G.freeAgents.includes(p.id)) G.freeAgents.push(p.id);
+        G.draftClass = G.draftClass.filter((id) => id !== p.id);
+      });
+  }
   (G.draftClass || []).forEach((id) => { delete G.players[id]; });
   G.draftClass = [];
   // The list is for one draft. Left standing it would hold ids of players who
@@ -3696,6 +4029,10 @@ const WAIVER_EXEMPT_GAMES = 40;
 function nhlGames(p) {
   return (p.season.gp || 0) + (p.career || []).reduce((s, c) => s + (c.gp || 0), 0);
 }
+/* NHL games that use up a season of rookie eligibility. The real rule is 25 in
+   an 82-game year; scaled, so a 41-game league doesn't turn every cup of coffee
+   into a spent rookie season. */
+function rookieGames(G) { return Math.max(1, Math.round(25 * ruleValue(G, "seasonLen") / 82)); }
 function needsWaivers(G, p) {
   return !p.farm && p.age >= 22 && nhlGames(p) >= WAIVER_EXEMPT_GAMES;
 }
@@ -3712,6 +4049,54 @@ function sendDown(G, pid) {
   p.farm = true;
   G.teams[p.teamId].lines = null;
   return { ok: true, waivers: false };
+}
+
+/* ---------------------------- conditioning stints -------------------------
+ * `p.rust` is the ramp back from an injury and it burns off by PLAYING, not by
+ * the calendar — sitting him doesn't start the clock. Which left a real gap:
+ * the honest way to get a man fit is to send him down for a handful of games,
+ * and there was no way to say "for a few games" — only a permanent demotion you
+ * had to remember to reverse.
+ *
+ * A stint is a demotion with a counter on it. He plays farm games, the rust
+ * burns, and `tickStints` brings him back up the moment he's served his games
+ * or run out of rust — whichever comes first, because a stint that outlives its
+ * purpose is just a player you've forgotten about.
+ * ------------------------------------------------------------------------- */
+const STINT_MAX_GAMES = 6;
+function canCondition(G, p) {
+  return !!(depthOn(G, "conditioning") && p && p.teamId != null && !p.retired
+    && !p.farm && p.inj <= 0 && p.rust > 0);
+}
+function startStint(G, pid, games) {
+  const p = G.players[pid];
+  if (!p) return { ok: false, why: "no such player" };
+  if (!depthOn(G, "conditioning")) return { ok: false, why: "conditioning stints are switched off" };
+  if (p.inj > 0) return { ok: false, why: "he's still hurt" };
+  if (!p.rust) return { ok: false, why: "he's already up to speed" };
+  const r = sendDown(G, pid);
+  if (!r.ok) return r;
+  p.stint = clamp(games || STINT_MAX_GAMES, 1, STINT_MAX_GAMES);
+  return { ok: true, games: p.stint };
+}
+/* Called once a day. A stint is counted in GAMES PLAYED, not days — an
+   affiliate that doesn't play doesn't shorten anybody's rehab. */
+function tickStints(G, playedTeams) {
+  playersOf(G).forEach((p) => {
+    if (!p.stint || !p.farm || p.teamId == null) return;
+    if (playedTeams && !playedTeams.has(p.teamId)) return;
+    p.stint--;
+    if (p.stint <= 0 || p.rust <= 0) {
+      p.stint = 0;
+      // Straight back up, provided there's a seat. If there isn't, he waits.
+      if (rosterOf(G, p.teamId).length < ROSTER_MAX) {
+        p.farm = false;
+        G.teams[p.teamId].lines = null;
+        if (p.teamId === G.userTeam) news(G, `${fullName(p)} is back up from his conditioning stint.`, "good");
+      }
+    }
+  });
+  return G;
 }
 
 /* Cutting a player loose. He goes on waivers first — anyone can take him and
@@ -4527,6 +4912,11 @@ function nhlDevRead(p, st) {
  * ------------------------------------------------------------------------- */
 const DEV_WIN_SWING = 0.55;   // best-to-average affiliate, on top of DEV_FARM
 const DEV_WIN_TITLE = 0.35;   // and winning the thing outright
+/* How much of a year's improvement a focus moves off everything else and onto
+   the one rating. Kept modest: at 0.35 a focused summer is clearly visible in
+   the chosen rating without turning a player into a one-trick specialist in
+   two years, and because it is taken from the others the total is unchanged. */
+const DEV_FOCUS_SHARE = 0.35;
 
 /* The room a prospect spent the year in: how good his affiliate was, measured
    against the average one, and whether it won. Returns null when there's no
@@ -4582,13 +4972,31 @@ function progress(G, p) {
      intact here — the table is reset in `startNextSeason` and the title was
      awarded by `runFarmPlayoffs` back at the end of the regular season. */
   delta += devEnvironment(p, p.stats, p.farmSeason, farmRoom(G, p)) * devAgeWeight(p.age);
-  // A coach who develops players is worth real progression on top of that.
+  // A coach who develops players is worth real progression on top of that —
+  // and on the farm it's the affiliate's coach whose job that is.
   if (p.age <= 24 && p.teamId != null) {
-    delta += (coachOf(G.teams[p.teamId]).dev - 55) * 0.035;
+    delta += (devCoachRating(G, p) - 55) * 0.035;
   }
+  /* Summer development. Left alone a player improves evenly across everything,
+     which is why nobody ever specialised — the delta is the same number applied
+     to all nine ratings. A focus concentrates it: `DEV_FOCUS_SHARE` of the
+     year's gain is taken off the other ratings and spent on the chosen one. */
+  const focus = depthOn(G, "devFocus") ? p.devFocus : null;
+  const vol = p.age <= 24 ? volatilityOf(G, p) : 1;
   keys.forEach((k) => {
     if (p.r[k] == null) return;
-    p.r[k] = Math.round(clamp(p.r[k] + delta + gauss(G, 0, 1.1), 15, 99));
+    /* The focus is a REDISTRIBUTION, not a bonus — the year is worth what it
+       was worth, you just choose where it lands. Only while he's still young
+       enough for the environment to matter at all. */
+    let d = delta;
+    if (focus && keys.includes(focus) && devAgeWeight(p.age) > 0 && delta > 0) {
+      const pot = delta * DEV_FOCUS_SHARE * (keys.length - 1);
+      d = k === focus ? delta + pot : delta * (1 - DEV_FOCUS_SHARE);
+    }
+    // A volatile player's year swings harder in both directions. The MEAN is
+    // untouched — only the spread — so bust risk costs nothing on average and
+    // is purely a question of how much variance you're buying.
+    p.r[k] = Math.round(clamp(p.r[k] + d + gauss(G, 0, 1.1 * vol), 15, 99));
   });
   p.ovr = ovrOf(p);
   p.pot = Math.max(p.ovr, p.pot - (p.age > peak ? 2 : 0));
@@ -5384,6 +5792,45 @@ function GoalieReport({ G, p }) {
   );
 }
 
+/* What a young player works on over the summer. It is a REDISTRIBUTION of the
+   year's improvement, not a bonus — `progress` takes the share off his other
+   ratings — so the choice is what kind of player he becomes, not how good.
+   Only offered for your own players who are still young enough for it to
+   matter, and only when the rule is on. */
+function DevFocusPicker({ G, setG, p }) {
+  if (!depthOn(G, "devFocus") || !setG) return null;
+  if (p.teamId !== G.userTeam || p.retired || devAgeWeight(p.age) <= 0) return null;
+  const keys = p.pos === "G" ? GOALIE_KEYS : SKATER_KEYS;
+  const set = (k) => {
+    const g2 = migrate(JSON.parse(JSON.stringify(G)));
+    const q = g2.players[p.id];
+    if (q) q.devFocus = q.devFocus === k ? null : k;
+    setG(g2);
+  };
+  return (
+    <div className={`${card} px-3 py-2`}>
+      <div className="text-xs text-slate-400">
+        Summer focus
+        <span className="text-slate-600"> — where his improvement goes. Taken from the rest, not added on top.</span>
+      </div>
+      <div className="flex flex-wrap gap-1 mt-1.5">
+        {keys.map((k) => (
+          <button key={k} onClick={() => set(k)}
+            className={`text-[10px] uppercase px-1.5 py-0.5 rounded border ${p.devFocus === k
+              ? "bg-sky-500/25 text-sky-200 border-sky-500/50"
+              : "border-[#243250] text-slate-500 hover:text-slate-300"}`}>
+            {k}
+          </button>
+        ))}
+        {p.devFocus ? (
+          <button className="text-[10px] px-1.5 py-0.5 text-slate-500 hover:text-rose-300"
+            onClick={() => set(p.devFocus)}>clear</button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 /* Where he came from, in one line. A founding player gets nothing rather than a
    claim the save can't support — see `draftOrigin`. */
 function DraftLine({ G, p }) {
@@ -5524,7 +5971,7 @@ function DevelopmentNote({ G, p }) {
   );
 }
 
-function PlayerModal({ G, pid, onClose, onGo }) {
+function PlayerModal({ G, setG, pid, onClose, onGo }) {
   const [netView, setNetView] = useState("dots");
   const p = G.players[pid];
   if (!p) return null;
@@ -5564,6 +6011,7 @@ function PlayerModal({ G, pid, onClose, onGo }) {
               tone={p.inj > 0 ? "text-rose-400" : p.rust > 0 ? "text-amber-300" : ""} />
           </div>
           <DraftLine G={G} p={p} />
+          <DevFocusPicker G={G} setG={setG} p={p} />
           <Section title="Ratings"
             right={p.pos !== "G" ? <span className="text-xs text-sky-300">{roleOf(p).label}</span> : null}
             className="p-3 space-y-1.5">
@@ -6550,6 +6998,11 @@ function RosterTab({ G, setG, openPlayer, notify }) {
     notify(r.ok ? `${fullName(p)} placed on waivers for release.` : r.why);
   };
 
+  const condition = (p) => {
+    const r = upd((g) => startStint(g, p.id, STINT_MAX_GAMES));
+    notify(r.ok ? `${fullName(p)} sent down for a ${r.games}-game conditioning stint.` : r.why);
+  };
+
   /* Ending a fringe contract outright. No waivers, so the roster spot is free
      immediately — which is the whole point when the reason you're doing it is
      that you have no room. */
@@ -6600,10 +7053,14 @@ function RosterTab({ G, setG, openPlayer, notify }) {
     { key: "ovr", label: "Ovr", get: (p) => p.ovr, cls: "font-semibold" },
     { key: "pot", label: "Pot", get: (p) => p.pot, cls: "text-slate-400" },
     { key: "gp", label: "GP", get: (p) => p.season.gp },
-    { key: "g", label: "G", get: (p) => (p.pos === "G" ? p.season.w : p.season.g),
-      cell: (p) => (p.pos === "G" ? p.season.w : p.season.g) },
-    { key: "a", label: "A", get: (p) => (p.pos === "G" ? p.season.so : p.season.a),
-      cell: (p) => (p.pos === "G" ? p.season.so : p.season.a) },
+    /* One table, two sports. A goalie's row has always shown WINS under "G" and
+       SHUTOUTS under "A", which reads as though he scored them — the next
+       column along already says "P / SV%" for exactly this reason, and these
+       two were the ones that never got the same treatment. */
+    { key: "g", label: "G / W", get: (p) => (p.pos === "G" ? p.season.w : p.season.g),
+      cell: (p) => <span title={p.pos === "G" ? "wins" : "goals"}>{p.pos === "G" ? p.season.w : p.season.g}</span> },
+    { key: "a", label: "A / SO", get: (p) => (p.pos === "G" ? p.season.so : p.season.a),
+      cell: (p) => <span title={p.pos === "G" ? "shutouts" : "assists"}>{p.pos === "G" ? p.season.so : p.season.a}</span> },
     { key: "p", label: "P / SV%", get: (p) => (p.pos === "G" ? svPct(p.season) * 100 : pts(p.season)),
       cls: "font-semibold",
       cell: (p) => (p.pos === "G" ? (p.season.sa ? (svPct(p.season) * 100).toFixed(1) : "—") : pts(p.season)) },
@@ -6612,10 +7069,22 @@ function RosterTab({ G, setG, openPlayer, notify }) {
     { key: "cap", label: "Cap", get: (p) => effectiveCap(G, p), cell: (p) => `$${effectiveCap(G, p)}M` },
     { key: "yrs", label: "Yrs", get: (p) => p.contract.yrs },
     { key: "act", label: "", get: () => 0, cell: (p) => (
-      <button className="text-xs text-sky-400 hover:underline"
-        onClick={(e) => { e.stopPropagation(); move(p); }}>
-        {p.farm ? "Recall" : "Send down"}
-      </button>
+      <span className="flex gap-2 justify-end whitespace-nowrap">
+        {/* A stint is a demotion with a counter on it — offered only to a man
+            who is fit but not yet sharp, which is the whole case for it. */}
+        {canCondition(G, p) ? (
+          <button className="text-xs text-amber-300 hover:underline"
+            title={`Send him down for up to ${STINT_MAX_GAMES} games to play off ${p.rust} games of rust — he comes back up on his own`}
+            onClick={(e) => { e.stopPropagation(); condition(p); }}>
+            Condition
+          </button>
+        ) : null}
+        {p.stint ? <span className="text-xs text-amber-300" title="on a conditioning stint">{p.stint}g</span> : null}
+        <button className="text-xs text-sky-400 hover:underline"
+          onClick={(e) => { e.stopPropagation(); move(p); }}>
+          {p.farm ? "Recall" : "Send down"}
+        </button>
+      </span>
     ) },
     /* Two different things, and conflating them is what made the bottom of a
        roster impossible to clear. Waivers are for a player somebody else might
@@ -7988,11 +8457,34 @@ function RoomTab({ G, setG, openPlayer, notify }) {
             </select>
             <div className="text-xs text-slate-400 mt-1">{sys.blurb}</div>
           </div>
-          <div className="grid grid-cols-3 gap-2">
-            <Stat label="Power play" value={coach.pp} />
-            <Stat label="Penalty kill" value={coach.pk} />
-            <Stat label="Development" value={coach.dev} sub="prospects" />
-          </div>
+          {/* With a staff these three belong to three different people, and the
+              head coach's own numbers stop being what the engine reads. */}
+          {(() => {
+            const st = staffOf(G, G.teams[G.userTeam]);
+            const farm = farmCoachOf(G, G.teams[G.userTeam]);
+            return (
+              <>
+                <div className="grid grid-cols-3 gap-2">
+                  {STAFF_ROLES.map((r) => (
+                    <Stat key={r.k} label={r.label} value={st[r.k]}
+                      sub={st.head ? "head coach" : (st.people[r.k] || {}).name} />
+                  ))}
+                </div>
+                {!st.head ? (
+                  <div className="text-xs text-slate-500">
+                    Your assistants run these, not the head coach — his own ratings no longer apply.
+                  </div>
+                ) : null}
+                {depthOn(G, "farmCoach") ? (
+                  <div className="text-xs text-slate-400">
+                    <span className="text-slate-500">Affiliate coach </span>
+                    {farm.name} <span className="text-slate-500">· development {farm.dev}</span>
+                    <span className="text-slate-600"> — his is the number that counts for anyone in the minors.</span>
+                  </div>
+                ) : null}
+              </>
+            );
+          })()}
         </div>
       </Section>
 
@@ -8549,6 +9041,30 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
         </button>
       </div>
 
+      {/* Breadth instead of depth: a sweep costs more visits than a viewing and
+          learns less about each man, which is the trade you're making. */}
+      {depthOn(G, "areaScouting") ? (
+        <Section title="Area scouting" className="p-3"
+          right={<span className="text-xs text-slate-500">{AREA_SCOUT_COST} visits a sweep</span>}>
+          <div className="flex flex-wrap gap-1.5 pt-1">
+            {JUNIOR.map((j) => (
+              <button key={j} className={`${btnGhost} text-xs px-2 py-1`}
+                disabled={(G.scoutPoints || 0) < AREA_SCOUT_COST}
+                onClick={() => { const r = upd((g) => scoutArea(g, "junior", j)); notify(r.ok ? `Scouted ${r.seen} out of ${j}.` : r.why); }}>
+                {j}
+              </button>
+            ))}
+            {["C", "LW", "RW", "D", "G"].map((pos) => (
+              <button key={pos} className={`${btnGhost} text-xs px-2 py-1`}
+                disabled={(G.scoutPoints || 0) < AREA_SCOUT_COST}
+                onClick={() => { const r = upd((g) => scoutArea(g, "pos", pos)); notify(r.ok ? `Scouted ${r.seen} ${pos}.` : r.why); }}>
+                {pos}
+              </button>
+            ))}
+          </div>
+        </Section>
+      ) : null}
+
       <Section title={`Board — ${board.length} available`}>
         <SortTable min={1000} rows={board} initial="val" rowKey={(p) => p.id}
           onRow={(p) => openPlayer(p.id)}
@@ -8572,6 +9088,13 @@ function DraftBoard({ G, setG, notify, openPlayer }) {
             { key: "pot", label: "Ceiling", get: (p) => scoutedPot(p), cls: "text-slate-300",
               cell: (p) => <span>{scoutedPot(p)}<span className="text-slate-500 text-xs">
                 {scoutBand(p) ? ` ±${Math.round(scoutBand(p) * 1.3)}` : ""}</span></span> },
+            /* Bust risk sits beside the ceiling on purpose: the ceiling is what
+               he might become, this is how wide that range really is. */
+            ...(depthOn(G, "prospectRisk") ? [{
+              key: "risk", label: "Risk", get: (p) => -volatilityOf(G, p), cls: "text-xs",
+              cell: (p) => { const L = riskLabel(volatilityOf(G, p));
+                return <span className={L.c} title="how far his development can swing, either way">{L.t}</span>; },
+            }] : []),
             { key: "style", label: "Style", get: (p) => p.style || "", cls: "text-slate-400 text-xs" },
             { key: "junior", label: "From", get: (p) => p.junior || "", cls: "text-slate-500 text-xs" },
             { key: "seen", label: "Report", get: (p) => -(p.scout ? p.scout.fog : 0), cls: "text-xs",
@@ -8777,6 +9300,7 @@ function OffseasonTab({ G, setG, notify, openPlayer }) {
 
 function RulesModal({ G, setG, onClose }) {
   const upd = (k, v) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); setRule(g2, k, v); setG(g2); };
+  const preset = depthPreset(G);
   const Row = ({ label, hint, children }) => (
     <div className="flex items-start justify-between gap-3 py-2 border-b border-[#1e2b45]">
       <div><div className="text-sm">{label}</div><div className="text-xs text-slate-500">{hint}</div></div>
@@ -8805,13 +9329,104 @@ function RulesModal({ G, setG, onClose }) {
       <Row label="Cap amount" hint="$M per club"><Sel k="capAmount" opts={[[75, "$75M"], [88, "$88M"], [105, "$105M"]]} /></Row>
       <Row label="Retained salary" hint="keep part of a contract you trade away"><Sel k="retainedSalary" opts={[[true, "On"], [false, "Off"]]} /></Row>
       <Row label="Injuries" hint="how often bodies break"><Sel k="injuries" opts={[["low", "Low"], ["normal", "Normal"], ["high", "High"]]} /></Row>
+
+      {/* The optional systems. Each one defaults to what the game already did,
+          so switching them all off is not a downgrade — it's the original. */}
+      <div className="mt-4 pt-3 border-t border-[#243250]">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <div className="text-sm font-medium">Depth</div>
+            <div className="text-xs text-slate-500">Optional systems. Everything here can be turned off.</div>
+          </div>
+          <div className="flex gap-1.5">
+            {Object.entries(DEPTH_PRESETS).map(([k, p]) => (
+              <button key={k} title={p.blurb}
+                className={`text-xs px-2 py-1 rounded ${preset === k
+                  ? "bg-sky-500/25 text-sky-200 border border-sky-500/50"
+                  : "bg-[#0d1728] border border-[#243250] text-slate-400 hover:text-slate-200"}`}
+                onClick={() => { const g2 = migrate(JSON.parse(JSON.stringify(G))); applyDepthPreset(g2, k); setG(g2); }}>
+                {p.label}
+              </button>
+            ))}
+            <span className={`text-xs px-2 py-1 rounded border ${preset === null
+              ? "bg-slate-500/20 text-slate-300 border-slate-500/40" : "border-transparent text-slate-600"}`}>
+              Custom
+            </span>
+          </div>
+        </div>
+      </div>
+      {["Draft", "Farm", "The game"].map((g) => (
+        <div key={g} className="mt-2">
+          <div className="text-[11px] uppercase tracking-wide text-slate-500 pt-2">{g}</div>
+          {DEPTH_RULES.filter((d) => d.group === g).map((d) => (
+            <Row key={d.k} label={d.label} hint={d.blurb}><Sel k={d.k} opts={d.opts} /></Row>
+          ))}
+        </div>
+      ))}
+
       {G.pendingRules && Object.keys(G.pendingRules).length ? (
         <div className="mt-3 text-xs text-amber-400">
           Staged for next season: {Object.keys(G.pendingRules).join(", ")}
         </div>
       ) : null}
+
+      {/* A career lives in this browser's localStorage and nowhere else, which
+          means a phone and a laptop are two different universes. This is the
+          only way to move one. */}
+      <div className="mt-4 pt-3 border-t border-[#243250]">
+        <div className="text-sm">This career</div>
+        <div className="text-xs text-slate-500 mb-2">
+          A save lives in this browser only. Export it to move it to another device.
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <button className={`${btnGhost} text-xs px-2 py-1`} onClick={() => exportSave(G)}>Export to a file</button>
+          <label className={`${btnGhost} text-xs px-2 py-1 cursor-pointer`}>
+            Import a file
+            <input type="file" accept="application/json,.json" className="hidden"
+              onChange={(e) => {
+                const f = e.target.files && e.target.files[0];
+                if (!f) return;
+                importSave(f, (g, err) => { if (g) { setG(g); onClose(); } else window.alert(err); });
+                e.target.value = "";
+              }} />
+          </label>
+        </div>
+      </div>
     </Modal>
   );
+}
+
+/* Careers in and out as a JSON file. `migrate` runs on the way in, so a save
+   exported from an older build lands in this one properly rather than half
+   upgraded — and a file that isn't a save at all is refused rather than
+   loaded into a blank league. */
+function exportSave(G) {
+  const t = G.teams[G.userTeam];
+  const name = `pocketgm-${(t ? t.abbr : "save").toLowerCase()}-${G.year}.json`;
+  const blob = new Blob([JSON.stringify({ pocketgm: "hockey", v: 1, saved: G.year, data: G })],
+    { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function importSave(file, done) {
+  const fr = new FileReader();
+  fr.onload = () => {
+    try {
+      const raw = JSON.parse(String(fr.result));
+      // Accept both the wrapper and a bare game object.
+      const g = raw && raw.data && raw.pocketgm ? raw.data : raw;
+      if (!g || !Array.isArray(g.teams) || !g.players || g.year == null) {
+        done(null, "That doesn't look like a Pocket GM save.");
+        return;
+      }
+      done(migrate(g), null);
+    } catch (e) { done(null, "That file couldn't be read."); }
+  };
+  fr.onerror = () => done(null, "That file couldn't be read.");
+  fr.readAsText(file);
 }
 
 /* ----------------------------- command palette ---------------------------- */
@@ -9166,7 +9781,7 @@ function App() {
 
       {showRules ? <RulesModal G={G} setG={setG} onClose={() => setShowRules(false)} /> : null}
       {palette ? <CommandPalette G={G} go={go} openPlayer={setPlayer} openTeam={setClub} onClose={() => setPalette(false)} /> : null}
-      {player != null ? <PlayerModal G={G} pid={player} onClose={() => setPlayer(null)} /> : null}
+      {player != null ? <PlayerModal G={G} setG={setG} pid={player} onClose={() => setPlayer(null)} /> : null}
       {club != null ? <ClubModal G={G} teamId={club} onClose={() => setClub(null)} openPlayer={(id) => { setClub(null); setPlayer(id); }} /> : null}
       {showSlots ? (
         <Modal title="Save slots" onClose={() => setShowSlots(false)}>

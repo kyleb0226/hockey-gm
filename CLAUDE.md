@@ -145,6 +145,58 @@ which is what makes line construction and last change matter.
   nobody is credited with** — the team's score goes up and no skater's total does, exactly as in
   real bookkeeping. The harness accounts for this; don't "fix" it by crediting a player.
 
+## Depth rules
+`DEPTH_RULES` is a list of optional systems, each **defaulting to the behaviour the game already
+had**. That default is not politeness — `false` means an existing save loads into the league it was
+saved from, and the thousand-odd harness assertions calibrated against the old engine keep
+measuring the old engine. A depth feature that moved the baseline would have to re-prove every one
+of them. `applyDepthPreset` flips the lot (Classic / Deep); `depthOn(G, k)` is the read.
+
+**The Deep value is spelled out per rule (`d.deep`), not taken as the last option.** Home ice runs
+classic / realistic / none, where the richest setting is the middle one — taking the last option
+made "Deep" silently switch the home advantage off. The `depthRules` check pins this.
+
+- **`twoWayDeals`** — a contract at or under `TERMINATE_MAX_CAP` costs `TWO_WAY_MINORS_PCT` while
+  the player is in the minors. Fringe money only, and `p.oneWay` marks a deal immune: burying a
+  star and recalling him in April is the exploit this bar exists to prevent.
+- **`conditioning`** — `p.rust` burns off by PLAYING, so the honest way to get a man fit was a
+  demotion you had to remember to reverse. A stint is a demotion with a counter; `tickStints`
+  brings him back when the games are served or the rust is gone. Counted in GAMES, so an affiliate
+  that doesn't play doesn't shorten anybody's rehab.
+- **`farmCoach` / `coachStaff`** — one coach object carried `pp`, `pk` and `dev`, so the man
+  running your power play was necessarily the man developing your prospects. Both are **derived
+  from the club id** (`hashUnit`), the same pattern as `personalityOf` and `goalieHole`, and here
+  it is load-bearing: generating them in `newGame` costs `rnd(G)` calls, shifts every subsequent
+  draw and desynchronises every calibrated seed — two realism checks failed on the first attempt
+  for exactly that reason. Derived, they cost no randomness, no save size and no replay.
+- **`homeIce`** — last change was the whole advantage and measures out at ~50% against a real
+  52–55%. `realistic` adds `HOME_EDGE` as a shot-rate multiplier where `momentum` and `legs`
+  already multiply, and it is **solved, not guessed**: 53.4% over 5,248 games. `none` disables the
+  last-change bend too.
+- **`devFocus`** — `progress` applied one delta to all nine ratings, which is why nobody ever
+  specialised. A focus REDISTRIBUTES `DEV_FOCUS_SHARE` of the year's gain; the total is unchanged,
+  so the choice is what kind of player he becomes, not how good.
+- **`prospectRisk`** — `scout.fog` is how well you've SEEN him; volatility is how wide the range of
+  outcomes actually is. Two different kinds of not-knowing, and only the first existed. It scales
+  the variance in `progress` and leaves the mean alone.
+- **`undraftedFA`** — required making the class **bigger than the draft**. It was exactly
+  `DRAFT_ROUNDS × teams`, so every prospect was taken and "undrafted" could not happen. The extra
+  `UNDRAFTED_POOL` is generated only when the rule is on, and both generation curves run off
+  `picks` rather than `total`, so the men who'd have been in the class anyway are drawn exactly as
+  before and the extras are tacked on below them.
+- **`areaScouting`** — a sweep costs `AREA_SCOUT_COST` visits and cuts fog on everyone in a region
+  or position by much less than a personal viewing. Breadth or depth.
+- **`rivalryGrowth`** — `t.grudges` counts playoff meetings and stacks heat on top of the built-in
+  divisional pairing. With the rule off `rivalryHeat` returns the old 0-or-1 exactly.
+
+**Rookie eligibility is a first season IN THE LEAGUE.** `p.rookie` was cleared at every rollover,
+so a prospect who spent a year on the farm — which is most of them — reached the NHL already
+ineligible for the Calder. It now survives until he actually plays `rookieGames(G)` NHL games
+(25, scaled to season length).
+
+**Save export/import** (`exportSave` / `importSave`) is the only way to move a career between
+devices, since a save lives in one browser's localStorage. `migrate` runs on the way in.
+
 ## Rules, difficulty, money
 - **`G.rules` / `RULES_DEFAULT` / `rules(G)`** — always read through `rules(G)` so a save that
   predates a knob still sees a complete object. `setRule(G,k,v)` routes **structural** knobs

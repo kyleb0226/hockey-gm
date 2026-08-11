@@ -64,6 +64,11 @@ const EXPORTS = [
   "seasonBallots", "honoursOf", "HONOUR_MIN_GP",
   "draftOrigin", "farmRoom", "farmRoomBonus", "DEV_WIN_SWING", "DEV_WIN_TITLE",
   "seasonLeaders", "ROSTER_MIN",
+  "DEPTH_RULES", "DEPTH_PRESETS", "applyDepthPreset", "depthPreset", "depthOn",
+  "isTwoWay", "TWO_WAY_MINORS_PCT", "canCondition", "startStint", "tickStints", "STINT_MAX_GAMES",
+  "farmCoachOf", "devCoachRating", "staffOf", "STAFF_ROLES", "hashUnit",
+  "homeEdge", "HOME_EDGE", "rivalryHeat", "grudgeBetween", "addGrudge",
+  "volatilityOf", "scoutArea", "AREA_SCOUT_COST", "UNDRAFTED_KEEP", "DEV_FOCUS_SHARE",
   "canTerminate", "terminateContract", "releaseToPool", "enforceRosterLimits", "enforceCap",
   "capFreeAgentPool", "TERMINATE_MAX_CAP", "DRESS_MIN", "FA_POOL_MAX",
   "playoffBerths", "clinchState", "shadowTable", "inFieldOf", "CLINCH_LABEL",
@@ -1734,7 +1739,19 @@ const CHECKS = {
     ok(seen.includes("draft"), "passes through the draft");
     ok(seen.includes("fa"), "and free agency");
     ok(G.draftClass.length === 0, "the draft class was fully picked");
-    ok(A.playersOf(G).filter((p) => p.rookie === false && p.farm).length > 0, "draftees landed somewhere");
+    ok(A.playersOf(G).filter((p) => p.draft && p.farm).length > 0, "draftees landed somewhere");
+    /* And they are still rookies. Eligibility is about a first season IN THE
+       LEAGUE, not a first season after being drafted — clearing the flag at
+       every rollover meant a prospect who spent a year on the farm reached the
+       NHL already ineligible for the Calder. */
+    const onFarm = A.playersOf(G).filter((p) => p.draft && p.farm && !p.career.length);
+    ok(onFarm.length > 0 && onFarm.every((p) => p.rookie),
+      `a prospect who hasn't played keeps his rookie year (${onFarm.length})`);
+    /* Only drafted players ever carry the flag — the founding league and the
+       depth bodies `fillRosters` signs never had it, so they aren't evidence
+       either way. */
+    ok(A.playersOf(G).filter((p) => p.draft && !p.rookie && A.nhlGames(p) === 0).length === 0,
+      "no draftee loses rookie status without playing a game");
     ok(A.offseasonAction(G) === null, "and once the season starts there's no offseason action left");
     ok(G.teams.every((t) => A.rosterOf(G, t.id).length >= 20), "every club can dress a roster after it");
 
@@ -2744,6 +2761,151 @@ const CHECKS = {
       const top = A.confStandings(S, c).slice(0, 8);
       ok(top.every((t) => SB[t.id] && SB[t.id].in), `conference ${c}'s top eight are all in`);
     });
+  },
+
+  /* The optional systems. Every one of them defaults to the behaviour the game
+     already had, which is what lets the several hundred assertions above go on
+     measuring the engine they were calibrated against. */
+  depthRules(A) {
+    section("Depth rules");
+    const G = A.newGame(0, { seed: 1717, rules: { seasonLen: 41 } });
+    ok(A.depthPreset(G) === "classic", "a new career starts on Classic");
+    ok(A.DEPTH_RULES.every((d) => A.ruleValue(G, d.k) === d.opts[0][0]),
+      `every depth rule defaults to off (${A.DEPTH_RULES.length} of them)`);
+    ok(A.DEPTH_RULES.every((d) => d.label && d.blurb && d.group && d.opts.length >= 2),
+      "and each one is described well enough to render");
+
+    A.applyDepthPreset(G, "deep");
+    ok(A.depthPreset(G) === "deep", "the Deep preset turns them all on");
+    /* Deep must pick the RICHEST setting, not the last one in the list. Home
+       ice runs classic / realistic / none, so taking the last option made Deep
+       switch the home advantage off altogether. */
+    ok(A.ruleValue(G, "homeIce") === "realistic", "and Deep means realistic home ice, not none");
+    ok(A.DEPTH_RULES.every((d) => d.deep !== undefined && d.deep !== d.opts[0][0]),
+      "every rule names a Deep value that differs from its off setting");
+    A.setRule(G, "devFocus", false);
+    ok(A.depthPreset(G) === null, "and changing one reads as Custom");
+    A.applyDepthPreset(G, "classic");
+    ok(A.depthPreset(G) === "classic", "Classic puts them all back");
+
+    /* THE REAL TEST: a full season with everything switched on has to produce a
+       league that still obeys its own invariants. A depth feature that quietly
+       broke the box score would otherwise only show up in a save. */
+    const D = A.newGame(0, { seed: 1717, rules: { seasonLen: 41 } });
+    A.applyDepthPreset(D, "deep");
+    A.applyPendingRules(D);
+    simSeason(A, D); simPlayoffs(A, D);
+    ok(D.teams.every((t) => t.gp === 41), "a full season plays out with every system on");
+    const gf = D.teams.reduce((s, t) => s + t.gf, 0), ga = D.teams.reduce((s, t) => s + t.ga, 0);
+    ok(gf === ga, `and the books still balance (${gf} vs ${ga})`);
+    ok(D.teams.every((t) => t.pts === t.w * 2 + t.otl), "points still reconcile");
+    ok(D.teams.every((t) => A.capHit(D, t.id) <= A.rules(D).capAmount + 0.5), "and nobody is over the cap");
+
+    A.autoDraft(D, false); A.startNextSeason(D);
+    ok(D.phase === "regular", "the rollover completes");
+    // Checked HERE, not before the rollover — contracts expire in finishSeason
+    // and `fillRosters` is what puts a legal side back together.
+    ok(D.teams.every((t) => A.rosterOf(D, t.id).length >= A.ROSTER_MIN), "everybody can still dress a side");
+    ok(D.teams.every((t) => A.rosterOf(D, t.id, true).length <= A.ROSTER_MAX + A.FARM_MAX),
+      "with legal organisations");
+
+    // Two-way deals: cheaper in the minors, and only for fringe money.
+    const T = A.newGame(0, { seed: 55, rules: { seasonLen: 41, twoWayDeals: true } });
+    const fringe = A.rosterOf(T, 0, true).find((p) => p.contract.amt <= A.TERMINATE_MAX_CAP);
+    const star = A.rosterOf(T, 0, true).slice().sort((a, b) => b.contract.amt - a.contract.amt)[0];
+    ok(A.isTwoWay(T, fringe), "a fringe contract can be two-way");
+    ok(!A.isTwoWay(T, star), "a real one cannot — burying a star would be the exploit");
+    fringe.farm = false;
+    const up = A.effectiveCap(T, fringe);
+    fringe.farm = true;
+    const down = A.effectiveCap(T, fringe);
+    ok(down < up, `and it costs less in the minors ($${down}M vs $${up}M)`);
+    ok(Math.abs(down - up * A.TWO_WAY_MINORS_PCT) < 0.06, "by the stated fraction");
+    const off = A.newGame(0, { seed: 55, rules: { seasonLen: 41 } });
+    const f2 = A.rosterOf(off, 0, true).find((p) => p.contract.amt <= A.TERMINATE_MAX_CAP);
+    f2.farm = true;
+    ok(A.effectiveCap(off, f2) === f2.contract.amt, "with the rule off he costs full price");
+
+    // Conditioning: a demotion with a counter, which brings itself back up.
+    const C = A.newGame(0, { seed: 66, rules: { seasonLen: 41, conditioning: true } });
+    const man = A.rosterOf(C, 0).find((p) => p.inj <= 0);
+    ok(!A.canCondition(C, man), "a fit player has no need of a stint");
+    man.rust = 5;
+    ok(A.canCondition(C, man), "a rusty one does");
+    man.inj = 4;
+    ok(!A.canCondition(C, man), "but not while he's still hurt");
+    man.inj = 0;
+    ok(A.startStint(C, man.id, 3).ok && man.farm && man.stint === 3, "a stint sends him down with a counter");
+    A.simDays(C, 30);
+    ok(!man.stint, "which runs out as the affiliate plays");
+    ok(!man.farm, "and brings him straight back up");
+    const noRule = A.newGame(0, { seed: 66, rules: { seasonLen: 41 } });
+    const m2 = A.rosterOf(noRule, 0)[0]; m2.rust = 5;
+    ok(!A.startStint(noRule, m2.id, 3).ok, "with the rule off there are no stints");
+
+    // Staff and the farm coach are DERIVED, so they cost no randomness.
+    const S1 = A.newGame(0, { seed: 99, rules: { seasonLen: 41 } });
+    const S2 = A.newGame(0, { seed: 99, rules: { seasonLen: 41, coachStaff: true, farmCoach: true } });
+    ok(S1.players && Object.keys(S1.players).length === Object.keys(S2.players).length,
+      "turning them on generates no extra players");
+    ok(A.staffOf(S1, S1.teams[3]).head, "with the rule off the head coach does everything");
+    ok(!A.staffOf(S2, S2.teams[3]).head, "with it on the specialists do");
+    ok(A.STAFF_ROLES.every((r) => A.staffOf(S2, S2.teams[3])[r.k] >= 25
+      && A.staffOf(S2, S2.teams[3])[r.k] <= 95), "and every one of them is a real rating");
+    ok(A.staffOf(S2, S2.teams[3]).pp === A.staffOf(S2, S2.teams[3]).pp, "stable across reads");
+    ok(A.farmCoachOf(S2, S2.teams[3]).dev !== undefined, "the affiliate has a coach of its own");
+    ok(A.farmCoachOf(S1, S1.teams[3]).dev === A.coachOf(S1.teams[3]).dev,
+      "and without the rule it is simply the head coach");
+
+    // Home ice: classic is what it always was, realistic is the real band.
+    ok(A.homeEdge(S1, true) === 1 && A.homeEdge(S1, false) === 1, "classic home ice adds nothing");
+    const H = A.newGame(0, { seed: 99, rules: { seasonLen: 41, homeIce: "realistic" } });
+    ok(A.homeEdge(H, true) > 1 && A.homeEdge(H, false) < 1, "realistic cuts both ways");
+    ok(Math.abs(A.homeEdge(H, true) * A.homeEdge(H, false) - 1) < 1e-9,
+      "and gives the home side exactly what it takes from the road side");
+
+    // Rivalries that build.
+    const R = A.newGame(0, { seed: 99, rules: { seasonLen: 41, rivalryGrowth: true } });
+    const [a, b] = [0, 5];
+    ok(A.grudgeBetween(R, a, b) === 0, "two strangers have no history");
+    A.addGrudge(R, a, b);
+    ok(A.grudgeBetween(R, a, b) === 1 && A.grudgeBetween(R, b, a) === 1, "a series makes it mutual");
+    ok(A.rivalryHeat(R, a, b) > A.rivalryHeat(S1, a, b), "and a meeting is played harder than it would be");
+    for (let i = 0; i < 9; i++) A.addGrudge(R, a, b);
+    ok(A.grudgeBetween(R, a, b) <= 3, "it doesn't run away with itself");
+    ok(A.grudgeBetween(S1, a, b) === 0, "and with the rule off nobody holds a grudge");
+
+    // Bust risk: spread without a change of mean.
+    const V = A.newGame(0, { seed: 99, rules: { seasonLen: 41, prospectRisk: true } });
+    const vals = A.playersOf(V).slice(0, 300).map((p) => A.volatilityOf(V, p));
+    ok(Math.min(...vals) < 0.8 && Math.max(...vals) > 1.4, "prospects differ in how safe they are");
+    const mean = vals.reduce((s, x) => s + x, 0) / vals.length;
+    ok(Math.abs(mean - 1.15) < 0.12, `and it is centred (${mean.toFixed(2)})`);
+    ok(A.volatilityOf(S1, A.playersOf(S1)[0]) === 1, "with the rule off everybody is average");
+    const p0 = A.playersOf(V)[0];
+    ok(A.volatilityOf(V, p0) === A.volatilityOf(V, p0), "and a player's risk never changes");
+
+    // Area scouting: broad and shallow, and it costs more.
+    const Sc = A.newGame(0, { seed: 99, rules: { seasonLen: 41, areaScouting: true } });
+    simSeason(A, Sc); simPlayoffs(A, Sc);
+    const before = Sc.scoutPoints;
+    const sweep = A.scoutArea(Sc, "pos", "G");
+    ok(sweep.ok && sweep.seen > 5, `a sweep covers a whole position (${sweep.seen})`);
+    ok(Sc.scoutPoints === before - A.AREA_SCOUT_COST, "and costs several visits");
+    const solo = A.newGame(0, { seed: 99, rules: { seasonLen: 41 } });
+    simSeason(A, solo); simPlayoffs(A, solo);
+    ok(!A.scoutArea(solo, "pos", "G").ok, "with the rule off there are no sweeps");
+
+    // Undrafted free agents.
+    const U = A.newGame(0, { seed: 99, rules: { seasonLen: 41, undraftedFA: true } });
+    simSeason(A, U); simPlayoffs(A, U);
+    const poolBefore = U.freeAgents.length;
+    A.autoDraft(U, false);
+    const fresh = U.freeAgents.filter((id) => U.players[id] && U.players[id].undrafted);
+    ok(fresh.length > 0 && fresh.length <= A.UNDRAFTED_KEEP,
+      `the best of the undrafted reach the market (${fresh.length})`);
+    ok(U.freeAgents.length > poolBefore, "which is a bigger pool than before");
+    ok(fresh.every((id) => U.players[id].teamId == null), "and none of them belongs to anybody");
   },
 
   /* Who led each category, year by year. The book kept only the best ever, so a
