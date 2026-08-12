@@ -195,6 +195,24 @@ could take away, and a twenty-season career had nothing to show for itself but a
   job back whenever he likes. That is the whole difference between owning the place and working
   there.
 
+## Bonus money
+Behind the `contractBonuses` rule. A contract was an amount and a term, and both of those are just
+cap. The two shapes that matter are the two that cost a club something other than money.
+
+- **Signing bonus** (`p.contract.sb`, a fraction of the deal). He takes a smaller cap hit for it —
+  guaranteed beats promised — and `buyoutCost` applies its third to the SALARY only, with the bonus
+  owed in full. Cheaper today, welded to you for ever. That is the whole trade.
+- **Performance bonus** (`p.contract.pb` = `{amt, kind, need}`). He takes less base now and gets
+  paid if he does the thing. Restricted by `canPerfBonus` to players 23 and under or 35 and over,
+  because a league where everyone defers salary into bonuses is a league with no cap. `settleBonuses`
+  runs at the top of `finishSeason` — before `p.season` is blanked, since that line IS the test —
+  and anything the club can't absorb becomes a one-year OVERAGE row in `G.retained`.
+- **`aiBonusTerms` derives from the player id**, never `rnd(G)`, so switching the rule on doesn't
+  shift a single downstream draw and every calibrated seed replays unchanged.
+- UI: `ContractTerms` on the free-agency screen (each row hidden unless its rule is on and the
+  player is someone it can apply to), a standing signing-bonus offer above the extension list that
+  re-quotes every button, and `BonusNote` in the player bio for the chase.
+
 ## The room settles itself
 **`aiAnswerDemands`.** Demands went league-wide and only YOU could resolve one, so an AI club's
 unhappy player stayed unhappy for ever — measured over ten seasons the count climbed 180 → 906,

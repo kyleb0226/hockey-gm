@@ -82,6 +82,9 @@ const EXPORTS = [
   "teamValue", "gmLegacy", "gmSalaryFor", "gmState", "payGm", "myShare", "isMajorityOwner",
   "sellWillingness", "ownershipMarket", "buyStake", "sellStake", "ownerVoteChance",
   "standDown", "takeBackTheJob", "draftPar",
+  "bonusesOn", "canPerfBonus", "sbOf", "pbOf", "perfBonusTarget", "perfBonusProgress",
+  "settleBonuses", "applyBonusTerms", "aiBonusTerms",
+  "SB_MAX", "SB_DISCOUNT", "PB_MAX", "PB_DISCOUNT", "PB_YOUNG", "PB_OLD",
   "keepScore", "deferPicksIfFull", "archiveDraft", "careerTotals", "updateCareerRecords",
   "CAREER_RECORD_DEFS", "recordGmSeason", "gmCareer", "retirementChance",
   "NEVER_MADE_IT_AGE", "FA_POOL_HARD",
@@ -3371,6 +3374,82 @@ const CHECKS = {
     const sell = A.sellStake(M, buy.teamId, 0.5);
     ok(sell.ok && sell.price > 0, `you can sell up ($${sell.price}M)`);
     ok(Math.abs(A.myShare(M, buy.teamId) - 0.5) < 0.02, "and keep the rest");
+  },
+
+  /* The two contract shapes that cost a club something other than money. */
+  bonuses(A) {
+    section("Guaranteed money");
+    const off = A.newGame(0, { seed: 4242, rules: { seasonLen: 41 } });
+    const fa0 = off.freeAgents.map((id) => off.players[id]).sort((a, b) => b.ovr - a.ovr)[0];
+    ok(!A.bonusesOn(off), "off by default");
+    const plainOff = A.askingPrice(off, fa0.id, 0, 4);
+    ok(A.askingPrice(off, fa0.id, 0, 4, { sb: 0.6 }) === plainOff,
+      "and with the rule off a bonus buys you nothing");
+
+    const G = A.newGame(0, { seed: 4242, rules: { seasonLen: 41, contractBonuses: true } });
+    const fa = G.freeAgents.map((id) => G.players[id]).sort((a, b) => b.ovr - a.ovr)[0];
+    const plain = A.askingPrice(G, fa.id, 0, 4);
+    const loaded = A.askingPrice(G, fa.id, 0, 4, { sb: A.SB_MAX });
+    ok(loaded < plain, `guaranteed money comes cheaper ($${loaded}M vs $${plain}M)`);
+    const half = A.askingPrice(G, fa.id, 0, 4, { sb: 0.3 });
+    ok(half > loaded && half < plain, `and half a bonus is half the discount ($${half}M)`);
+    ok(plain - loaded < plain * (A.SB_DISCOUNT + 0.01), "the discount is bounded");
+
+    section("What a bonus costs you later");
+    A.signPlayer(G, fa.id, 0, loaded, 4, { sb: A.SB_MAX });
+    ok(A.sbOf(G.players[fa.id]) === A.SB_MAX, "the term is on the contract");
+    const bonusBuyout = A.buyoutCost(G, fa.id);
+    // The same deal without the bonus, priced the same, to isolate the term.
+    const C = A.newGame(0, { seed: 4242, rules: { seasonLen: 41, contractBonuses: true } });
+    A.signPlayer(C, fa.id, 0, loaded, 4);
+    const plainBuyout = A.buyoutCost(C, fa.id);
+    ok(bonusBuyout.total > plainBuyout.total,
+      `bonus money survives a buyout ($${bonusBuyout.total}M vs $${plainBuyout.total}M)`);
+    ok(bonusBuyout.total > loaded * 4 * A.SB_MAX * 0.99, "and survives it in full");
+    ok(plainBuyout.total <= loaded * 4 * A.BUYOUT_PCT + 0.1, "an ordinary deal is bought out at a third");
+
+    section("Playing for it");
+    const Y = A.newGame(0, { seed: 4242, rules: { seasonLen: 41, contractBonuses: true } });
+    const kid = A.playersOf(Y).filter((p) => p.age <= A.PB_YOUNG && p.pos !== "G")
+      .sort((a, b) => b.ovr - a.ovr)[0];
+    const vet = A.playersOf(Y).filter((p) => p.age >= A.PB_OLD)[0];
+    const mid = A.playersOf(Y).filter((p) => p.age > A.PB_YOUNG && p.age < A.PB_OLD)[0];
+    ok(A.canPerfBonus(Y, kid), "a kid can play for a bonus");
+    ok(!vet || A.canPerfBonus(Y, vet), "so can a man of 35");
+    ok(!A.canPerfBonus(Y, mid), "the ones in between cannot — that would be a cap with a hole in it");
+    const base = A.askingPrice(Y, kid.id, 0, 3);
+    const deferred = A.askingPrice(Y, kid.id, 0, 3, { pb: A.PB_MAX });
+    ok(deferred < base, `he'll take less base for it ($${deferred}M vs $${base}M)`);
+    ok(A.askingPrice(Y, mid.id, 0, 3, { pb: A.PB_MAX }) === A.askingPrice(Y, mid.id, 0, 3),
+      "and offering one to someone ineligible changes nothing");
+
+    A.signPlayer(Y, kid.id, kid.teamId == null ? 0 : kid.teamId, deferred, 3, { pb: A.PB_MAX });
+    const target = A.pbOf(Y.players[kid.id]);
+    ok(target && target.amt === A.PB_MAX && target.need > 0, `a real target (${target.need} ${target.kind})`);
+    // Not reached: nothing is charged.
+    Y.players[kid.id].season = { gp: 40, g: 0, a: 0 };
+    const before = (Y.retained || []).length;
+    A.settleBonuses(Y);
+    ok((Y.retained || []).length === before, "a bonus he didn't earn costs nothing");
+    // Reached, with no room to absorb it: it lands on next year.
+    Y.players[kid.id].season = { gp: 40, g: target.need, a: 0 };
+    const t = Y.teams[Y.players[kid.id].teamId];
+    A.setRule(Y, "capAmount", A.capHit(Y, t.id));
+    A.settleBonuses(Y);
+    const over = (Y.retained || []).filter((r) => r.overage);
+    ok(over.length === 1, "an earned bonus a club can't absorb becomes an overage");
+    ok(over[0].yrs === 1 && over[0].amt > 0, `charged to next season ($${over[0].amt}M)`);
+
+    section("The rest of the league");
+    ok(A.aiBonusTerms(off, fa0, 5) === undefined, "with the rule off no AI club offers one");
+    const someone = A.playersOf(G).filter((p) => p.ovr >= 70);
+    const offered = someone.filter((p) => A.aiBonusTerms(G, p, 5));
+    ok(offered.length > 0 && offered.length < someone.length,
+      `some AI deals carry bonus money, not all (${offered.length}/${someone.length})`);
+    ok(!A.aiBonusTerms(G, someone[0], 1), "never on a one-year deal");
+    const one = someone[0];
+    ok(JSON.stringify(A.aiBonusTerms(G, one, 5)) === JSON.stringify(A.aiBonusTerms(G, one, 5)),
+      "and the same player always gets the same offer — derived, never drawn");
   },
 
   /* The population, and the history it used to throw away. A ten-season audit

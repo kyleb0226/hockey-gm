@@ -162,6 +162,7 @@ const RULES_DEFAULT = {
   demands: false,          // players ask for minutes, or ask out
   coachStaff: false,       // hire assistants rather than one do-everything coach
   rivalryGrowth: false,    // rivalries harden when clubs meet in the spring
+  contractBonuses: false,  // signing bonuses and performance bonuses on deals
   pickProtection: false,   // traded picks can carry protections
   ownership: false,        // you are paid, and you can buy in
 };
@@ -216,6 +217,9 @@ const DEPTH_RULES = [
     opts: [[false, "Off"], [true, "On"]] },
   { k: "rivalryGrowth", deep: true, group: "The game", label: "Rivalries build",
     blurb: "Meeting in the playoffs makes it personal, and it stays that way.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "contractBonuses", deep: true, group: "The game", label: "Bonuses",
+    blurb: "Pay a man up front and he'll take less — but you can never buy that part back. Kids and old men can also play for bonuses.",
     opts: [[false, "Off"], [true, "On"]] },
 ];
 
@@ -1596,6 +1600,90 @@ function effectiveCap(G, p) {
   const face = p.farm && isTwoWay(G, p) ? p.contract.amt * TWO_WAY_MINORS_PCT : p.contract.amt;
   return Math.max(0, round1(face - retained));
 }
+/* ------------------------------- bonus money ------------------------------
+ * A contract was an amount and a term, and both of those are cap. Real deals
+ * are not shaped like that, and the two shapes that matter are the two that
+ * cost the club something other than money.
+ *
+ * A SIGNING BONUS is cash handed over on the day he signs. He'll take a smaller
+ * deal for it, because guaranteed beats promised — but the club can never buy
+ * that part back. A buyout applies its third to the SALARY only; the bonus is
+ * owed in full. So loading a deal with bonus makes it cheaper today and welds
+ * you to it, which is exactly the bargain a real agent is offering you.
+ *
+ * A PERFORMANCE BONUS is the opposite trade: he takes less base now and gets
+ * paid if he does the thing. It's restricted to the two groups who can really
+ * sign one — kids on their first deal and men of 35 and up — because a league
+ * where everybody defers salary into bonuses is a league with no cap at all.
+ * When one is earned it's charged against the club's remaining space, and
+ * anything over that becomes an OVERAGE on next season's books.
+ * ------------------------------------------------------------------------- */
+const SB_MAX = 0.6;                 // most of a deal, but never all of it
+const SB_DISCOUNT = 0.1;            // what a fully-loaded deal saves you
+const PB_MAX = 1.5;                 // $M of bonus on one deal
+const PB_DISCOUNT = 0.55;           // how much of it comes off the base
+const PB_YOUNG = 23, PB_OLD = 35;
+const bonusesOn = (G) => depthOn(G, "contractBonuses");
+function canPerfBonus(G, p) {
+  return bonusesOn(G) && !!p && (p.age <= PB_YOUNG || p.age >= PB_OLD);
+}
+const sbOf = (p) => clamp((p.contract && p.contract.sb) || 0, 0, SB_MAX);
+const pbOf = (p) => (p.contract && p.contract.pb) || null;
+/* What he has to do to earn it. Read off the contract so a deal signed under
+   one set of rules keeps its own terms for ever. */
+function perfBonusTarget(G, p, amt) {
+  if (p.pos === "G") return { kind: "wins", need: Math.round(18 + amt * 6), amt: round1(amt) };
+  const games = ruleValue(G, "seasonLen");
+  const base = p.pos === "D" ? 0.28 : 0.5;
+  return { kind: "points", need: Math.round(games * base + amt * 8), amt: round1(amt) };
+}
+function perfBonusProgress(G, p) {
+  const b = pbOf(p);
+  if (!b) return null;
+  const s = p.season || {};
+  const at = b.kind === "wins" ? (s.w || 0) : (s.g || 0) + (s.a || 0);
+  return { ...b, at, met: at >= b.need };
+}
+/* Season's end. Earned bonus comes out of what room the club has left, and the
+   rest lands on next year — the one part of the cap you cannot plan around. */
+/* What another club would put on the table. Derived from the player's id rather
+   than drawn, so switching bonuses on never shifts a single downstream `rnd`
+   and a calibrated seed replays exactly as before. Long deals for good players
+   are the ones that carry bonus money, which is also true in life. */
+function aiBonusTerms(G, p, yrs) {
+  if (!bonusesOn(G) || !p) return undefined;
+  const h = hashUnit(p.id * 31 + yrs);
+  if (yrs < 3 || p.ovr < 70 || h > 0.45) return undefined;
+  return { sb: h < 0.15 ? 0.6 : h < 0.3 ? 0.4 : 0.25 };
+}
+/* Stamp the agreed terms onto a contract. Silent when the rule is off, so every
+   signing path can call it without caring. */
+function applyBonusTerms(G, p, amt, opts) {
+  delete p.contract.sb; delete p.contract.pb;
+  if (!bonusesOn(G) || !opts) return p.contract;
+  const sb = clamp(+opts.sb || 0, 0, SB_MAX);
+  if (sb > 0) p.contract.sb = Math.round(sb * 100) / 100;
+  const pb = clamp(+opts.pb || 0, 0, PB_MAX);
+  if (pb > 0 && canPerfBonus(G, p)) p.contract.pb = perfBonusTarget(G, p, pb);
+  return p.contract;
+}
+function settleBonuses(G) {
+  if (!bonusesOn(G)) return G;
+  G.retained = G.retained || [];
+  playersOf(G).forEach((p) => {
+    const b = perfBonusProgress(G, p);
+    if (!b || !b.met || p.teamId == null) return;
+    const space = Math.max(0, capSpace(G, p.teamId));
+    const over = round1(Math.max(0, b.amt - space));
+    if (over > 0) G.retained.push({ pid: p.id, from: p.teamId, amt: over, yrs: 1, dead: true, overage: true });
+    if (p.teamId === G.userTeam) {
+      news(G, `${fullName(p)} earned his $${b.amt}M bonus`
+        + (over > 0 ? ` — $${over}M of it carries onto next year's cap.` : "."), over > 0 ? "bad" : "good");
+    }
+  });
+  return G;
+}
+
 /* ------------------------------------ LTIR --------------------------------
  * `rollInjuries` has always produced long absences and nothing ever did
  * anything with them, so a club that lost a star for half a season carried his
@@ -3761,6 +3849,8 @@ function backfillAwards(G) {
 function finishSeason(G) {
   G.phase = "offseason";
   G.offseasonStep = "review";
+  // Before `p.season` is blanked further down — that line IS the bonus test.
+  settleBonuses(G);
   const champ = G.playoffs && G.playoffs.champion;
   G.history.push({
     year: G.year,
@@ -3922,6 +4012,7 @@ function finishSeason(G) {
         const offer = aiExtensionOffer(G, p);
         if (offer && rnd(G) < offer.want) {
           p.contract = { amt: offer.ask, yrs: offer.yrs };
+          applyBonusTerms(G, p, offer.ask, aiBonusTerms(G, p, offer.yrs));
           p.ntc = eligibleForNtc(p) && offer.yrs >= 3 && rnd(G) < 0.55;
           p.ntcWaived = false;
           return;
@@ -4682,6 +4773,7 @@ function signPlayer(G, pid, teamId, amt, yrs, opts) {
   if (rosterOf(G, teamId, true).length >= ROSTER_MAX + FARM_MAX) return { ok: false, why: "roster full" };
   p.teamId = teamId; p.farm = rosterOf(G, teamId).length >= ROSTER_MAX;
   p.contract = { amt: round1(amt), yrs };
+  applyBonusTerms(G, p, amt, opts);
   /* A clause you AGREED to is not a coin flip. When the deal was negotiated
      with one on the table he gets it; otherwise it falls back to the old roll,
      which is what every AI signing still does. */
@@ -4729,9 +4821,10 @@ function aiFreeAgency(G) {
       const best = cands.sort((a, b) => b.ovr - a.ovr)[0];
       if (!best) continue;
       const yrs = ri(G, 1, 5);
-      const ask = askingPrice(G, best.id, tid, yrs);
+      const opts = aiBonusTerms(G, best, yrs);
+      const ask = askingPrice(G, best.id, tid, yrs, opts);
       if (rules(G).hardCap && capHit(G, tid) + ask > rules(G).capAmount) continue;
-      signPlayer(G, best.id, tid, ask, yrs);
+      signPlayer(G, best.id, tid, ask, yrs, opts);
       signedAny = true;
     }
     if (!signedAny) break;
@@ -4838,7 +4931,11 @@ function buyoutCost(G, pid) {
   const yrs = Math.max(1, p.contract.yrs);
   const owed = p.contract.amt * yrs;
   const term = yrs * BUYOUT_TERM_MULT;
-  return { perYear: round1((owed * BUYOUT_PCT) / term), yrs: term, total: round1(owed * BUYOUT_PCT) };
+  /* Signing-bonus money has already been promised in cash and survives the
+     buyout whole — the reason a bonus-heavy deal is the one you can't escape. */
+  const sb = bonusesOn(G) ? sbOf(p) : 0;
+  const total = owed * sb + owed * (1 - sb) * BUYOUT_PCT;
+  return { perYear: round1(total / term), yrs: term, total: round1(total), sb };
 }
 function canBuyOut(G, p) {
   return !!(p && p.teamId != null && !p.retired && p.contract.yrs >= 1
@@ -5711,6 +5808,7 @@ function extendPlayer(G, pid, amt, yrs, opts) {
     return { ok: false, why: "no cap space for that" };
   const added = yrs - p.contract.yrs;
   p.contract = { amt: round1(amt), yrs };
+  applyBonusTerms(G, p, amt, opts);
   if (opts && opts.ntc !== undefined) p.ntc = !!opts.ntc && valuesNtc(G, p) && yrs >= 2;
   else p.ntc = eligibleForNtc(p) && yrs >= 3 && rnd(G) < 0.55;
   p.ntcWaived = false;
@@ -5841,8 +5939,20 @@ function valuesNtc(G, p) { return eligibleForNtc(p); }
 function termAdjust(G, p, opts) {
   let m = 1;
   if (opts && opts.ntc && valuesNtc(G, p)) m *= 1 - NTC_DISCOUNT;
+  /* Guaranteed money is worth more to him than the same money promised, so a
+     bonus-heavy deal comes off the cap hit — proportionally, because half a
+     signing bonus is half the security. */
+  if (bonusesOn(G) && opts && opts.sb > 0)
+    m *= 1 - SB_DISCOUNT * (clamp(+opts.sb, 0, SB_MAX) / SB_MAX);
   if (p.demand && p.demand.kind === "trade") m *= 1 + UNHAPPY_PREMIUM;
   return m;
+}
+/* A performance bonus is money OFF the base, not a multiplier on it — he is
+   deferring a fixed sum, not discounting his whole worth. Subtracted after the
+   asking price is computed so it can't interact with anything else. */
+function bonusDeferral(G, p, opts) {
+  if (!bonusesOn(G) || !opts || !(opts.pb > 0) || !canPerfBonus(G, p)) return 0;
+  return round1(clamp(+opts.pb, 0, PB_MAX) * PB_DISCOUNT);
 }
 
 function askingPrice(G, pid, teamId, yrs, opts) {
@@ -5859,7 +5969,7 @@ function askingPrice(G, pid, teamId, yrs, opts) {
     want *= 1 + (pos / G.teams.length - 0.5) * 0.16;
     want *= 1 - (t.cupWins > 0 ? 0.03 : 0);
   }
-  return round1(Math.max(MIN_SALARY, want));
+  return round1(Math.max(MIN_SALARY, want - bonusDeferral(G, p, opts)));
 }
 function negotiate(G, pid, teamId, amt, yrs, opts) {
   const p = G.players[pid];
@@ -6705,6 +6815,69 @@ function Section({ title, right, children, className }) {
   );
 }
 
+/* ------------------------------ the fine print ----------------------------
+ * Everything on a contract that isn't the salary and the term. Each row is
+ * hidden unless the rule behind it is on and the player is someone it can
+ * actually apply to, so on Classic settings this whole strip is invisible and
+ * the negotiation screen looks exactly as it always did.
+ * ------------------------------------------------------------------------- */
+function ContractTerms({ G, p, yrs, ntc, sb, pb, setNtc, setSb, setPb }) {
+  const wantsNtc = valuesNtc(G, p) && yrs >= 2;
+  const bonuses = bonusesOn(G);
+  const perf = canPerfBonus(G, p);
+  if (!wantsNtc && !bonuses) return null;
+  const target = perf && pb > 0 ? perfBonusTarget(G, p, pb) : null;
+  return (
+    <div className="rounded-lg bg-[#0d1626] border border-[#1e2b45] p-3 space-y-2">
+      <div className="text-xs uppercase tracking-wide text-slate-500">Terms</div>
+      {wantsNtc ? (
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input type="checkbox" checked={ntc} onChange={(e) => setNtc(e.target.checked)} />
+          <span>No-trade clause</span>
+          <span className="text-slate-500 text-xs">he'll come cheaper for it, and you can't move him</span>
+        </label>
+      ) : null}
+      {bonuses ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="w-32 shrink-0">Signing bonus</span>
+          {[0, 0.25, 0.4, 0.6].map((v) => (
+            <button key={v} className={`px-2 py-0.5 rounded text-xs ${sb === v ? "bg-sky-600 text-white" : "bg-[#16233c] text-slate-300"}`}
+              onClick={() => setSb(v)}>{v === 0 ? "None" : `${Math.round(v * 100)}%`}</button>
+          ))}
+          <span className="text-slate-500 text-xs">
+            {sb > 0 ? "paid up front — a buyout can't touch it" : "no money guaranteed up front"}
+          </span>
+        </div>
+      ) : null}
+      {bonuses && perf ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="w-32 shrink-0">Performance</span>
+          {[0, 0.5, 1, 1.5].map((v) => (
+            <button key={v} className={`px-2 py-0.5 rounded text-xs ${pb === v ? "bg-sky-600 text-white" : "bg-[#16233c] text-slate-300"}`}
+              onClick={() => setPb(v)}>{v === 0 ? "None" : `$${v}M`}</button>
+          ))}
+          <span className="text-slate-500 text-xs">
+            {target ? `for ${target.need} ${target.kind} — charged if he gets there` : "no bonus on the deal"}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+/* What to append to "Signed him for $4M × 3" so the news line says what was
+   actually agreed rather than just the headline number. */
+function contractTermsLabel(G, p) {
+  if (!p || !p.contract) return "";
+  const bits = [];
+  if (hasNtc(p)) bits.push("no-trade");
+  if (bonusesOn(G)) {
+    if (sbOf(p) > 0) bits.push(`${Math.round(sbOf(p) * 100)}% signing bonus`);
+    const b = pbOf(p);
+    if (b) bits.push(`$${b.amt}M at ${b.need} ${b.kind}`);
+  }
+  return bits.length ? ` (${bits.join(", ")})` : "";
+}
+
 /* One sortable table used everywhere, so every column header in the game sorts
    without each screen reinventing it. */
 function SortTable({ cols, rows, initial, asc, rowKey, rowCls, onRow, min, empty }) {
@@ -7360,6 +7533,38 @@ function DevFocusPicker({ G, setG, p }) {
 
 /* Where he came from, in one line. A founding player gets nothing rather than a
    claim the save can't support — see `draftOrigin`. */
+/* What he's playing for on top of the salary. Shows the chase while the season
+   is live, which is the only time the number means anything. */
+function BonusNote({ G, p }) {
+  if (!bonusesOn(G)) return null;
+  const b = perfBonusProgress(G, p);
+  const sb = sbOf(p);
+  if (!b && !sb) return null;
+  return (
+    <div className={`${card} px-3 py-2 text-xs space-y-1`}>
+      {sb > 0 ? (
+        <div>
+          <span className="text-slate-500">Signing bonus </span>
+          <span className="text-slate-200">{Math.round(sb * 100)}% of the deal</span>
+          <span className="text-slate-500"> — paid, and beyond a buyout's reach</span>
+        </div>
+      ) : null}
+      {b ? (
+        <div className="flex items-center gap-2">
+          <span className="text-slate-500">Bonus </span>
+          <span className={b.met ? "text-emerald-300 font-medium" : "text-slate-200"}>${b.amt}M</span>
+          <span className="text-slate-400">at {b.need} {b.kind}</span>
+          <span className="flex-1 h-1.5 rounded bg-[#16233c] overflow-hidden min-w-[60px]">
+            <span className={`block h-full ${b.met ? "bg-emerald-500" : "bg-sky-600"}`}
+              style={{ width: `${Math.min(100, (b.at / Math.max(1, b.need)) * 100)}%` }} />
+          </span>
+          <span className={b.met ? "text-emerald-300" : "text-slate-400"}>{b.at}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function DraftLine({ G, p }) {
   const d = draftOrigin(G, p);
   if (!d) return null;
@@ -7537,7 +7742,9 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
           <div className="grid grid-cols-2 gap-2">
             <Stat label="Overall" value={p.ovr} sub={`ceiling ${p.pot}`} />
             <Stat label="Age" value={p.age} sub={t ? `${t.city} ${t.name}` : "free agent"} />
-            <Stat label="Cap hit" value={`$${effectiveCap(G, p)}M`} sub={`${p.contract.yrs} yr${p.contract.yrs === 1 ? "" : "s"} left`} />
+            <Stat label="Cap hit" value={`$${effectiveCap(G, p)}M`}
+              sub={`${p.contract.yrs} yr${p.contract.yrs === 1 ? "" : "s"} left`
+                + (bonusesOn(G) && sbOf(p) > 0 ? ` · ${Math.round(sbOf(p) * 100)}% bonus` : "")} />
             <Stat label="Condition" value={`${Math.round(100 - p.fatigue)}%`}
               sub={p.inj > 0 ? `${p.injDesc}, ${p.inj} games`
                 : p.rust > 0 ? `back, ${p.rust} games to full sharpness`
@@ -7545,6 +7752,7 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
               tone={p.inj > 0 ? "text-rose-400" : p.rust > 0 ? "text-amber-300" : ""} />
           </div>
           <DraftLine G={G} p={p} />
+          <BonusNote G={G} p={p} />
           {/* A demand is the only thing in the game that makes character cost
               something, so it belongs at the top of his page, not in the wire. */}
           <DemandNote G={G} setG={setG} p={p} />
@@ -8549,6 +8757,8 @@ function FarmLeaguePanel({ G, openPlayer }) {
 
 function RosterTab({ G, setG, openPlayer, notify }) {
   const [showFarm, setShowFarm] = useState(false);
+  // The signing bonus offered on every extension below, until you change it.
+  const [exSb, setExSb] = useState(0);
   const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); const r = fn(g2); setG(g2); return r; };
   const roster = rosterOf(G, G.userTeam, true).filter((p) => (showFarm ? p.farm : !p.farm));
   const hit = capHit(G, G.userTeam), space = capSpace(G, G.userTeam);
@@ -8581,7 +8791,10 @@ function RosterTab({ G, setG, openPlayer, notify }) {
     if (!window.confirm(
       `Buy out ${fullName(p)}?\n\nHe has ${p.contract.yrs} year${p.contract.yrs === 1 ? "" : "s"} left at `
       + `$${p.contract.amt}M.\n\nYou'd pay $${c.perYear}M a year for ${c.yrs} years — $${c.total}M in all — `
-      + `and he becomes a free agent immediately.\n\nThis cannot be undone.`)) return;
+      + `and he becomes a free agent immediately.`
+      + (c.sb > 0 ? `\n\n${Math.round(c.sb * 100)}% of this deal was paid as a signing bonus, and that money `
+        + `is owed in full — it's why the buyout is this expensive.` : "")
+      + `\n\nThis cannot be undone.`)) return;
     const r = upd((g) => buyOut(g, p.id));
     notify(r.ok ? `${fullName(p)} bought out — $${r.perYear}M a year for ${r.yrs} years.` : r.why);
   };
@@ -8614,9 +8827,12 @@ function RosterTab({ G, setG, openPlayer, notify }) {
   // Re-signing your own. The ask is the loyalty-discounted number, so this is
   // simply "meet it" — haggling lives in the negotiation screen for free agents.
   const resign = (p, yrs) => {
-    const ask = extensionAsk(G, p.id, G.userTeam, yrs);
-    const r = upd((g) => extendPlayer(g, p.id, ask, yrs));
-    notify(r.ok ? `${fullName(p)} re-signed — $${ask}M × ${yrs}.` : (r.why || "he said no"));
+    const opts = { sb: exSb };
+    const ask = extensionAsk(G, p.id, G.userTeam, yrs, opts);
+    const r = upd((g) => extendPlayer(g, p.id, ask, yrs, opts));
+    notify(r.ok
+      ? `${fullName(p)} re-signed — $${ask}M × ${yrs}${contractTermsLabel(G, p)}.`
+      : (r.why || "he said no"));
   };
   const expiring = rosterOf(G, G.userTeam, true).filter((p) => canExtend(G, p))
     .sort((a, b) => b.ovr - a.ovr);
@@ -8759,6 +8975,20 @@ function RosterTab({ G, setG, openPlayer, notify }) {
               up a signed deal charges about {Math.round(EXTEND_EARLY_PREMIUM * 100)}% more for every year he
               gives up. The buttons are the TOTAL length of the new deal.
             </div>
+            {/* One standing offer rather than a terms panel per player — the
+                prices on every button below re-quote against it. */}
+            {bonusesOn(G) ? (
+              <div className="flex flex-wrap items-center gap-2 text-xs pb-1">
+                <span className="text-slate-400">Signing bonus on these deals</span>
+                {[0, 0.25, 0.4, 0.6].map((v) => (
+                  <button key={v} className={`px-2 py-0.5 rounded ${exSb === v ? "bg-sky-600 text-white" : "bg-[#16233c] text-slate-300"}`}
+                    onClick={() => setExSb(v)}>{v === 0 ? "None" : `${Math.round(v * 100)}%`}</button>
+                ))}
+                <span className="text-slate-600">
+                  {exSb > 0 ? "cheaper against the cap — and beyond a buyout's reach" : "nothing guaranteed up front"}
+                </span>
+              </div>
+            ) : null}
             {expiring.map((p) => {
               const left = p.contract.yrs;
               const early = extendEarlyYears(p);
@@ -8782,7 +9012,7 @@ function RosterTab({ G, setG, openPlayer, notify }) {
                     <button key={y} className={`${btnGhost} text-xs px-2 py-1 whitespace-nowrap`}
                       title={`${y} years in total — ${y - left} new on top of the ${left} he has left`}
                       onClick={() => resign(p, y)}>
-                      {y}y · ${extensionAsk(G, p.id, G.userTeam, y)}M
+                      {y}y · ${extensionAsk(G, p.id, G.userTeam, y, { sb: exSb })}M
                     </button>
                   ))}
                 </div>
@@ -9717,11 +9947,18 @@ function FreeAgencyTab({ G, setG, notify, openPlayer }) {
   const [amt, setAmt] = useState(1);
   const [yrs, setYrs] = useState(3);
   const [counter, setCounter] = useState(null);
+  /* The terms on the table. They travel together into every call that prices
+     or signs the deal, so the number he's asking and the number you offer are
+     always quoted against the SAME contract. */
+  const [ntc, setNtc] = useState(false);
+  const [sb, setSb] = useState(0);
+  const [pb, setPb] = useState(0);
   const fas = G.freeAgents.map((id) => G.players[id]).filter(Boolean);
+  const terms = { ntc, sb, pb };
 
   const open = (p) => {
     setTarget(p.id);
-    setYrs(3);
+    setYrs(3); setNtc(false); setSb(0); setPb(0);
     setAmt(askingPrice(G, p.id, G.userTeam, 3));
     setCounter(null);
   };
@@ -9741,8 +9978,12 @@ function FreeAgencyTab({ G, setG, notify, openPlayer }) {
             <div className="flex flex-wrap gap-4 text-sm">
               <div><PosBadge pos={p.pos} /> <span className="text-slate-400 ml-1">age {p.age}</span></div>
               <div><span className="text-slate-400">Overall </span>{p.ovr} <span className="text-slate-500">/ {p.pot}</span></div>
-              <div><span className="text-slate-400">He's asking </span>${askingPrice(G, p.id, G.userTeam, yrs)}M × {yrs}</div>
+              <div><span className="text-slate-400">He's asking </span>${askingPrice(G, p.id, G.userTeam, yrs, terms)}M × {yrs}</div>
             </div>
+            <ContractTerms G={G} p={p} yrs={yrs} ntc={ntc} sb={sb} pb={pb}
+              setNtc={(v) => { setNtc(v); setCounter(null); }}
+              setSb={(v) => { setSb(v); setCounter(null); }}
+              setPb={(v) => { setPb(v); setCounter(null); }} />
             <div className="grid sm:grid-cols-3 gap-3 items-end">
               <div>
                 <div className="text-xs text-slate-400 mb-1">Salary ($M per year)</div>
@@ -9758,17 +9999,17 @@ function FreeAgencyTab({ G, setG, notify, openPlayer }) {
               <div className="flex gap-2">
                 <button className={btnPri} onClick={() => {
                   const g2 = migrate(JSON.parse(JSON.stringify(G)));
-                  const r = negotiate(g2, p.id, g2.userTeam, amt, yrs);
+                  const r = negotiate(g2, p.id, g2.userTeam, amt, yrs, terms);
                   if (!r.ok) {
                     setCounter(r.counter || null);
                     notify(r.why || "He turned it down.");
                     setG(g2);
                     return;
                   }
-                  const s = signPlayer(g2, p.id, g2.userTeam, amt, yrs);
+                  const s = signPlayer(g2, p.id, g2.userTeam, amt, yrs, terms);
                   if (!s.ok) { notify(s.why); return; }
                   setG(g2); setTarget(null); setCounter(null);
-                  notify(`Signed ${fullName(p)} — $${round1(amt)}M × ${yrs}.`);
+                  notify(`Signed ${fullName(p)} — $${round1(amt)}M × ${yrs}${contractTermsLabel(g2, g2.players[p.id])}.`);
                 }}>Offer</button>
                 <button className={btnGhost} onClick={() => { setTarget(null); setCounter(null); }}>Walk away</button>
               </div>
