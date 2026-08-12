@@ -145,6 +145,29 @@ which is what makes line construction and last change matter.
   nobody is credited with** — the team's score goes up and no skater's total does, exactly as in
   real bookkeeping. The harness accounts for this; don't "fix" it by crediting a player.
 
+## Simming years at a time
+**`autoManage` exists because the "sim and walk away" baseline was a catastrophe.** Every piece of
+AI management deliberately skipped your club — right when you're playing, ruinous when you're not.
+A measured decade with no user input: 82 points, 68, 76, then **seven straight seasons last**, with
+**every one of the eight players Hartford drafted who reached 80 overall** on another club. Entry
+deals are three years signed at 18, so they expire at 21 — exactly when the player becomes good.
+With the rule on, the same seed climbs from a $23M payroll to $72.6M and keeps three of those eight.
+It flips two filters, nothing more: `aiExtensionOffer` in `finishSeason` and the club order in
+`aiFreeAgency`.
+
+**The board could sack you every single year.** Nothing cleared `G.fired` or moved the confidence
+that triggered it, so the condition stayed true at every rollover — the same manager was fired eight
+times in one unbroken spell and `G.tenure` grew an entry each time. `!G.fired` is the guard.
+
+**A mandate reads recent seasons, not just team strength.** A roster of 21-year-olds on entry deals
+still rates as competitive on paper, which is how a club that finished last four years running kept
+being told to win a round. Two seasons under 60 points and out of the playoffs earns a rebuild.
+
+`simFullYear` plays the rest of the schedule, the postseason, the draft and the market in one press.
+Each stage calls the same function the buttons do — the draft still runs through `doOffseasonStep`,
+so your shortlist is honoured. The loop is bounded by a step budget rather than a condition, so a
+stage that ever stops advancing stops the whole thing instead of locking the tab.
+
 ## The room, the money, and LTIR
 Four things were declared and never wired, three of them by me. They are joined up now.
 

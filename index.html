@@ -131,6 +131,12 @@ const RULES_DEFAULT = {
   retainedSalary: true,
   injuries: "normal",   // low | normal | high
   fighting: true,
+  /* Let the club run itself. Every piece of AI management already exists and
+     deliberately skips YOUR team — which is right when you're playing and
+     catastrophic when you're simming. A decade of "sim season" without it ends
+     82 points, 68, 76, then seven straight years last, because your entry-deal
+     players walk at 21 and nobody replaces them. */
+  autoManage: false,
 
   /* ------------------------------ depth rules ------------------------------
    * Everything below is a system you can switch OFF, and every one of them
@@ -280,8 +286,16 @@ function setMandate(G) {
   const strength = teamStrength(G, G.userTeam);
   const last = t.seasons && t.seasons.length ? t.seasons[t.seasons.length - 1] : null;
   const wonCup = last && last.cup;
+  /* What the club actually DID recently, not just what it rates on paper. A
+     roster of twenty-one-year-olds on entry deals still scores as competitive,
+     which is how a side that finished last four years running kept being told
+     to win a round. Two bad years and the board wants a rebuild, whatever the
+     ratings say. */
+  const recent = (t.seasons || []).slice(-2);
+  const dire = recent.length >= 2 && recent.every((s) => !s.playoffs && s.pts < 60);
   let key = "rebuild";
-  if (wonCup || strength >= 66) key = "cup";
+  if (dire) key = recent.every((s) => s.pts < 45) ? "rebuild" : "compete";
+  else if (wonCup || strength >= 66) key = "cup";
   else if (strength >= 63) key = "contend";
   else if (strength >= 60) key = "round";
   else if (strength >= 57) key = "playoffs";
@@ -3402,7 +3416,11 @@ function finishSeason(G) {
      since the first build while nothing whatsoever depended on it, which made
      every mandate advisory — you could miss the playoffs for a decade and keep
      the job. Winning the Cup buys a year no matter what came before it. */
-  if (champ !== G.userTeam && G.boardConfidence <= FIRING_LINE) {
+  /* Once. Nothing cleared `G.fired` or moved the confidence that caused it, so
+     the condition stayed true and the board sacked the same manager again at
+     every rollover — eight entries in `G.tenure` for one unbroken spell in one
+     job. Being already out of work is the guard. */
+  if (champ !== G.userTeam && G.boardConfidence <= FIRING_LINE && !G.fired) {
     G.tenure = (G.tenure || []).concat([{
       teamId: G.userTeam,
       from: G.hiredYear != null ? G.hiredYear : G.year - (G.teams[G.userTeam].seasons || []).length + 1,
@@ -3497,7 +3515,10 @@ function finishSeason(G) {
       // The club that has him gets first refusal, exactly as it does in life.
       // The user makes his own call — his expiring players reach the market and
       // he can re-sign them there, or extend them before they ever get that far.
-      if (p.teamId !== G.userTeam) {
+      // Your own expiring players are yours to re-sign — unless you've asked
+      // the club to run itself, in which case it makes the same call the other
+      // thirty-one clubs make.
+      if (p.teamId !== G.userTeam || ruleValue(G, "autoManage")) {
         const offer = aiExtensionOffer(G, p);
         if (offer && rnd(G) < offer.want) {
           p.contract = { amt: offer.ask, yrs: offer.yrs };
@@ -4201,7 +4222,8 @@ function signPlayer(G, pid, teamId, amt, yrs, opts) {
   return { ok: true };
 }
 function aiFreeAgency(G) {
-  const order = G.teams.map((t) => t.id).filter((id) => id !== G.userTeam)
+  const order = G.teams.map((t) => t.id)
+    .filter((id) => id !== G.userTeam || ruleValue(G, "autoManage"))
     .sort((a, b) => capSpace(G, b) - capSpace(G, a));
   let guard = 0;
   while (G.freeAgents.length && guard++ < 400) {
@@ -10672,6 +10694,9 @@ function RulesModal({ G, setG, onClose }) {
       <Row label="Cap amount" hint="$M per club"><Sel k="capAmount" opts={[[75, "$75M"], [88, "$88M"], [105, "$105M"]]} /></Row>
       <Row label="Retained salary" hint="keep part of a contract you trade away"><Sel k="retainedSalary" opts={[[true, "On"], [false, "Off"]]} /></Row>
       <Row label="Injuries" hint="how often bodies break"><Sel k="injuries" opts={[["low", "Low"], ["normal", "Normal"], ["high", "High"]]} /></Row>
+      <Row label="Auto-manage my club"
+        hint="the club re-signs its own players and works the market for you — for simming years at a time">
+        <Sel k="autoManage" opts={[[false, "Off"], [true, "On"]]} /></Row>
 
       {/* The optional systems. Each one defaults to what the game already did,
           so switching them all off is not a downgrade — it's the original. */}
@@ -11024,6 +11049,25 @@ function App() {
     if (g2.phase === "offseason" && G.phase !== "offseason") go("offseason");
   }, [G, busy, go]);
 
+  /* A whole year in one press: the rest of the schedule, the postseason, the
+     draft and the market, landing in next October. Each stage is the same
+     function the buttons call, so nothing is skipped — the draft still runs
+     through `doOffseasonStep`, which respects your shortlist.
+     The guard is a hard step budget rather than a `while (true)`: if any stage
+     ever stops advancing, this stops with it instead of locking the tab. */
+  const simFullYear = useCallback(() => {
+    if (!G || busy) return;
+    setBusy(true);
+    const g2 = migrate(JSON.parse(JSON.stringify(G)));
+    let guard = 0;
+    if (g2.phase === "regular") simDays(g2, g2.schedule.length);
+    while (g2.phase === "playoffs" && guard++ < 40) simPlayoffRound(g2);
+    while (g2.phase === "offseason" && guard++ < 400) doOffseasonStep(g2);
+    setG(g2);
+    setBusy(false);
+    go("home");
+  }, [G, busy, go]);
+
   // Keyboard: d for a day, w for a week, ⌘K or ? for the palette.
   useEffect(() => {
     const onKey = (e) => {
@@ -11108,6 +11152,12 @@ function App() {
                 go("offseason");
               }}>{offseasonAction(G).label}</button>
             ) : null}
+            {/* The whole year in one press: the rest of the schedule, the
+                postseason, the draft, the market, and out the other side into
+                next October. Pairs with auto-manage — without it your own
+                expiring players walk while you're not looking. */}
+            <button className={btnGhost} disabled={busy} title="Play the rest of this year and roll into the next"
+              onClick={() => simFullYear()}>Sim year ⏭</button>
             <button className={btnGhost} onClick={() => setPalette(true)} title="⌘K">⌘K</button>
             <button className={btnGhost} onClick={() => setShowSlots(true)}>💾</button>
             <button className={btnGhost} onClick={() => setShowRules(true)}>📋</button>
