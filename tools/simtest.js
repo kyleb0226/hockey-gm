@@ -79,7 +79,10 @@ const EXPORTS = [
   "PROTECTIONS", "protectionOf", "pickConveys", "resolveProtections",
   "draftTier", "DRAFT_TIER_LABEL",
   "playoffDev", "DEV_PLAYOFF", "DEV_PLAYOFF_FULL", "DEV_DOUBLE_DIP", "DOUBLE_DIP_MIN_FARM",
-  "tradeValue", "roomHitOf", "addRoomHit", "decayRoomHits", "gateFor", "staffBill", "budgetLeft",
+  "keepScore", "deferPicksIfFull", "archiveDraft", "careerTotals", "updateCareerRecords",
+  "CAREER_RECORD_DEFS", "recordGmSeason", "gmCareer", "retirementChance",
+  "NEVER_MADE_IT_AGE", "FA_POOL_HARD",
+  "FA_MARKET_FLOOR", "tradeValue", "roomHitOf", "addRoomHit", "decayRoomHits", "gateFor", "staffBill", "budgetLeft",
   "hireHeadCoach", "unhappyMarket", "canLtir", "placeLtir", "activateLtir", "onLtir",
   "LTIR_MIN_GAMES", "ROOM_HIT_DECAY",
   "canTerminate", "terminateContract", "releaseToPool", "enforceRosterLimits", "enforceCap",
@@ -1578,7 +1581,9 @@ const CHECKS = {
     section("The draft");
     const G = A.newGame(0, { seed: 241, rules: { seasonLen: 41 } });
     simSeason(A, G); simPlayoffs(A, G);
-    ok(A.DRAFT_ROUNDS === 7, `seven rounds (${A.DRAFT_ROUNDS})`);
+    /* Three rounds, not seven. Seven put 224 players a year into a league
+       that could not absorb them — see the population notes in CLAUDE.md. */
+    ok(A.DRAFT_ROUNDS === 3, `three rounds (${A.DRAFT_ROUNDS})`);
     ok(G.draftClass.length === A.draftPicksTotal(G), `a prospect for every pick (${G.draftClass.length})`);
     ok(G.scoutPoints === A.SCOUT_POINTS, `scouting budget is set (${G.scoutPoints})`);
 
@@ -1624,7 +1629,7 @@ const CHECKS = {
 
     // Better prospects go earlier, but not perfectly — that's the fog working.
     const firstRound = G.draftLog.filter((d) => d.round === 1).map((d) => G.players[d.pid].pot);
-    const lastRound = G.draftLog.filter((d) => d.round === 7).map((d) => G.players[d.pid].pot);
+    const lastRound = G.draftLog.filter((d) => d.round === A.DRAFT_ROUNDS).map((d) => G.players[d.pid].pot);
     const avg = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
     ok(avg(firstRound) > avg(lastRound) + 5,
       `first-rounders out-rank last-rounders (${avg(firstRound).toFixed(0)} vs ${avg(lastRound).toFixed(0)})`);
@@ -3018,15 +3023,18 @@ const CHECKS = {
     // and a postseason leave `p.draft` unstamped on everybody.
     A.autoDraft(FA, false);
     const rep = A.draftClassReport(FA, FA.year);
-    ok(rep && rep.rows.length > 100, `a class can be graded (${rep ? rep.rows.length : 0})`);
+    ok(rep && rep.rows.length === A.draftPicksTotal(FA), `a class can be graded (${rep ? rep.rows.length : 0})`);
     ok(rep.rows.every((r) => r.p.draft.year === FA.year), "with only that year's picks");
     ok(rep.rows.every((r, i) => i === 0 || r.p.draft.pick >= rep.rows[i - 1].p.draft.pick),
       "in the order they were taken");
     /* Grading is against the SLOT, so a first overall is held to a far higher
        standard than a seventh-rounder — otherwise the table just re-sorts the
        league by ability and says nothing about the draft. */
-    const early = rep.rows.filter((r) => r.p.draft.pick <= 10);
-    const late = rep.rows.filter((r) => r.p.draft.pick > 150);
+    /* Expressed as a FRACTION of the draft, not a pick number — the draft went
+       from 224 selections to 96 and a hard-coded "pick 150" stopped existing. */
+    const total = A.draftPicksTotal(FA);
+    const early = rep.rows.filter((r) => r.p.draft.pick <= Math.max(5, total * 0.1));
+    const late = rep.rows.filter((r) => r.p.draft.pick > total * 0.75);
     ok(early.length && late.length && early[0].par > late[0].par,
       `an early pick is expected to be better (${early[0].par} vs ${late[0].par})`);
     ok(rep.rows.every((r) => r.gp >= 0 && r.pts >= 0), "and every row has real career numbers");
@@ -3256,6 +3264,115 @@ const CHECKS = {
     // finishSeason has run: every playoff line is archived and cleared.
     ok(A.playersOf(G).every((p) => !p.po), "the playoff line is cleared after the rollover");
     ok(A.playersOf(G).some((p) => p.careerPO && p.careerPO.gp), "but the record of it survives");
+  },
+
+  /* The population, and the history it used to throw away. A ten-season audit
+     found the league ageing down from 26.0 to 22.4, players over 32 falling
+     from 126 to seven, and the save crossing what localStorage will hold. */
+  population(A) {
+    section("Who comes in and who leaves");
+    const G = A.newGame(0, { seed: 8642, rules: { seasonLen: 82, autoManage: true } });
+    ok(A.DRAFT_ROUNDS === 3, `three rounds, not seven (${A.DRAFT_ROUNDS})`);
+    ok(A.draftPicksTotal(G) === 96, `ninety-six players a year (${A.draftPicksTotal(G)})`);
+
+    /* Retirement has to be reachable before 32, or a man who never made it
+       simply accumulates — in the pool or on a farm roster into his thirties,
+       taking up a place he was never going to earn. */
+    const kid = { age: 20, ovr: 50, season: { gp: 0 }, career: [] };
+    ok(A.retirementChance(G, kid) === 0, "a twenty-year-old is going nowhere");
+    const stuck = { age: 28, ovr: 50, season: { gp: 0 }, career: [] };
+    ok(A.retirementChance(G, stuck) > 0, "a 28-year-old who never played might stop");
+    const made = { age: 28, ovr: 50, season: { gp: 0 }, career: [{ gp: 400 }] };
+    ok(A.retirementChance(G, made) === 0, "one who did have a career does not");
+    const good = { age: 28, ovr: 72, season: { gp: 0 }, career: [] };
+    ok(A.retirementChance(G, good) === 0, "and nor does a good player");
+    const old = { age: 36, ovr: 60, season: { gp: 0 }, career: [{ gp: 800 }] };
+    ok(A.retirementChance(G, old) > 0.3, "the old age curve is untouched");
+
+    // The free-agent cull has to be able to bind. It stopped when everyone
+    // qualified for the 200-game protection.
+    ok(A.FA_POOL_HARD > 1, "there is a hard ceiling above the soft one");
+
+    /* THE TEST THAT MATTERS: fifteen seasons, and the league must still be a
+       league — adults in it, and a save that fits in a browser. */
+    for (let y = 0; y < 15; y++) {
+      simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+    }
+    const alive = A.playersOf(G).filter((p) => p.teamId != null && !p.retired);
+    const ages = alive.map((p) => p.age);
+    const avg = ages.reduce((a, b) => a + b, 0) / ages.length;
+    ok(avg >= 24, `the league has not turned into a junior league (average age ${avg.toFixed(1)})`);
+    ok(ages.filter((a) => a >= 33).length >= 25,
+      `veterans survive (${ages.filter((a) => a >= 33).length} aged 33+)`);
+    ok(ages.filter((a) => a < 21).length < alive.length * 0.35,
+      "and teenagers are not the biggest group in the league");
+    const mb = JSON.stringify(G).length / 1048576;
+    ok(mb < 4.2, `fifteen seasons fit in a browser (${mb.toFixed(2)} MB)`);
+    ok(A.playersOf(G).length < 1700, `the population settles (${A.playersOf(G).length})`);
+    ok(G.teams.every((t) => A.rosterOf(G, t.id).length >= A.ROSTER_MIN), "and everyone can still dress a side");
+
+    section("History that stays");
+    ok((G.draftHistory || []).length >= 14, `every draft is kept (${(G.draftHistory || []).length})`);
+    ok(G.draftHistory.every((d) => d.picks.length === A.draftPicksTotal(G)), "with every pick in it");
+    /* Names are stored because `pruneSave` forgets the player — a history that
+       empties itself is not a history. */
+    const oldest = G.draftHistory[0];
+    ok(oldest.picks.every((p) => p.name && p.name !== "unknown"), "and a name on every one");
+    const forgotten = oldest.picks.filter((p) => !G.players[p.pid]).length;
+    ok(forgotten > 0, `some of them have left the game entirely (${forgotten})`);
+    ok(oldest.picks.filter((p) => !G.players[p.pid]).every((p) => p.name), "and are still named");
+    ok(G.history.length >= 14, `and every season is on file (${G.history.length})`);
+
+    section("The career book");
+    ok(G.careerRecords && Object.keys(G.careerRecords).length >= 5, "career records exist");
+    A.CAREER_RECORD_DEFS.forEach((d) => {
+      const r = G.careerRecords[d.key];
+      ok(r && r.v > 0 && r.name, `${d.label}: ${r ? `${r.name} ${r.v}` : "unset"}`);
+    });
+    // A career record must beat any single season of it.
+    const pts = G.careerRecords.cPoints, seasonPts = (G.records || {}).points;
+    ok(!seasonPts || pts.v > seasonPts.v, "a career total exceeds the best single season");
+    const tot = A.careerTotals(A.playersOf(G).find((p) => (p.career || []).length > 3));
+    ok(tot.gp > 0, "career totals add up the archive");
+
+    section("The manager's own record");
+    ok((G.gmSeasons || []).length === 15, `a row a year (${(G.gmSeasons || []).length})`);
+    ok(G.gmSeasons.every((s) => s.abbr && s.year && s.mandate !== undefined), "stamped with the club and the ask");
+    const c = A.gmCareer(G);
+    ok(c.seasons === 15 && c.w + c.l + c.otl > 1000, `and it totals up (${c.w}-${c.l}-${c.otl})`);
+    ok(c.clubs.length >= 1, "across every club you worked at");
+    // Moving on must not erase what came before.
+    const before = G.gmSeasons.length;
+    A.takeJob(G, G.userTeam === 0 ? 1 : 0);
+    ok((G.gmSeasons || []).length === before, "taking a new job keeps the old record");
+
+    section("Auto-manage protects a good cheap contract");
+    const K = A.newGame(0, { seed: 8642, rules: { seasonLen: 41 } });
+    const cheapGood = { ovr: 62, pot: 64, age: 27, contract: { amt: 1.0, yrs: 3 }, id: -1,
+      season: { gp: 0 }, career: [{ gp: 300 }] };
+    const rawKid = { ovr: 44, pot: 90, age: 18, contract: { amt: 0.95, yrs: 3 }, id: -2,
+      season: { gp: 0 }, career: [] };
+    /* The old sort was `ovr + pot * 0.5`, which ranked the raw eighteen-year-old
+       above the man who could play — so clubs released useful cheap depth to
+       keep ceilings. */
+    ok(A.keepScore(K, cheapGood) > A.keepScore(K, rawKid),
+      `a useful cheap player outranks a raw ceiling (${A.keepScore(K, cheapGood).toFixed(0)} vs ${A.keepScore(K, rawKid).toFixed(0)})`);
+    const expensive = { ...cheapGood, id: -3, contract: { amt: 7.5, yrs: 3 } };
+    ok(A.keepScore(K, cheapGood) > A.keepScore(K, expensive), "and the same player is worth more cheap than dear");
+
+    // A club with no room defers picks rather than drafting men it must cut.
+    const D = A.newGame(0, { seed: 8642, rules: { seasonLen: 41 } });
+    ok(A.deferPicksIfFull(D, 0) === 0, "a club with room defers nothing");
+    const roster = A.rosterOf(D, 0, true);
+    while (A.rosterOf(D, 0, true).length < A.ROSTER_MAX + A.FARM_MAX) {
+      const spare = A.playersOf(D).find((p) => p.teamId == null && !p.retired);
+      if (!spare) break;
+      spare.teamId = 0; spare.farm = true;
+    }
+    const moved = A.deferPicksIfFull(D, 0);
+    ok(moved > 0, `a full club pushes picks to next year (${moved})`);
+    ok((D.picks || []).filter((pk) => pk.year === D.year + 1 && pk.deferred).length === moved,
+      "and they are there waiting");
   },
 
   /* The threads that were left hanging: a room that remembers, a budget that
@@ -3526,7 +3643,7 @@ const CHECKS = {
     simSeason(A, G); simPlayoffs(A, G);
     A.autoDraft(G, false);
     const drafted = A.playersOf(G).filter((p) => p.draft);
-    ok(drafted.length >= 200, `a draft class was taken (${drafted.length})`);
+    ok(drafted.length === A.draftPicksTotal(G), `a draft class was taken (${drafted.length})`);
 
     const d0 = A.draftOrigin(G, drafted[0]);
     ok(d0 && d0.kind === "drafted", "a drafted player knows he was drafted");

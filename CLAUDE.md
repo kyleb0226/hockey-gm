@@ -145,6 +145,45 @@ which is what makes line construction and last change matter.
   nobody is credited with** — the team's score goes up and no skater's total does, exactly as in
   real bookkeeping. The harness accounts for this; don't "fix" it by crediting a player.
 
+## The population
+**Seven rounds was the root of almost everything.** 224 players a year into a league that lost
+nowhere near that many: over ten measured seasons the save reached **4.94 MB** (past what
+localStorage holds), average age fell **26.0 → 22.4**, players over 32 went **126 → 7**, and orgs
+jammed so hard that `enforceRosterLimits` released solid cheap veterans to fit 42-rated draftees.
+Four changes, measured over fifteen seasons:
+
+- **`DRAFT_ROUNDS` is 3.** Ninety-six a year is a pipeline the league can absorb.
+- **`retirementChance` is reachable before 32.** A player past `NEVER_MADE_IT_AGE` with under
+  `NEVER_MADE_IT_GAMES` NHL games and no ability stops — he was accumulating in the pool into his
+  thirties taking up a place he was never going to earn. The old age curve is untouched.
+- **`FA_POOL_HARD`** — the 200-game protection on the free-agent cull has to be able to lose. So
+  many players qualified after a decade that the cap stopped binding at all and the pool reached
+  575 against a limit of 150. Past 1.6× the limit only the Hall, a trophy or a ring saves you.
+- **`FA_MARKET_FLOOR`** — and clubs stop before the market is bare. At three rounds the AI signed
+  the pool down to ONE player and there was nothing to sign all year; past the legal minimum a club
+  now only signs what improves it.
+
+Result at fifteen seasons: average age **25.6**, 82 players aged 33+, save **3.52 MB** and nearly
+flat, a live market of 20–45 free agents. The `population` check pins all of it.
+
+**`keepScore` replaced `ovr + pot * 0.5` in the roster trim.** That formula valued a raw
+eighteen-year-old's ceiling above a useful player's present, so clubs released a 62-rated man who
+could play to keep a 46-rated ceiling — over a decade it shreds exactly the cheap established depth
+a roster is built on. Now: what he is, what he might become, **what he costs**, and whether he has
+actually played. **`deferPicksIfFull`** is the other half — a club with no room pushes its picks a
+year forward rather than drafting players it must then cut.
+
+## History that stays
+- **`archiveDraft`** — `G.draftLog` was wiped at the top of every `buildDraftClass`, so last June
+  existed only until the next one. Every draft is kept in `G.draftHistory` with **names and
+  positions alongside the ids**, because `pruneSave` forgets the player and a history that empties
+  itself is not a history.
+- **`CAREER_RECORD_DEFS` / `G.careerRecords`** — the book held single SEASONS only, so the longest
+  careers in a save left no mark on it. Totals include the season in progress, so it reads live.
+- **`G.gmSeasons` is the manager's `t.seasons`.** A club kept its history for ever and you kept a
+  start year, an end year and a cup count — a career at four clubs recorded nothing about any of
+  them. One row a year, stamped with the club, so moving on doesn't erase what came before.
+
 ## Simming years at a time
 **`autoManage` exists because the "sim and walk away" baseline was a catastrophe.** Every piece of
 AI management deliberately skipped your club — right when you're playing, ruinous when you're not.

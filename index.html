@@ -267,6 +267,50 @@ const MANDATES = {
 /* Taking the next job. The club you left keeps its history; you start again on
    a fresh board with a fresh mandate, which is the whole shape of the thing —
    a career is a sequence of tenures, not one club forever. */
+/* ------------------------- the manager's own record -------------------------
+ * A club keeps `t.seasons` for ever. The MANAGER kept `G.tenure` — a start
+ * year, an end year and a cup count — so a career spent at four clubs left no
+ * record of what you actually did at any of them. Your own page was the one
+ * page in the game with no history on it.
+ *
+ * `G.gmSeasons` is the manager's equivalent of `t.seasons`: one row a year,
+ * stamped with the club, so moving on doesn't erase what came before. Written
+ * at the rollover, where the club's own row is written, from the same numbers.
+ * ------------------------------------------------------------------------- */
+function recordGmSeason(G) {
+  const t = G.teams[G.userTeam];
+  if (!t) return G;
+  G.gmSeasons = G.gmSeasons || [];
+  if (G.gmSeasons.some((s) => s.year === G.year)) return G;
+  const champ = G.playoffs && G.playoffs.champion;
+  const made = !!(G.playoffs && G.playoffs.rounds[0].some((s) => s.hi === G.userTeam || s.lo === G.userTeam));
+  G.gmSeasons.push({
+    year: G.year, teamId: G.userTeam, abbr: t.abbr,
+    w: t.w, l: t.l, otl: t.otl, pts: t.pts,
+    playoffs: made,
+    rounds: G.playoffs ? G.playoffs.rounds.filter((rd) => rd.some((s) => s.winner === G.userTeam)).length : 0,
+    cup: champ === G.userTeam,
+    mandate: (G.mandate && G.mandate.label) || null,
+    met: seasonAchievement(G) >= ((G.mandate && G.mandate.need) || 1),
+    board: Math.round(G.boardConfidence),
+  });
+  return G;
+}
+/* The career in one line, across every club. */
+function gmCareer(G) {
+  const s = G.gmSeasons || [];
+  const clubs = Array.from(new Set(s.map((x) => x.abbr)));
+  return {
+    seasons: s.length,
+    w: s.reduce((a, x) => a + x.w, 0), l: s.reduce((a, x) => a + x.l, 0), otl: s.reduce((a, x) => a + x.otl, 0),
+    playoffs: s.filter((x) => x.playoffs).length,
+    rounds: s.reduce((a, x) => a + x.rounds, 0),
+    cups: s.filter((x) => x.cup).length,
+    met: s.filter((x) => x.met).length,
+    clubs,
+  };
+}
+
 function takeJob(G, teamId) {
   if (teamId == null || !G.teams[teamId]) return { ok: false, why: "no such club" };
   G.userTeam = teamId;
@@ -3113,8 +3157,54 @@ function updateRecords(G) {
       if (!cur || v > cur.v) G.records[def.key] = { v, pid: p.id, name: fullName(p), year: G.year, team: p.teamId };
     });
   });
+  updateCareerRecords(G);
   return G.records;
 }
+
+/* ---------------------------- the career book ------------------------------
+ * The record book held single SEASONS only, so the longest, most complete
+ * careers in a save — the thing a twenty-year league is actually for — left no
+ * mark on it anywhere. A man could play nine hundred games and score a thousand
+ * points and the records page would never mention him.
+ *
+ * Totals include the season in progress, so the book is live rather than a year
+ * behind, and the holder's name is stored for the same reason the season book
+ * stores it: `pruneSave` forgets people.
+ * ------------------------------------------------------------------------- */
+const CAREER_RECORD_DEFS = [
+  { key: "cGames",   label: "Games played",       pos: "S", get: (c) => c.gp },
+  { key: "cGoals",   label: "Career goals",       pos: "S", get: (c) => c.g },
+  { key: "cAssists", label: "Career assists",     pos: "S", get: (c) => c.a },
+  { key: "cPoints",  label: "Career points",      pos: "S", get: (c) => c.g + c.a },
+  { key: "cPim",     label: "Career penalty minutes", pos: "S", get: (c) => c.pim },
+  { key: "cWins",    label: "Career wins",        pos: "G", get: (c) => c.w },
+  { key: "cShutouts", label: "Career shutouts",   pos: "G", get: (c) => c.so },
+];
+// Everything he has done, this season included.
+function careerTotals(p) {
+  const t = { gp: 0, g: 0, a: 0, pim: 0, w: 0, so: 0 };
+  (p.career || []).forEach((c) => Object.keys(t).forEach((k) => { t[k] += c[k] || 0; }));
+  Object.keys(t).forEach((k) => { t[k] += (p.season && p.season[k]) || 0; });
+  return t;
+}
+function updateCareerRecords(G) {
+  G.careerRecords = G.careerRecords || {};
+  playersOf(G).forEach((p) => {
+    const isG = p.pos === "G";
+    const tot = careerTotals(p);
+    if (!tot.gp) return;
+    CAREER_RECORD_DEFS.forEach((def) => {
+      if ((def.pos === "G") !== isG) return;
+      const v = def.get(tot);
+      const cur = G.careerRecords[def.key];
+      if (v > 0 && (!cur || v > cur.v)) {
+        G.careerRecords[def.key] = { v, pid: p.id, name: fullName(p), year: G.year, team: p.teamId };
+      }
+    });
+  });
+  return G.careerRecords;
+}
+
 // Fires while the season is still running, for the user's players only. The
 // marks are quoted for an 82-game year and scaled to whatever's being played,
 // so a 41-game season still has a fifty-goal equivalent worth chasing.
@@ -3546,6 +3636,8 @@ function finishSeason(G) {
     });
     t.honours = t.honours || [];
   });
+  // The manager's own row, written from the same numbers as the club's.
+  recordGmSeason(G);
 
   // Retained salary burns down with the contract it came from; waivers and
   // waived no-trade clauses don't carry over.
@@ -3602,6 +3694,9 @@ function finishSeason(G) {
   capFreeAgentPool(G);
 
   runHallOfFame(G);
+  // Move picks a club has no room for BEFORE the order is drawn, so the draft
+  // it walks into is one it can actually roster.
+  G.teams.forEach((t) => deferPicksIfFull(G, t.id));
   buildDraftClass(G);
   return G;
 }
@@ -3662,9 +3757,18 @@ function fillRosters(G) {
  * rather than a ranked list everyone agrees on.
  * ------------------------------------------------------------------------- */
 
-const DRAFT_ROUNDS = 7;
+/* THREE ROUNDS, not seven. Seven put 224 players a year into a league that
+ * loses nowhere near that many, which is the root of almost everything the
+ * ten-season audit turned up: the save grew to 4.94 MB by year ten (past what
+ * localStorage will hold), the average age fell from 26.0 to 22.4, players over
+ * 32 went from 126 to seven, and orgs jammed so hard that `enforceRosterLimits`
+ * had to release solid cheap veterans to make room for 42-rated draftees.
+ * Ninety-six a year is a pipeline the league can actually absorb. */
+const DRAFT_ROUNDS = 3;
 const SCOUT_POINTS = 14;      // scouting visits per offseason
 const FA_POOL_MAX = 150;      // players who can't get a contract leave the sport
+const FA_POOL_HARD = 1.6;     // past this multiple of it, the 200-game protection is spent
+const FA_MARKET_FLOOR = 45;  // players clubs leave on the market, so there is always one
 const FOG_MAX_SWING = 13;     // how far an unscouted read can be off
 
 const JUNIOR = ["major junior", "college", "European elite", "national program", "prep school"];
@@ -4107,7 +4211,31 @@ function draftProjection(G) {
    and letting all the leftovers through would put a hundred bodies a year into
    a pool that `capFreeAgentPool` then has to throw away again. */
 const UNDRAFTED_KEEP = 12;
+/* Every draft, kept for good.
+ *
+ * `G.draftLog` was wiped at the top of each `buildDraftClass`, so last June
+ * existed only as long as it took to reach the next one — the draft board could
+ * show you what had just happened and nothing could ever show you 2029. Names
+ * and positions are stored alongside the ids because `pruneSave` eventually
+ * forgets the player, and a history that empties itself is not a history. */
+function archiveDraft(G) {
+  if (!(G.draftLog || []).length) return G;
+  G.draftHistory = G.draftHistory || [];
+  if (G.draftHistory.some((d) => d.year === G.year)) return G;
+  G.draftHistory.push({
+    year: G.year,
+    picks: G.draftLog.map((d) => {
+      const p = G.players[d.pid];
+      return { round: d.round, pick: d.pick, teamId: d.teamId, pid: d.pid,
+        name: p ? fullName(p) : "unknown", pos: p ? p.pos : "" };
+    }),
+  });
+  return G;
+}
+
 function closeDraft(G) {
+  // Written down before the leftovers are deleted and the log is reused.
+  archiveDraft(G);
   /* The best of the men nobody took reach the market instead of vanishing.
      They keep their scouting fog — you are signing the same uncertainty you
      passed on, which is the point. */
@@ -4225,12 +4353,24 @@ function aiFreeAgency(G) {
   const order = G.teams.map((t) => t.id)
     .filter((id) => id !== G.userTeam || ruleValue(G, "autoManage"))
     .sort((a, b) => capSpace(G, b) - capSpace(G, a));
+  /* Clubs stop before the market is bare. With seven rounds there were always
+     hundreds of spare bodies and this never mattered; at three rounds the AI
+     signed the pool down to a single player and there was nothing left for you
+     to sign all year. A club that is legally staffed doesn't need the last man
+     on the list, and `fillRosters` covers anyone genuinely short. */
   let guard = 0;
-  while (G.freeAgents.length && guard++ < 400) {
+  while (G.freeAgents.length > FA_MARKET_FLOOR && guard++ < 400) {
     let signedAny = false;
     for (const tid of order) {
       const roster = rosterOf(G, tid);
       if (roster.length >= ROSTER_MAX) continue;
+      // Past the legal minimum, a club only signs what improves it.
+      if (roster.length >= ROSTER_MIN && G.freeAgents.length <= FA_MARKET_FLOOR * 2) {
+        const worst = roster.slice().sort((a, b) => a.ovr - b.ovr)[0];
+        const top = G.freeAgents.map((id) => G.players[id]).filter(Boolean)
+          .sort((a, b) => b.ovr - a.ovr)[0];
+        if (!top || !worst || top.ovr <= worst.ovr + 1) continue;
+      }
       const needG = roster.filter((p) => p.pos === "G").length < 2;
       const needD = roster.filter((p) => p.pos === "D").length < 6;
       const cands = G.freeAgents.map((id) => G.players[id]).filter((p) => {
@@ -4948,11 +5088,19 @@ function capFreeAgentPool(G) {
   if (G.freeAgents.length <= FA_POOL_MAX) return G;
   const ranked = G.freeAgents.map((id) => G.players[id]).filter(Boolean)
     .sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5));
+  /* The protection has to be able to LOSE. Anyone with 200 career games was
+     exempt, and after a decade so many qualified that the cap stopped binding
+     at all — the pool reached 575 against a limit of 150 and dragged the save
+     past what localStorage will hold. Past `FA_POOL_HARD` the ordinary
+     protection is spent and only genuine history survives: the Hall, a trophy,
+     a ring. Everyone else has been out of the league for years. */
+  const hard = G.freeAgents.length > FA_POOL_MAX * FA_POOL_HARD;
   ranked.slice(FA_POOL_MAX).forEach((p) => {
     // A career worth remembering buys a place in the record; a dozen games
     // eight years ago does not.
     const games = (p.career || []).reduce((s, c) => s + (c.gp || 0), 0);
-    if (p.hof != null || (p.trophies || []).length || (p.rings || []).length || games >= 200) return;
+    const honoured = p.hof != null || (p.trophies || []).length || (p.rings || []).length;
+    if (honoured || (!hard && games >= 200)) return;
     delete G.players[p.id];
   });
   G.freeAgents = G.freeAgents.filter((id) => G.players[id]);
@@ -5043,6 +5191,50 @@ function enforceCap(G) {
   return G;
 }
 
+/* What a club is actually reluctant to lose.
+ *
+ * The trim used to rank on `ovr + pot * 0.5`, which values a raw eighteen-year-
+ * old's ceiling above a useful player's present — so a 46-rated draftee with a
+ * 90 ceiling outranked a 62-rated man who could play, and clubs kept releasing
+ * the second to keep the first. Over a decade that shreds exactly the cheap,
+ * established depth a roster is built on.
+ *
+ * Three things matter: what he is, what he might become, and WHAT HE COSTS. A
+ * good player on a cheap deal is the most valuable thing in a capped league and
+ * should be the last man out of the door, not the first.
+ * ------------------------------------------------------------------------- */
+function keepScore(G, p) {
+  const now = p.ovr;
+  const upside = Math.max(0, p.pot - p.ovr) * (p.age <= 22 ? 0.55 : 0.2);
+  // Surplus over what his roster spot costs, in rating points per million.
+  const value = (p.ovr - 40) / Math.max(0.5, effectiveCap(G, p));
+  // A man who has actually played in the league is a known quantity.
+  const proven = Math.min(60, nhlGames(p)) * 0.08;
+  return now + upside + clamp(value, 0, 30) + proven;
+}
+
+/* Kicking the can. A club with no room for the players it is about to draft
+ * should move the picks, not make selections it then has to release — which is
+ * what produced the pattern of drafting a 42-rated body and cutting a useful
+ * cheap veteran to fit him in.
+ *
+ * The picks go a year forward rather than to another club: nobody has to agree,
+ * the asset is kept, and the crunch lands in a season where the roster may have
+ * room. Runs before the draft class is built. */
+function deferPicksIfFull(G, teamId) {
+  const org = rosterOf(G, teamId, true).filter((p) => !p.retired).length;
+  const mine = (G.picks || []).filter((pk) => pk.owner === teamId && pk.year === G.year);
+  const room = ROSTER_MAX + FARM_MAX - org;
+  if (mine.length <= room) return 0;
+  // Latest rounds first — you defer your fourth-rounder, not your first.
+  const move = mine.slice().sort((a, b) => b.round - a.round).slice(0, mine.length - Math.max(0, room));
+  move.forEach((pk) => { pk.year = G.year + 1; pk.deferred = true; });
+  if (teamId === G.userTeam && move.length) {
+    news(G, `No room for this year's class — ${move.length} pick${move.length === 1 ? "" : "s"} pushed to ${G.year + 1}.`, "info");
+  }
+  return move.length;
+}
+
 function enforceRosterLimits(G) {
   G.teams.forEach((t) => {
     const alive = () => rosterOf(G, t.id, true).filter((p) => !p.retired);
@@ -5063,7 +5255,7 @@ function enforceRosterLimits(G) {
     // Too many in the organisation: the least worth keeping are let go.
     const farm = alive().filter((p) => p.farm);
     if (farm.length > FARM_MAX) {
-      farm.slice().sort((a, b) => (b.ovr + b.pot * 0.5) - (a.ovr + a.pot * 0.5))
+      farm.slice().sort((a, b) => keepScore(G, b) - keepScore(G, a))
         .slice(FARM_MAX)
         .forEach((p) => { releaseToPool(G, p); moved = true; });
     }
@@ -5830,10 +6022,27 @@ function progress(G, p, po) {
   p.ovr = ovrOf(p);
   p.pot = Math.max(p.ovr, p.pot - (p.age > peak ? 2 : 0));
 }
+/* Who leaves the sport.
+ *
+ * Retirement used to be impossible before 32, so a player who never made it
+ * simply accumulated: he sat in the pool or on a farm roster into his thirties
+ * taking up a place, and the league filled with men who were never going to
+ * play. Two ways out now — the old age curve, and a separate, gentler one for
+ * players who are old enough to have shown something and haven't. A 27-year-old
+ * who has never held down an NHL job is not a prospect, he is a career minor
+ * leaguer, and some of them stop. */
+const NEVER_MADE_IT_AGE = 26;
+const NEVER_MADE_IT_GAMES = 60;
 function retirementChance(G, p) {
-  if (p.age < 32) return 0;
-  const decline = (p.age - 32) * 0.09 + Math.max(0, (55 - p.ovr)) * 0.012;
-  return clamp(decline, 0, 0.95);
+  if (p.age >= 32) {
+    const decline = (p.age - 32) * 0.09 + Math.max(0, (55 - p.ovr)) * 0.012;
+    return clamp(decline, 0, 0.95);
+  }
+  // Never established, and past the age where that changes.
+  if (p.age >= NEVER_MADE_IT_AGE && nhlGames(p) < NEVER_MADE_IT_GAMES && p.ovr < 58) {
+    return clamp(0.1 + (p.age - NEVER_MADE_IT_AGE) * 0.09, 0, 0.6);
+  }
+  return 0;
 }
 
 function startNextSeason(G) {
@@ -9672,6 +9881,27 @@ function RecordsTab({ G, openPlayer }) {
           })}
         </div>
       </Section>
+      {/* Whole careers, which the book never held — a man could play nine
+          hundred games and score a thousand points and never appear on it. */}
+      <Section title="Career record book" className="p-3">
+        <div className="space-y-1 pt-1">
+          {CAREER_RECORD_DEFS.map((d) => {
+            const r = (G.careerRecords || {})[d.key];
+            return (
+              <div key={d.key} className="flex items-center gap-3 text-sm py-0.5">
+                <span className="flex-1 text-slate-400">{d.label}</span>
+                {r ? (
+                  <>
+                    <button className="hover:text-sky-300" onClick={() => openPlayer(r.pid)}>{r.name}</button>
+                    <span className="tnum font-semibold w-12 text-right">{r.v}</span>
+                  </>
+                ) : <span className="text-slate-600">unset</span>}
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+
       {/* The record book keeps only the best ever, so a 54-goal season left no
           trace once somebody beat it. This is who actually led, year by year. */}
       <Section title="Season by season">
@@ -9999,10 +10229,86 @@ function SeasonReview({ G, openPlayer, openTeam }) {
   );
 }
 
+/* Your own record, which the game kept for every club and not for you. */
+function ManagerCareer({ G, openTeam }) {
+  const rows = (G.gmSeasons || []).slice().reverse();
+  const c = gmCareer(G);
+  if (!rows.length) return null;
+  return (
+    <Section title="Your record"
+      right={<span className="text-xs text-slate-400">
+        {c.seasons} season{c.seasons === 1 ? "" : "s"} · {c.clubs.length} club{c.clubs.length === 1 ? "" : "s"}
+      </span>}>
+      <div className="px-3 py-2 border-b border-[#1e2b45] flex flex-wrap gap-x-5 gap-y-1 text-sm tnum">
+        <span><span className="text-slate-500">Record </span>{c.w}-{c.l}-{c.otl}</span>
+        <span><span className="text-slate-500">Playoffs </span>{c.playoffs}/{c.seasons}</span>
+        <span><span className="text-slate-500">Rounds won </span>{c.rounds}</span>
+        <span className={c.cups ? "text-amber-300" : ""}>
+          <span className="text-slate-500">Cups </span>{c.cups}
+        </span>
+        <span><span className="text-slate-500">Mandates met </span>{c.met}/{c.seasons}</span>
+        <span className="text-slate-500">{c.clubs.join(" · ")}</span>
+      </div>
+      <SortTable min={640} rows={rows} initial="year" rowKey={(r) => `${r.year}-${r.abbr}`}
+        onRow={(r) => openTeam(r.teamId)}
+        cols={[
+          { key: "year", label: "Year", get: (r) => r.year },
+          { key: "club", label: "Club", get: (r) => r.abbr, cls: "text-slate-400" },
+          { key: "rec", label: "Record", get: (r) => r.pts,
+            cell: (r) => `${r.w}-${r.l}-${r.otl}` },
+          { key: "pts", label: "Pts", get: (r) => r.pts, cls: "font-semibold" },
+          { key: "po", label: "Spring", get: (r) => (r.cup ? 5 : r.rounds + (r.playoffs ? 1 : 0)),
+            cell: (r) => (r.cup ? <span className="text-amber-300">won the Cup</span>
+              : r.playoffs ? `${r.rounds} round${r.rounds === 1 ? "" : "s"} won` : <span className="text-slate-600">missed</span>) },
+          { key: "man", label: "The board asked", get: (r) => (r.mandate || ""), cls: "text-xs text-slate-400" },
+          { key: "met", label: "", get: (r) => (r.met ? 1 : 0),
+            cell: (r) => <span className={r.met ? "text-emerald-400" : "text-rose-400"}>{r.met ? "met" : "missed"}</span> },
+        ]} />
+    </Section>
+  );
+}
+
+/* Every draft, not just the one on screen. `G.draftLog` was wiped each June. */
+function DraftHistory({ G, openPlayer, openTeam }) {
+  const hist = (G.draftHistory || []).slice().reverse();
+  const [year, setYear] = useState(hist.length ? hist[0].year : null);
+  if (!hist.length) return null;
+  const shown = hist.find((d) => d.year === year) || hist[0];
+  return (
+    <Section title="Draft history"
+      right={
+        <div className="flex gap-1 flex-wrap justify-end">
+          {hist.slice(0, 12).map((d) => (
+            <button key={d.year} onClick={() => setYear(d.year)}
+              className={`text-[11px] px-1.5 py-0.5 rounded ${shown.year === d.year
+                ? "bg-sky-500/25 text-sky-200" : "text-slate-500 hover:text-slate-300"}`}>{d.year}</button>
+          ))}
+        </div>
+      }>
+      <SortTable min={560} rows={shown.picks} initial="pick" asc rowKey={(p) => p.pick}
+        onRow={(p) => (G.players[p.pid] ? openPlayer(p.pid) : null)}
+        rowCls={(p) => (p.teamId === G.userTeam ? "bg-sky-950/30" : "")}
+        cols={[
+          { key: "pick", label: "#", get: (p) => -p.pick, cell: (p) => p.pick },
+          { key: "rd", label: "Rd", get: (p) => -p.round, cell: (p) => p.round, cls: "text-slate-500" },
+          { key: "team", label: "By", get: (p) => (G.teams[p.teamId] ? G.teams[p.teamId].abbr : ""),
+            cell: (p) => <button className="hover:text-sky-300" onClick={(e) => { e.stopPropagation(); openTeam(p.teamId); }}>
+              {G.teams[p.teamId] ? G.teams[p.teamId].abbr : "—"}</button> },
+          { key: "name", label: "Player", get: (p) => p.name,
+            cell: (p) => <span className="whitespace-nowrap">{p.name}
+              {!G.players[p.pid] ? <span className="text-slate-600 text-xs"> · out of the league</span> : null}</span> },
+          { key: "pos", label: "Pos", get: (p) => p.pos, cls: "text-slate-400" },
+        ]} />
+    </Section>
+  );
+}
+
 function HistoryTab({ G, openPlayer, openTeam }) {
   return (
     <div className="space-y-3">
+      <ManagerCareer G={G} openTeam={openTeam} />
       <SeasonReview G={G} openPlayer={openPlayer} openTeam={openTeam} />
+      <DraftHistory G={G} openPlayer={openPlayer} openTeam={openTeam} />
       <Section title="League history">
         <SortTable min={560} rows={G.history} initial="year" rowKey={(h) => h.year}
           cols={[
