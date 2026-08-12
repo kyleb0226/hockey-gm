@@ -1838,7 +1838,9 @@ const CHECKS = {
     const env = (args, farm) => A.devEnvironment(args[0], args[1], farm || null);
     const farmOnly = { gp: 82, g: 20, a: 25 };
 
-    ok(A.devEnvironment({ pos: "C" }, null, farmOnly) === F,
+    // Compared with a tolerance: DEV_FARM is not an exact binary fraction, so
+    // (F * 82) / 82 is not identically F.
+    ok(Math.abs(A.devEnvironment({ pos: "C" }, null, farmOnly) - F) < 1e-9,
       `a full farm season is worth exactly DEV_FARM (${F})`);
     ok(A.devEnvironment({ pos: "C" }, null, null) === 0, "playing nowhere is worth nothing");
 
@@ -3203,7 +3205,7 @@ const CHECKS = {
 
     ok(A.playoffDev(null, null) === 0, "no playoffs, no bonus");
     ok(A.playoffDev(null, run(0)) === 0, "and none for a club that missed out");
-    ok(A.devEnvironment({ pos: "C" }, null, full) === F,
+    ok(Math.abs(A.devEnvironment({ pos: "C" }, null, full) - F) < 1e-9,
       `a farm season with no spring is still exactly DEV_FARM (${F})`);
 
     // A run is worth more the deeper it goes, and it caps out.
@@ -3561,7 +3563,7 @@ const CHECKS = {
     const room = (pct, mean, title) => ({ pct, mean, title: !!title });
 
     // The default is untouched — an unspecified room is worth exactly DEV_FARM.
-    ok(A.devEnvironment({ pos: "C" }, null, full) === F, `no room given is still DEV_FARM (${F})`);
+    ok(Math.abs(A.devEnvironment({ pos: "C" }, null, full) - F) < 1e-9, `no room given is still DEV_FARM (${F})`);
     ok(A.farmRoomBonus(null) === 0, "and no room is worth no bonus");
     ok(A.farmRoomBonus(room(0.5, 0.5)) === 0, "an average affiliate is worth nothing either way");
 

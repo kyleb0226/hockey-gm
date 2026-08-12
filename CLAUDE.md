@@ -173,6 +173,45 @@ a roster is built on. Now: what he is, what he might become, **what he costs**, 
 actually played. **`deferPicksIfFull`** is the other half — a club with no room pushes its picks a
 year forward rather than drafting players it must then cut.
 
+## The draft class, and how prospects grow
+**Draftees arrive RAW.** Top picks were landing at 61–66 overall at eighteen — nearly NHL players
+already — which left the farm nothing to do and put 80 of every 96 draftees straight into the
+league. `DRAFT_TIER_BASE`/`DRAFT_TIER_SPREAD` put a first overall near the low fifties and a late
+third-rounder in the low thirties, `DRAFT_OVR_CAP` is a hard ceiling (an eighteen-year-old is not a
+finished hockey player however the dice land), and what separates the top of the board from the
+bottom is now the CEILING: gaps of ~40 early against ~14 late.
+
+**So the gap has to pull harder.** `DEV_GAP_PULL` (0.135, was 0.09) — at the old rate a fifty-
+overall kid with a ninety ceiling was still a fringe player at 23. `DEV_FARM` rose 1.5 → 1.95, but
+it **must stay below what a genuine NHL role gives** (`solid` measures ~2.2) or the trade-off the
+whole development model rests on inverts and everyone is better off hidden in the minors.
+
+Measured: draft mean 45.6 → **39.2**, NHL regulars at nineteen 32 → 26, and the class still reaches
+a *higher* mean by 24 (74.5 → 76.4) with more attrition (83 survivors → 71). Raw in, fast up,
+more busts.
+
+**`draftPar` makes "bust" reachable.** The old curve expected a last pick to reach 8 overall, which
+every living player beats — across seven graded classes there were **zero busts, ever**. It now runs
+`DRAFT_PAR_TOP` (74) to `DRAFT_PAR_LAST` (44): 28 hit / 44 bust / 29 regulars on a measured class.
+`draftClassReport` reads `G.draftHistory` when it exists, so men the save has forgotten still
+appear as "never played" rather than silently vanishing — which is why a 96-pick draft used to read
+as "73 players drafted" a decade later.
+
+## The board
+It used to be unreasonable in two separate ways, and both are fixed.
+
+- **`(got - want) * 9` was linear and blind.** A club told to win the Cup that made the playoffs
+  instead lost 27 confidence — a good season punished as hard as a collapse — so from a start of 62
+  you were sacked in two years for reaching the postseason twice. Missing by a little is now cheap
+  and **a season in the playoffs is never a disaster**, whatever was asked. Missing them entirely
+  still hurts, more the more was expected.
+- **Mandates read a RATING, not a RESULT.** Strength quartiles are 60/65/69, so a Cup threshold of
+  66 asked the top third of the league for a thing one club can have — eleven clubs failing by
+  construction every year. It now takes 73, or a finalist at 68. **And the board can only ask for
+  one step more than you actually did**: a club it watched miss the playoffs is asked to make them,
+  not to win four rounds. Over twelve measured seasons that moved mandates met from 0/12 to 4/12
+  and let confidence recover instead of only falling.
+
 ## History that stays
 - **`archiveDraft`** — `G.draftLog` was wiped at the top of every `buildDraftClass`, so last June
   existed only until the next one. Every draft is kept in `G.draftHistory` with **names and

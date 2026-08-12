@@ -337,13 +337,32 @@ function setMandate(G) {
      ratings say. */
   const recent = (t.seasons || []).slice(-2);
   const dire = recent.length >= 2 && recent.every((s) => !s.playoffs && s.pts < 60);
+  /* Asking for the Cup should be RARE. Club strength runs 47–80 with quartiles
+     at 60/65/69, so a threshold of 66 handed a win-the-Cup mandate to the top
+     third of the league every single year — eleven clubs asked for a thing one
+     club can have. It now takes a genuine juggernaut, or a side that reached
+     the final last spring and has unfinished business. */
+  const wentDeep = !!(last && last.rounds >= 3);
   let key = "rebuild";
   if (dire) key = recent.every((s) => s.pts < 45) ? "rebuild" : "compete";
-  else if (wonCup || strength >= 66) key = "cup";
-  else if (strength >= 63) key = "contend";
-  else if (strength >= 60) key = "round";
-  else if (strength >= 57) key = "playoffs";
-  else if (strength >= 54) key = "compete";
+  else if (wonCup || strength >= 73 || (wentDeep && strength >= 68)) key = "cup";
+  else if (strength >= 68) key = "contend";
+  else if (strength >= 64) key = "round";
+  else if (strength >= 59) key = "playoffs";
+  else if (strength >= 55) key = "compete";
+  /* AND IT CAN ONLY ASK FOR ONE STEP MORE THAN YOU JUST DID. Strength is a
+     rating, not a result: a club that rates 73 and finishes twentieth was
+     still being told to win the Cup, year after year, because the paper said
+     it was good. A board that watched the same team miss the playoffs asks it
+     to make them — not to win four rounds. Escalation has to be earned. */
+  if (last) {
+    const did = last.cup ? 4 : last.playoffs ? Math.min(3, 1 + last.rounds) : 0;
+    const ceiling = did + 1;
+    const order = ["rebuild", "compete", "playoffs", "round", "contend", "cup"];
+    while (order.indexOf(key) > 0 && (MANDATES[key].need || 0) > ceiling) {
+      key = order[order.indexOf(key) - 1];
+    }
+  }
   G.mandate = { key, year: G.year, ...MANDATES[key] };
   return G.mandate;
 }
@@ -3495,7 +3514,19 @@ function finishSeason(G) {
   // not against a flat "did you make the playoffs".
   const want = (G.mandate && G.mandate.need) || 1;
   const got = seasonAchievement(G);
-  let swing = (got - want) * 9;
+  /* The board used to be unreasonable. `(got - want) * 9` is linear and blind:
+     a club told to win the Cup that instead made the playoffs lost 27
+     confidence — a good season, punished as hard as a collapse — and from a
+     start of 62 that meant sacked in two years for reaching the postseason
+     twice. A board that can't be satisfied isn't pressure, it's noise.
+     Missing by a little is now cheap, and A SEASON IN THE PLAYOFFS IS NEVER
+     A DISASTER whatever was asked. Missing them entirely still hurts, and
+     hurts more the more was expected. */
+  const gap = got - want;
+  let swing;
+  if (gap >= 0) swing = 8 + gap * 6;
+  else if (got >= 1) swing = -Math.min(10, -gap * 3);
+  else swing = -(12 + Math.max(0, want - 1) * 5);
   if (champ === G.userTeam) swing = Math.max(swing, 30);
   if (got >= want) news(G, `The board is satisfied: ${(G.mandate && G.mandate.label) || "expectations met"}.`, "good");
   else news(G, `The board wanted more: ${(G.mandate && G.mandate.label) || "expectations"}.`, "bad");
@@ -3978,6 +4009,18 @@ function acceptDraftUp(G, offer) {
    slots, and the ones nobody calls are the whole point of the rule. Generated
    only when it's on, so a classic league draws exactly the randomness it
    always did and every calibrated seed still replays. */
+/* The shape of a draft class. A prospect is raw and the interesting number is
+   how far he might travel, not where he starts. */
+/* What a pick is expected to become, for grading a class after the fact. */
+const DRAFT_PAR_TOP = 74;      // a first overall has to become a real NHL player
+const DRAFT_PAR_LAST = 44;     // a last pick, roughly a fringe professional
+
+const DRAFT_TIER_BASE = 31;    // roughly where the last pick in the draft lands
+const DRAFT_TIER_SPREAD = 15;  // and how much better the first one is
+const DRAFT_OVR_CAP = 56;      // nobody arrives an NHL player at eighteen
+const DRAFT_GAP_LOW = 13;      // ceiling above current rating, late in the draft
+const DRAFT_GAP_SPREAD = 27;   // and how much more of it the top of the board has
+
 const UNDRAFTED_POOL = 24;
 function buildDraftClass(G) {
   G.draftClass = [];
@@ -3988,8 +4031,21 @@ function buildDraftClass(G) {
        in the class anyway are generated exactly as they always were and the
        extras are simply tacked on below them — turning the rule on deepens the
        bottom of the board without reshaping the top of it. */
-    const p = genPlayer(G, pick(G, ["C", "C", "LW", "RW", "D", "D", "G"]), 42 + (picks - i) * 0.055, 18);
-    p.pot = Math.round(clamp(p.ovr + gauss(G, 18, 7), p.ovr + 2, 99));
+    /* RAW, WITH A LONG WAY TO GO. Top picks were arriving at 61–66 overall at
+       eighteen — nearly NHL players already, which left the farm nothing to do
+       and put 80 of every 96 draftees straight into the league. A first
+       overall now lands near the low fifties and a late third-rounder in the
+       low thirties, and what separates them is the CEILING rather than the
+       rating: the gap runs about 40 at the top of the board and 14 at the
+       bottom. `DRAFT_OVR_CAP` is the hard bit — an eighteen-year-old is not a
+       finished hockey player however the dice land. */
+    const slot = (picks - i) / picks;                  // 1 at the top, ~0 at the end
+    const p = genPlayer(G, pick(G, ["C", "C", "LW", "RW", "D", "D", "G"]),
+      DRAFT_TIER_BASE + slot * DRAFT_TIER_SPREAD, 18);
+    p.r && Object.keys(p.r).forEach((k) => { p.r[k] = Math.min(p.r[k], DRAFT_OVR_CAP + 6); });
+    p.ovr = Math.min(ovrOf(p), DRAFT_OVR_CAP);
+    p.pot = Math.round(clamp(p.ovr + gauss(G, DRAFT_GAP_LOW + slot * DRAFT_GAP_SPREAD, 7),
+      p.ovr + 2, 99));
     p.rookie = true;
     // The top of the board is public knowledge; nobody has seen the late kids.
     const known = clamp(0.35 + i / picks * 0.75, 0.35, 1);
@@ -5854,7 +5910,16 @@ function aiDeadlineMoves(G) {
  * A player who moves mid-season gets both, weighted by games in each league, so
  * a December callup is worth exactly the share of the year it covered.
  * ------------------------------------------------------------------------- */
-const DEV_FARM = 1.5;      // a full season of top farm minutes
+/* How hard a wide ceiling gap pulls a young player toward it. Raised with the
+   draft rework: prospects arrive raw now, so the gap is bigger and it has to
+   mean more, or a fifty-overall kid with a ninety ceiling is still a fringe
+   player at twenty-three. */
+const DEV_GAP_PULL = 0.135;
+/* A farm season is worth more than it was — but it MUST stay below what a
+   genuine NHL role gives (`solid` measures about 2.2), or the trade-off the
+   whole development model rests on inverts and everyone is better off hidden
+   in the minors. Raised, not unleashed. */
+const DEV_FARM = 1.95;     // a full season of top farm minutes
 const DEV_NHL_HI = 3.4;    // thriving in a real NHL role
 const DEV_NHL_LO = 0;      // dressed, but buried — the year taught him nothing
 // Minutes that count as no role at all and as a full one, plus the production a
@@ -5983,7 +6048,12 @@ function progress(G, p, po) {
   const peak = p.pos === "G" ? 28 : 26;
   const keys = p.pos === "G" ? GOALIE_KEYS : SKATER_KEYS;
   let delta;
-  if (p.age < peak) delta = gauss(G, 2.6 + (p.pot - p.ovr) * 0.09, 1.7);
+  /* The CEILING GAP pulls harder than it did. Draftees now arrive raw with a
+     long way to travel, and at the old 0.09 a fifty-overall kid with a ninety
+     ceiling crawled — he'd still be a fringe player at 23. A wide gap is the
+     whole signal that somebody is going to be good, so it should move him
+     fast; a narrow one still moves him barely at all. */
+  if (p.age < peak) delta = gauss(G, 2.4 + (p.pot - p.ovr) * DEV_GAP_PULL, 1.7);
   else if (p.age < peak + 4) delta = gauss(G, 0.2, 1.4);
   else delta = gauss(G, -(p.age - peak - 3) * 0.95, 1.5);
   // Where he played and how it went. `p.stats` is the season that just ended —
@@ -6128,16 +6198,27 @@ function pruneSave(G) {
   const keep = [];
   playersOf(G).forEach((p) => {
     if (!p.retired) return;
-    // Collapse a retired player's season-by-season line into one total.
+    /* Collapse a retired player's seasons — but ONE ROW PER CLUB, not one row
+       for the career. Stamping the whole thing with `career[0].teamId` made a
+       man who moved read as having spent his entire career at his first club:
+       a Hall of Famer with rings from two different sides showed "2026–2031
+       WIC" and nothing about the years he won the second one. Grouped by club
+       in the order he played for them, so the row and the ring agree. */
     if (p.career && p.career.length > 1) {
-      const tot = p.career.reduce((acc, c) => {
-        Object.keys(c).forEach((k) => {
-          if (k === "year" || k === "teamId" || k === "z") return;
-          acc[k] = (acc[k] || 0) + (c[k] || 0);
-        });
-        return acc;
-      }, { year: p.career[0].year, to: p.career[p.career.length - 1].year, teamId: p.career[0].teamId, total: true });
-      p.career = [tot];
+      const spells = [];
+      p.career.forEach((c) => {
+        const last = spells[spells.length - 1];
+        if (last && last.teamId === c.teamId) {
+          Object.keys(c).forEach((k) => {
+            if (k === "year" || k === "teamId" || k === "z" || k === "to") return;
+            last[k] = (last[k] || 0) + (c[k] || 0);
+          });
+          last.to = c.year;
+        } else {
+          spells.push({ ...c, to: c.year, total: true });
+        }
+      });
+      p.career = spells;
     }
     // Blank rather than null: plenty of code walks every player and reads these.
     p.season = blankStats(p.pos); p.stats = blankStats(p.pos);
@@ -10037,33 +10118,68 @@ function ClubModal({ G, teamId, onClose, openPlayer }) {
  * became an NHL regular is a triumph and a first-overall who did the same is
  * not, and a table that ranked them together would say nothing.
  * ------------------------------------------------------------------------- */
+/* What a pick in that slot is expected to become. It falls away steeply, which
+   is what makes a late hit worth more than an early one — but it must not fall
+   to nothing: at the old curve the last pick was expected to reach 8 overall,
+   which every living player beats, so nothing was ever a bust. A first overall
+   is held to a real NHL standard and a late third-rounder to roughly a fringe
+   professional, which is what those picks actually are. */
+function draftPar(G, pick) {
+  const total = Math.max(1, draftPicksTotal(G));
+  const depth = clamp((pick - 1) / Math.max(1, total - 1), 0, 1);
+  return Math.round(DRAFT_PAR_TOP - (DRAFT_PAR_TOP - DRAFT_PAR_LAST) * Math.pow(depth, 0.55));
+}
+
+/* The class, graded.
+ *
+ * Built from `G.draftHistory` when it's there, so men the save has since
+ * forgotten still appear — the report used to scan live players only, which is
+ * why a 96-pick draft read as "73 players drafted" a decade later. A player who
+ * is gone has no rating to grade and says so; that is the truthful answer, not
+ * an omission. */
 function draftClassReport(G, year) {
-  const men = playersOf(G).filter((p) => p.draft && p.draft.year === year);
-  if (!men.length) return null;
-  const rows = men.map((p) => {
-    const gp = (p.career || []).reduce((s, c) => s + (c.gp || 0), 0) + ((p.season && p.season.gp) || 0);
-    const pts_ = (p.career || []).reduce((s, c) => s + (c.g || 0) + (c.a || 0), 0);
-    /* What a pick in that slot is expected to become, falling away steeply —
-       which is what makes a late-round hit worth more than an early-round one. */
-    const par = 78 - Math.min(70, Math.pow(p.draft.pick, 0.62) * 6.4);
-    return { p, gp, pts: pts_, par: Math.round(par), over: p.ovr - par,
-      // A player nobody has seen in the league yet is incomplete, not a bust.
-      settled: gp >= 60 || p.age >= 24 };
-  }).sort((a, b) => a.p.draft.pick - b.p.draft.pick);
+  const archived = (G.draftHistory || []).find((d) => d.year === year);
+  const live = playersOf(G).filter((p) => p.draft && p.draft.year === year);
+  if (!archived && !live.length) return null;
+
+  const entries = archived
+    ? archived.picks.map((a) => ({ pick: a.pick, round: a.round, teamId: a.teamId,
+        name: a.name, pos: a.pos, p: G.players[a.pid] || null }))
+    : live.map((p) => ({ pick: p.draft.pick, round: p.draft.round, teamId: p.draft.teamId,
+        name: fullName(p), pos: p.pos, p }));
+
+  const rows = entries.map((e) => {
+    const p = e.p;
+    const gp = p ? (p.career || []).reduce((s, c) => s + (c.gp || 0), 0) + ((p.season && p.season.gp) || 0) : 0;
+    const pts_ = p ? (p.career || []).reduce((s, c) => s + (c.g || 0) + (c.a || 0), 0) : 0;
+    const par = draftPar(G, e.pick);
+    return {
+      ...e, gp, pts: pts_, par,
+      ovr: p ? p.ovr : null,
+      over: p ? p.ovr - par : -par,
+      gone: !p,
+      /* A player nobody has seen yet is incomplete, not a bust. One the save has
+         forgotten never played — which is a verdict, and a harsh one. */
+      settled: !p || gp >= 60 || p.age >= 24,
+    };
+  }).sort((a, b) => a.pick - b.pick);
+
   const settled = rows.filter((r) => r.settled);
-  const mine = rows.filter((r) => r.p.draft.teamId === G.userTeam);
+  const mine = rows.filter((r) => r.teamId === G.userTeam);
   return {
     year, rows, mine,
     graded: settled.length,
-    hits: settled.filter((r) => r.over >= 6).length,
-    busts: settled.filter((r) => r.over <= -10).length,
+    hits: settled.filter((r) => !r.gone && r.over >= 6).length,
+    busts: settled.filter((r) => r.gone || r.over <= -10).length,
     nhl: rows.filter((r) => r.gp >= 60).length,
   };
 }
 
 function DraftClassReport({ G, openPlayer }) {
+  /* Years come from the ARCHIVE first, so a class stays listed long after the
+     save has forgotten the players in it. */
   const years = useMemo(() => {
-    const s = new Set();
+    const s = new Set((G.draftHistory || []).map((d) => d.year));
     playersOf(G).forEach((p) => { if (p.draft) s.add(p.draft.year); });
     return Array.from(s).sort((a, b) => b - a);
   }, [G]);
@@ -10074,7 +10190,7 @@ function DraftClassReport({ G, openPlayer }) {
     <Section title="Draft classes"
       right={
         <div className="flex gap-1 flex-wrap justify-end">
-          {years.slice(0, 10).map((y) => (
+          {years.map((y) => (
             <button key={y} onClick={() => setYear(y)}
               className={`text-[11px] px-1.5 py-0.5 rounded ${(rep && rep.year) === y
                 ? "bg-sky-500/25 text-sky-200" : "text-slate-500 hover:text-slate-300"}`}>{y}</button>
@@ -10093,24 +10209,29 @@ function DraftClassReport({ G, openPlayer }) {
             </span>
             {rep.mine.length ? <span className="text-sky-300">you took {rep.mine.length}</span> : null}
           </div>
-          <SortTable min={720} rows={rep.rows} initial="pick" rowKey={(r) => r.p.id}
-            onRow={(r) => openPlayer(r.p.id)}
-            rowCls={(r) => (r.p.draft.teamId === G.userTeam ? "bg-sky-950/30" : "")}
+          <SortTable min={720} rows={rep.rows} initial="pick" rowKey={(r) => r.pick}
+            onRow={(r) => (r.p ? openPlayer(r.p.id) : null)}
+            rowCls={(r) => (r.teamId === G.userTeam ? "bg-sky-950/30" : "")}
             cols={[
-              { key: "pick", label: "#", get: (r) => -r.p.draft.pick, cell: (r) => r.p.draft.pick },
-              { key: "by", label: "By", get: (r) => (G.teams[r.p.draft.teamId] ? G.teams[r.p.draft.teamId].abbr : ""),
+              { key: "pick", label: "#", get: (r) => -r.pick, cell: (r) => r.pick },
+              { key: "rd", label: "Rd", get: (r) => -r.round, cell: (r) => r.round, cls: "text-slate-500 text-xs" },
+              { key: "by", label: "By", get: (r) => (G.teams[r.teamId] ? G.teams[r.teamId].abbr : ""),
                 cls: "text-slate-400 text-xs" },
-              { key: "name", label: "Player", get: (r) => r.p.ln,
-                cell: (r) => <span className="whitespace-nowrap">{fullName(r.p)}</span> },
-              { key: "pos", label: "Pos", get: (r) => POS.indexOf(r.p.pos), cell: (r) => <PosBadge pos={r.p.pos} /> },
-              { key: "ovr", label: "Now", get: (r) => r.p.ovr, cls: "font-semibold" },
+              { key: "name", label: "Player", get: (r) => r.name,
+                cell: (r) => <span className="whitespace-nowrap">{r.name}</span> },
+              { key: "pos", label: "Pos", get: (r) => POS.indexOf(r.pos),
+                cell: (r) => (r.pos ? <PosBadge pos={r.pos} /> : null) },
+              { key: "ovr", label: "Now", get: (r) => (r.ovr == null ? -1 : r.ovr), cls: "font-semibold",
+                cell: (r) => (r.ovr == null ? <span className="text-slate-600 text-xs">—</span> : r.ovr) },
               { key: "gp", label: "NHL GP", get: (r) => r.gp },
               { key: "pts", label: "Pts", get: (r) => r.pts },
               /* The verdict, against the slot rather than against the league. */
               { key: "over", label: "vs slot", get: (r) => r.over, cell: (r) => {
+                if (r.gone) return <span className="text-rose-300 text-xs"
+                  title="never established himself and has left the game">never played</span>;
                 if (!r.settled) return <span className="text-slate-600 text-xs">too early</span>;
                 const c = r.over >= 6 ? "text-emerald-300" : r.over <= -10 ? "text-rose-300" : "text-slate-400";
-                return <span className={`tnum ${c}`} title={`a pick at ${r.p.draft.pick} is expected around ${r.par}`}>
+                return <span className={`tnum ${c}`} title={`a pick at ${r.pick} is expected around ${r.par}`}>
                   {r.over > 0 ? "+" : ""}{r.over}</span>;
               } },
             ]} />
@@ -10140,7 +10261,7 @@ function SeasonReview({ G, openPlayer, openTeam }) {
     <Section title="The year in review"
       right={
         <div className="flex gap-1 flex-wrap justify-end">
-          {years.slice(0, 10).map((y) => (
+          {years.map((y) => (
             <button key={y} onClick={() => setYear(y)}
               className={`text-[11px] px-1.5 py-0.5 rounded ${h.year === y
                 ? "bg-sky-500/25 text-sky-200" : "text-slate-500 hover:text-slate-300"}`}>{y}</button>
@@ -10268,47 +10389,11 @@ function ManagerCareer({ G, openTeam }) {
   );
 }
 
-/* Every draft, not just the one on screen. `G.draftLog` was wiped each June. */
-function DraftHistory({ G, openPlayer, openTeam }) {
-  const hist = (G.draftHistory || []).slice().reverse();
-  const [year, setYear] = useState(hist.length ? hist[0].year : null);
-  if (!hist.length) return null;
-  const shown = hist.find((d) => d.year === year) || hist[0];
-  return (
-    <Section title="Draft history"
-      right={
-        <div className="flex gap-1 flex-wrap justify-end">
-          {hist.slice(0, 12).map((d) => (
-            <button key={d.year} onClick={() => setYear(d.year)}
-              className={`text-[11px] px-1.5 py-0.5 rounded ${shown.year === d.year
-                ? "bg-sky-500/25 text-sky-200" : "text-slate-500 hover:text-slate-300"}`}>{d.year}</button>
-          ))}
-        </div>
-      }>
-      <SortTable min={560} rows={shown.picks} initial="pick" asc rowKey={(p) => p.pick}
-        onRow={(p) => (G.players[p.pid] ? openPlayer(p.pid) : null)}
-        rowCls={(p) => (p.teamId === G.userTeam ? "bg-sky-950/30" : "")}
-        cols={[
-          { key: "pick", label: "#", get: (p) => -p.pick, cell: (p) => p.pick },
-          { key: "rd", label: "Rd", get: (p) => -p.round, cell: (p) => p.round, cls: "text-slate-500" },
-          { key: "team", label: "By", get: (p) => (G.teams[p.teamId] ? G.teams[p.teamId].abbr : ""),
-            cell: (p) => <button className="hover:text-sky-300" onClick={(e) => { e.stopPropagation(); openTeam(p.teamId); }}>
-              {G.teams[p.teamId] ? G.teams[p.teamId].abbr : "—"}</button> },
-          { key: "name", label: "Player", get: (p) => p.name,
-            cell: (p) => <span className="whitespace-nowrap">{p.name}
-              {!G.players[p.pid] ? <span className="text-slate-600 text-xs"> · out of the league</span> : null}</span> },
-          { key: "pos", label: "Pos", get: (p) => p.pos, cls: "text-slate-400" },
-        ]} />
-    </Section>
-  );
-}
-
 function HistoryTab({ G, openPlayer, openTeam }) {
   return (
     <div className="space-y-3">
       <ManagerCareer G={G} openTeam={openTeam} />
       <SeasonReview G={G} openPlayer={openPlayer} openTeam={openTeam} />
-      <DraftHistory G={G} openPlayer={openPlayer} openTeam={openTeam} />
       <Section title="League history">
         <SortTable min={560} rows={G.history} initial="year" rowKey={(h) => h.year}
           cols={[
