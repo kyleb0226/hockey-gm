@@ -173,6 +173,43 @@ a roster is built on. Now: what he is, what he might become, **what he costs**, 
 actually played. **`deferPicksIfFull`** is the other half — a club with no room pushes its picks a
 year forward rather than drafting players it must then cut.
 
+## Career and ownership
+Behind the `ownership` rule, off by default. The whole game was played from a chair somebody else
+could take away, and a twenty-season career had nothing to show for itself but a trophy count.
+
+- **You are paid.** `gmSalaryFor` runs off market size and `gmLegacy` (cups dominate; rounds and
+  seasons accumulate; being sacked costs you), banked by `payGm` at the rollover. A contract
+  expires and the next offer is what your record says you're worth — it sits in `G.gmOffer` until
+  you sign it.
+- **A club costs far more than you earn, on purpose.** `teamValue` runs $50–110M against a first
+  salary near $2M. The route in is a MINORITY STAKE alongside other investors, and from there you
+  buy them out one slice at a time — **the last slice is always dearest**, because the man holding
+  it knows exactly what it's worth to you.
+- **`sellWillingness` is derived from the club id**, so an owner who never sells never sells. It's
+  nudged by losing and by market size: the club that comes up is the struggling one in the small
+  market. An outright sale is a once-a-decade event; groups forming are the common way in.
+- **A majority owner cannot be sacked** — that is what the majority is for. A MINORITY owner faces
+  an owners' vote instead, and `ownerVoteChance` falls as his stake rises: a stake buys patience,
+  not immunity. Owning nothing means no vote at all, because the board simply sacks you.
+- **`standDown` / `takeBackTheJob`** — an owner doesn't have to run his own club, and can take the
+  job back whenever he likes. That is the whole difference between owning the place and working
+  there.
+
+## The room settles itself
+**`aiAnswerDemands`.** Demands went league-wide and only YOU could resolve one, so an AI club's
+unhappy player stayed unhappy for ever — measured over ten seasons the count climbed 180 → 906,
+half the league, with holdouts reaching 59 and never playing again. Other clubs now do the same
+three things you can: play a man who deserves it, let go of one who doesn't, or wear it. Also
+**`DEMAND_SQUAD_RANK`** — `expectedMinutes` is an absolute, and a four-line club can only give
+top-six minutes to six forwards, so every decent third-liner in the league had a grievance. Outside
+his own club's best twelve a player is not being wronged, he is being ranked. Together: **29 → 197
+over a decade, holdouts near zero.**
+
+**`enforceFloor`.** `capFloor` computed a number and nothing read it; every club sat below it for
+six measured seasons. A club under the floor now signs the best man it can fit, at most
+`FLOOR_SIGNINGS` a year — a nudge, not a spree — and never past `FA_MARKET_FLOOR`, because
+thirty-two clubs reaching for the floor will strip the market bare.
+
 ## The draft class, and how prospects grow
 **Draftees arrive RAW.** Top picks were landing at 61–66 overall at eighteen — nearly NHL players
 already — which left the farm nothing to do and put 80 of every 96 draftees straight into the

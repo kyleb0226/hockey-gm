@@ -163,6 +163,7 @@ const RULES_DEFAULT = {
   coachStaff: false,       // hire assistants rather than one do-everything coach
   rivalryGrowth: false,    // rivalries harden when clubs meet in the spring
   pickProtection: false,   // traded picks can carry protections
+  ownership: false,        // you are paid, and you can buy in
 };
 
 /* The depth toggles, described once. `group` buckets them on the settings
@@ -206,6 +207,9 @@ const DEPTH_RULES = [
     opts: [[false, "Off"], [true, "On"]] },
   { k: "coachStaff", deep: true, group: "The game", label: "Coaching staff",
     blurb: "Hire a power play, penalty kill and development coach rather than one man who does everything.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "ownership", deep: true, group: "The game", label: "Career and ownership",
+    blurb: "You draw a salary, negotiate your own contract, and can eventually buy into a club — a stake at a time, until it's yours.",
     opts: [[false, "Off"], [true, "On"]] },
   { k: "pickProtection", deep: true, group: "Draft", label: "Pick protections",
     blurb: "A traded pick can be protected — if it lands in the range you keep it, and the obligation rolls to next year.",
@@ -309,6 +313,216 @@ function gmCareer(G) {
     met: s.filter((x) => x.met).length,
     clubs,
   };
+}
+
+/* ============================ CAREER AND OWNERSHIP =========================
+ * The whole game was played from a chair somebody else could take away, and a
+ * twenty-season career had nothing to show for itself but a trophy count. This
+ * is the other axis: you are PAID, what you are worth depends on what you have
+ * done, and the money can eventually buy you the thing nobody can take away.
+ *
+ * The ladder is deliberately long and mostly out of reach. A club costs far
+ * more than a manager earns, so the route in is a MINORITY STAKE alongside
+ * other investors — and from there you buy them out one at a time. Owning a
+ * majority is the point at which the board stops being able to sack you.
+ *
+ * All of it is off by default and lives behind the `ownership` rule.
+ * ------------------------------------------------------------------------- */
+
+/* What a club is worth, in the same millions everything else is priced in.
+   Market size is the floor, winning is the multiplier, and the trophy case is
+   permanent — a club with history is never cheap again. */
+const CLUB_BASE_VALUE = 26;
+const CLUB_MKT_VALUE = 7.5;
+function teamValue(G, teamId) {
+  const t = G.teams[teamId];
+  if (!t) return 0;
+  const seasons = (t.seasons || []).slice(-5);
+  const pace = seasons.length
+    ? seasons.reduce((s, x) => s + x.pts, 0) / (seasons.length * 2 * ruleValue(G, "seasonLen"))
+    : 0.5;
+  const history = (t.cupWins || 0) * 6 + (t.playoffApps || 0) * 0.5;
+  const gate = (t.revenue || 0) * 0.4 + (t.budget || 0) * 0.6;
+  return round1(clamp(
+    (CLUB_BASE_VALUE + (t.mkt || 3) * CLUB_MKT_VALUE) * (0.65 + pace) + history + gate,
+    18, 400));
+}
+
+/* What you have done, on a scale the game can price. Cups dominate, because
+   they should; seasons and rounds accumulate; getting sacked costs you. */
+function gmLegacy(G) {
+  const s = G.gmSeasons || [];
+  const cups = s.filter((x) => x.cup).length;
+  const rounds = s.reduce((a, x) => a + x.rounds, 0);
+  const po = s.filter((x) => x.playoffs).length;
+  const sacked = (G.tenure || []).length;
+  return Math.round(clamp(cups * 26 + rounds * 4 + po * 2.5 + s.length * 1.2 - sacked * 6, 0, 200));
+}
+/* What a club will pay you. A first job is a first job; a man with three cups
+   names his price. */
+const GM_BASE_SALARY = 1.4;
+function gmSalaryFor(G, teamId) {
+  const t = G.teams[teamId];
+  const mkt = t ? (t.mkt || 3) : 3;
+  return round1(GM_BASE_SALARY + mkt * 0.22 + gmLegacy(G) * 0.032);
+}
+function gmState(G) {
+  if (!G.gm) G.gm = { cash: 0, salary: 0, contract: null, stakes: {}, ownHistory: [], paid: [] };
+  if (!G.gm.stakes) G.gm.stakes = {};
+  if (!G.gm.ownHistory) G.gm.ownHistory = [];
+  return G.gm;
+}
+/* Paid once a season, at the rollover. Recorded per year so the career page can
+   show what you actually earned rather than a running total with no story. */
+function payGm(G) {
+  if (!depthOn(G, "ownership")) return G;
+  const gm = gmState(G);
+  const salary = gm.contract ? gm.contract.salary : gmSalaryFor(G, G.userTeam);
+  gm.salary = salary;
+  gm.cash = round1((gm.cash || 0) + salary);
+  gm.paid = (gm.paid || []).concat([{ year: G.year, salary, teamId: G.userTeam }]).slice(-40);
+  if (gm.contract && gm.contract.yrs > 0) gm.contract.yrs--;
+  return G;
+}
+
+/* ------------------------------- your stake --------------------------------
+ * `t.investors` is who else is in. Their shares and yours always sum to one,
+ * and a club nobody has bought into is simply owned by its original owner. */
+function myShare(G, teamId) { return (gmState(G).stakes || {})[teamId] || 0; }
+function isMajorityOwner(G, teamId) { return myShare(G, teamId) > 0.5; }
+function ownsAny(G) { return Object.keys(gmState(G).stakes || {}).filter((k) => gmState(G).stakes[k] > 0); }
+
+/* How badly the people who own it want out. Derived from the club id so it is
+   stable, nudged by how the club is doing — a losing side in a small market is
+   the one that comes up for sale. `t.forSaleYear` records a club that has
+   actually been put on the market. */
+function sellWillingness(G, teamId) {
+  const t = G.teams[teamId];
+  if (!t) return 0;
+  const base = hashUnit(t.id * 3301 + 7);        // some owners simply never sell
+  const seasons = (t.seasons || []).slice(-3);
+  const bad = seasons.length
+    ? seasons.filter((s) => !s.playoffs).length / seasons.length : 0.5;
+  const small = 1 - (t.mkt || 3) / 6;
+  return clamp(base * 0.6 + bad * 0.28 + small * 0.2, 0, 1);
+}
+
+/* What is actually available this offseason. Computed, not stored, so it can
+   never be stale — and deliberately thin: a club changing hands is meant to be
+   the event of a decade, not a shopping list. */
+const SALE_WILLING_BAR = 0.72;    // an owner has to genuinely want out
+const STAKE_MIN = 0.08;           // the smallest slice anybody will sell
+function ownershipMarket(G) {
+  if (!depthOn(G, "ownership")) return [];
+  const gm = gmState(G);
+  const out = [];
+  G.teams.forEach((t) => {
+    const mine = myShare(G, t.id);
+    if (mine >= 1) return;
+    const w = sellWillingness(G, t.id);
+    const value = teamValue(G, t.id);
+    if (mine > 0) {
+      /* You're already in. Partners will sell you more, and the price goes up
+         as your stake does — the last slice is always the dearest, because the
+         man holding it knows exactly what it's worth to you. */
+      const slice = Math.min(1 - mine, Math.max(STAKE_MIN, (1 - mine) * 0.45));
+      out.push({ kind: "buyout", teamId: t.id, share: round1(slice * 100) / 100,
+        price: round1(value * slice * (1.08 + mine * 0.5)), value, willing: w });
+      return;
+    }
+    if (w < SALE_WILLING_BAR) return;
+    // A group forming is the way in; an outright sale is the once-a-decade one.
+    const outright = w > 0.9 && hashUnit(t.id * 977 + G.year) > 0.72;
+    if (outright) {
+      out.push({ kind: "club", teamId: t.id, share: 1, price: round1(value * 1.12), value, willing: w });
+    } else {
+      const slice = 0.15 + Math.floor(hashUnit(t.id * 131 + G.year) * 3) * 0.1;
+      out.push({ kind: "stake", teamId: t.id, share: slice,
+        price: round1(value * slice * 1.05), value, willing: w });
+    }
+  });
+  return out.sort((a, b) => a.price - b.price);
+}
+
+/* Buying in. The money is real and the stake is permanent until you sell it. */
+function buyStake(G, teamId, share, price) {
+  if (!depthOn(G, "ownership")) return { ok: false, why: "ownership is switched off" };
+  const gm = gmState(G);
+  if (price > gm.cash) return { ok: false, why: `you have $${gm.cash}M — that costs $${price}M` };
+  const before = myShare(G, teamId);
+  const after = Math.min(1, round1((before + share) * 100) / 100);
+  gm.cash = round1(gm.cash - price);
+  gm.stakes[teamId] = after;
+  if (!before) {
+    gm.ownHistory.push({ teamId, abbr: G.teams[teamId].abbr, from: G.year, to: null, peak: after });
+  } else {
+    const h = gm.ownHistory.filter((x) => x.teamId === teamId).pop();
+    if (h) h.peak = Math.max(h.peak, after);
+  }
+  const t = G.teams[teamId];
+  news(G, after >= 1
+    ? `You now own the ${t.name} outright.`
+    : `You have bought ${Math.round(share * 100)}% of the ${t.name} — you hold ${Math.round(after * 100)}%.`,
+    "good");
+  if (before <= 0.5 && after > 0.5) {
+    news(G, `You hold a controlling interest in the ${t.name}. The board cannot sack you.`, "good");
+  }
+  return { ok: true, share: after };
+}
+/* Selling out, which is also how a career ends well. */
+function sellStake(G, teamId, share) {
+  const gm = gmState(G);
+  const have = myShare(G, teamId);
+  if (!have) return { ok: false, why: "you don't own any of it" };
+  const sold = Math.min(have, share);
+  const price = round1(teamValue(G, teamId) * sold * 0.94);
+  gm.cash = round1(gm.cash + price);
+  gm.stakes[teamId] = round1((have - sold) * 100) / 100;
+  if (gm.stakes[teamId] <= 0) {
+    delete gm.stakes[teamId];
+    const h = gm.ownHistory.filter((x) => x.teamId === teamId).pop();
+    if (h && h.to == null) h.to = G.year;
+  }
+  return { ok: true, price };
+}
+
+/* ------------------------------- the vote ----------------------------------
+ * A majority owner cannot be sacked — that is what the majority is for. A
+ * MINORITY owner can be voted out by his partners, and how likely that is
+ * depends on how much of the club he holds and how badly it is going. Owning a
+ * piece buys you patience, not immunity. */
+function ownerVoteChance(G, teamId) {
+  const share = myShare(G, teamId);
+  // No stake, no vote: a manager who owns nothing is simply sacked by the
+  // board, which is the ordinary path and not this one.
+  if (share <= 0) return 0;
+  if (share > 0.5) return 0;
+  if (G.boardConfidence > FIRING_LINE) return 0;
+  // Every point of stake is a point of protection.
+  return clamp(0.75 - share * 1.2, 0, 0.75);
+}
+
+/* Stepping back. An owner does not have to run his own club, and can take the
+   job back whenever he likes — that is the whole difference between owning the
+   place and working there. */
+function standDown(G) {
+  if (!isMajorityOwner(G, G.userTeam) && myShare(G, G.userTeam) <= 0) {
+    return { ok: false, why: "you don't own this club" };
+  }
+  G.gmStoodDown = { teamId: G.userTeam, year: G.year };
+  news(G, `You have stepped back from running the ${G.teams[G.userTeam].name}. You still own it.`, "info");
+  return { ok: true };
+}
+function takeBackTheJob(G) {
+  if (!G.gmStoodDown) return { ok: false, why: "you're already running it" };
+  const teamId = G.gmStoodDown.teamId;
+  G.gmStoodDown = null;
+  G.userTeam = teamId;
+  G.fired = null;
+  G.boardConfidence = Math.max(G.boardConfidence, 50);
+  setMandate(G);
+  news(G, `You have taken charge of the ${G.teams[teamId].name} again.`, "good");
+  return { ok: true };
 }
 
 function takeJob(G, teamId) {
@@ -421,8 +635,19 @@ function expectedMinutes(p) {
   const base = p.pos === "D" ? 15.5 : 12.5;
   return base + Math.max(0, p.ovr - 55) * 0.28;
 }
+const DEMAND_SQUAD_RANK = 12;   // outside his club's best twelve he has no case
 function demandCase(G, p) {
   if (p.pos === "G" || !p.season || p.season.gp < DEMAND_MIN_GP) return null;
+  /* HE HAS TO HAVE A CASE. `expectedMinutes` is an absolute, and a four-line
+     club can only give top-six minutes to six forwards — so every decent
+     third-liner in the league had a grievance and the count climbed to a third
+     of all players. A man outside his own club's best twelve is not being
+     wronged, he is being ranked. */
+  if (p.teamId != null) {
+    const squad = rosterOf(G, p.teamId).filter((x) => x.pos !== "G")
+      .sort((a, b) => b.ovr - a.ovr);
+    if (squad.findIndex((x) => x.id === p.id) >= DEMAND_SQUAD_RANK) return null;
+  }
   const mins = p.season.toi / Math.max(1, p.season.gp);
   const want = expectedMinutes(p);
   const short = want - mins;
@@ -545,6 +770,42 @@ function checkPromises(G) {
       addRoomHit(G, p.teamId, 6);
       news(G, `${fullName(p)} never got the minutes he was promised and wants out.`, "bad");
     }
+  });
+  return G;
+}
+
+/* ------------------------- how everybody else answers ----------------------
+ * Demands went league-wide and only YOU could ever resolve one, so an AI club's
+ * unhappy player stayed unhappy for ever: over ten measured seasons the count
+ * climbed 180 → 906, half the league, with `answered` at exactly zero every
+ * year and morale falling from 49 to 31.
+ *
+ * Other clubs now do the same three things you can. They give a man minutes if
+ * he's good enough to deserve them, they let him go if he isn't, and if neither
+ * is true they wear it — but the demand resolves either way, because a room
+ * that can never be settled isn't a system, it's a leak.
+ * ------------------------------------------------------------------------- */
+function aiAnswerDemands(G) {
+  if (!depthOn(G, "demands")) return G;
+  G.teams.forEach((t) => {
+    if (t.id === G.userTeam) return;            // your room is yours to manage
+    rosterOf(G, t.id, true).forEach((p) => {
+      if (!p.demand) return;
+      const squad = rosterOf(G, t.id).slice().sort((a, b) => b.ovr - a.ovr);
+      const rank = squad.findIndex((x) => x.id === p.id);
+      /* Good enough to play more? Then he plays more, and the complaint goes
+         away — this is a club acting sensibly, not a favour. */
+      if (rank >= 0 && rank < 9) { p.demand = null; p.holdout = false; return; }
+      // Not good enough, and asking to leave: they let him go.
+      if (p.demand.kind === "trade") {
+        p.holdout = false;
+        p.demand = null;
+        if (p.contract.amt <= TERMINATE_MAX_CAP) releaseToPool(G, p);
+        return;
+      }
+      // Otherwise it simply passes, the way most of them do.
+      if (G.day - (p.demand.day || 0) > DEMAND_PATIENCE) p.demand = null;
+    });
   });
   return G;
 }
@@ -1800,6 +2061,9 @@ function migrate(G) {
   if (G.scoutPoints == null) G.scoutPoints = 0;
   if (!G.draftLog) G.draftLog = [];
   if (!G.draftStars) G.draftStars = [];
+  if (!G.gm) G.gm = { cash: 0, salary: 0, contract: null, stakes: {}, ownHistory: [], paid: [] };
+  if (!G.gm.stakes) G.gm.stakes = {};
+  if (!G.gm.ownHistory) G.gm.ownHistory = [];
   /* A save from before the line was drawn can't know where it fell, and
      guessing would put "undrafted" on founding players. Null means "don't
      claim anything", which is the honest reading. */
@@ -2730,7 +2994,7 @@ function simDay(G) {
   rollDemands(G);
   if (G.day % 7 === 0) decayRoomHits(G);
   if (G.day % DEMAND_EVERY === 0 && G.day > 0) {
-    checkPromises(G); demandOffers(G); rollHoldouts(G);
+    checkPromises(G); demandOffers(G); rollHoldouts(G); aiAnswerDemands(G);
   }
   checkMilestones(G);
   // Clubs ring about listed players every few days rather than instantly.
@@ -3541,7 +3805,22 @@ function finishSeason(G) {
      the condition stayed true and the board sacked the same manager again at
      every rollover — eight entries in `G.tenure` for one unbroken spell in one
      job. Being already out of work is the guard. */
-  if (champ !== G.userTeam && G.boardConfidence <= FIRING_LINE && !G.fired) {
+  /* A majority owner cannot be sacked by his own board — that is what the
+     majority is for. A minority owner faces a vote instead, and every point of
+     stake is a point of protection. */
+  const shielded = depthOn(G, "ownership") && isMajorityOwner(G, G.userTeam);
+  const votedOut = depthOn(G, "ownership") && !shielded && myShare(G, G.userTeam) > 0
+    && rnd(G) < ownerVoteChance(G, G.userTeam);
+  if (shielded && G.boardConfidence <= FIRING_LINE) {
+    news(G, `The board would move against you, but you own the club.`, "info");
+    G.boardConfidence = Math.max(G.boardConfidence, FIRING_LINE + 8);
+  }
+  if (depthOn(G, "ownership") && !shielded && myShare(G, G.userTeam) > 0
+      && G.boardConfidence <= FIRING_LINE && !votedOut) {
+    news(G, `Your partners considered a vote and let it lie. Your stake spoke for you.`, "info");
+  }
+  if (!shielded && champ !== G.userTeam && G.boardConfidence <= FIRING_LINE && !G.fired
+      && (myShare(G, G.userTeam) <= 0 || votedOut)) {
     G.tenure = (G.tenure || []).concat([{
       teamId: G.userTeam,
       from: G.hiredYear != null ? G.hiredYear : G.year - (G.teams[G.userTeam].seasons || []).length + 1,
@@ -3669,6 +3948,19 @@ function finishSeason(G) {
   });
   // The manager's own row, written from the same numbers as the club's.
   recordGmSeason(G);
+  // And he gets paid, which is what makes the other half of the career possible.
+  payGm(G);
+  /* A contract that has run out is renegotiated on what you're worth NOW —
+     which is the whole point of a legacy. Offered rather than imposed: it sits
+     in `G.gmOffer` until you accept it. */
+  if (depthOn(G, "ownership")) {
+    const gm = gmState(G);
+    if (!gm.contract || gm.contract.yrs <= 0) {
+      G.gmOffer = { teamId: G.userTeam, salary: gmSalaryFor(G, G.userTeam),
+        yrs: clamp(2 + Math.floor(gmLegacy(G) / 40), 2, 5), year: G.year };
+      news(G, `The ${G.teams[G.userTeam].name} have offered you a new deal — $${G.gmOffer.salary}M a year.`, "good");
+    }
+  }
 
   // Retained salary burns down with the contract it came from; waivers and
   // waived no-trade clauses don't carry over.
@@ -5211,6 +5503,42 @@ function stockAffiliates(G) {
   return G;
 }
 
+/* ------------------------------ and a floor -------------------------------
+ * `capFloor` computed a number and nothing ever read it. Every club sat below
+ * it for the first six measured seasons — the league spent about $45M of an
+ * $88M cap in year one — which quietly removed the cap as a constraint for the
+ * first third of a career and left the free-agent pool with nowhere to drain.
+ *
+ * A club under the floor spends. It signs the best man available it can fit,
+ * which is what a real club forced to reach the floor does, and it stops the
+ * moment it is legal. Deliberately gentle: this is a nudge each rollover, not
+ * a spree, so a rebuilding side climbs toward the floor over a couple of years
+ * rather than panic-buying in one.
+ * ------------------------------------------------------------------------- */
+const FLOOR_SIGNINGS = 3;   // most a club will add in one offseason to comply
+function enforceFloor(G) {
+  if (!rules(G).hardCap) return G;
+  const floor = capFloor(G);
+  G.teams.forEach((t) => {
+    let added = 0;
+    while (capHit(G, t.id) < floor && added < FLOOR_SIGNINGS) {
+      if (rosterOf(G, t.id, true).length >= ROSTER_MAX + FARM_MAX) break;
+      // Never at the cost of leaving nobody on the market — thirty-two clubs
+      // reaching for the floor will strip it bare otherwise.
+      if (G.freeAgents.length <= FA_MARKET_FLOOR) break;
+      const best = G.freeAgents.map((id) => G.players[id]).filter(Boolean)
+        .sort((a, b) => b.ovr - a.ovr)[0];
+      if (!best) break;
+      const yrs = ri(G, 1, 4);
+      const ask = askingPrice(G, best.id, t.id, yrs);
+      if (rules(G).hardCap && capHit(G, t.id) + ask > rules(G).capAmount) break;
+      if (!signPlayer(G, best.id, t.id, ask, yrs).ok) break;
+      added++;
+    }
+  });
+  return G;
+}
+
 function enforceCap(G) {
   if (!rules(G).hardCap) return G;
   const cap = rules(G).capAmount;
@@ -6131,6 +6459,7 @@ function startNextSeason(G) {
   /* AFTER the market and the top-ups, because both add players — the draft has
      also just put seven more into every organisation. This is the point at
      which the roster about to play a season has to be a legal one. */
+  enforceFloor(G);
   enforceRosterLimits(G);
   // Bodies are legal; now the money has to be. The draft has just added seven
   // entry contracts per club and nothing else checks them against the cap.
@@ -10350,6 +10679,134 @@ function SeasonReview({ G, openPlayer, openTeam }) {
   );
 }
 
+/* The other half of a career: what you're paid, what you're worth, and what you
+   own. Everything here is off unless the ownership rule is on. */
+function CareerAndOwnership({ G, setG, notify, openTeam }) {
+  if (!depthOn(G, "ownership")) return null;
+  const gm = gmState(G);
+  const upd = (fn) => { const g2 = migrate(JSON.parse(JSON.stringify(G))); const r = fn(g2); setG(g2); return r; };
+  const market = useMemo(() => ownershipMarket(G), [G]);
+  const stakes = Object.keys(gm.stakes || {}).filter((k) => gm.stakes[k] > 0);
+  const legacy = gmLegacy(G);
+  const here = myShare(G, G.userTeam);
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <Stat label="Money" value={`$${gm.cash || 0}M`} sub="yours to invest" />
+        <Stat label="Salary" value={`$${gm.salary || gmSalaryFor(G, G.userTeam)}M`}
+          sub={gm.contract ? `${gm.contract.yrs} yr${gm.contract.yrs === 1 ? "" : "s"} left` : "no deal signed"} />
+        <Stat label="Legacy" value={legacy}
+          sub={legacy >= 120 ? "they name buildings after you" : legacy >= 60 ? "a real reputation"
+            : legacy >= 25 ? "known in the game" : "making your name"} />
+        <Stat label="Owned" value={stakes.length ? `${stakes.length} club${stakes.length === 1 ? "" : "s"}` : "—"}
+          sub={here > 0 ? `${Math.round(here * 100)}% of this one` : "none of this one"}
+          tone={here > 0.5 ? "text-emerald-300" : ""} />
+      </div>
+
+      {/* A contract on the table. It expires, and what you're offered next time
+          is what your record says you're worth. */}
+      {G.gmOffer ? (
+        <div className={`${card} p-3 flex flex-wrap items-center gap-3`}>
+          <div className="text-sm">
+            <span className="text-slate-400">{G.teams[G.gmOffer.teamId].name} offer you </span>
+            <b>${G.gmOffer.salary}M</b>
+            <span className="text-slate-400"> a year for {G.gmOffer.yrs} years.</span>
+          </div>
+          <span className="flex-1" />
+          <button className={btnPri} onClick={() => upd((g) => {
+            gmState(g).contract = { salary: g.gmOffer.salary, yrs: g.gmOffer.yrs };
+            g.gmOffer = null;
+          })}>Sign it</button>
+          <button className={btnGhost} onClick={() => upd((g) => { g.gmOffer = null; })}>Leave it</button>
+        </div>
+      ) : null}
+
+      {here > 0 ? (
+        <Section title="Your club" className="p-3">
+          <div className="text-sm pt-1 space-y-1.5">
+            <div>
+              You hold <b className={here > 0.5 ? "text-emerald-300" : "text-amber-300"}>{Math.round(here * 100)}%</b>
+              <span className="text-slate-400"> of the {G.teams[G.userTeam].name}, valued at ${teamValue(G, G.userTeam)}M.</span>
+            </div>
+            <div className="text-xs text-slate-500">
+              {here > 0.5
+                ? "You hold control. The board cannot remove you — the only way out is your own."
+                : "A minority stake buys patience, not immunity: your partners can still vote you out, and the bigger your share the harder that gets."}
+            </div>
+            <div className="flex gap-2 flex-wrap pt-1">
+              {!G.gmStoodDown ? (
+                <button className={btnGhost} onClick={() => { const r = upd((g) => standDown(g));
+                  notify(r.ok ? "You've stepped back. The club is still yours." : r.why); }}>
+                  Step back from running it
+                </button>
+              ) : (
+                <button className={btnPri} onClick={() => { const r = upd((g) => takeBackTheJob(g));
+                  notify(r.ok ? "You're back behind the desk." : r.why); }}>
+                  Take charge again
+                </button>
+              )}
+              <button className={`${btnGhost} text-rose-300`}
+                onClick={() => { const r = upd((g) => sellStake(g, g.userTeam, 0.25));
+                  notify(r.ok ? `Sold a quarter for $${r.price}M.` : r.why); }}>
+                Sell 25%
+              </button>
+            </div>
+          </div>
+        </Section>
+      ) : null}
+
+      <Section title="On the market"
+        right={<span className="text-xs text-slate-500">clubs change hands rarely</span>}>
+        {!market.length ? (
+          <div className="px-3 py-4 text-sm text-slate-500">Nothing is for sale. Owners sell when they're losing and tired.</div>
+        ) : (
+          <div>
+            {market.slice(0, 8).map((o, i) => {
+              const t = G.teams[o.teamId];
+              const afford = o.price <= (gm.cash || 0);
+              return (
+                <div key={i} className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[#16223a] last:border-0 text-sm">
+                  <button className="font-medium hover:text-sky-300" onClick={() => openTeam(o.teamId)}>
+                    {t.city} {t.name}
+                  </button>
+                  <span className={`text-xs ${o.kind === "club" ? "text-amber-300" : o.kind === "buyout" ? "text-sky-300" : "text-slate-400"}`}>
+                    {o.kind === "club" ? "whole club" : o.kind === "buyout" ? "buy out a partner" : "investment group"}
+                  </span>
+                  <span className="text-slate-500 text-xs">{Math.round(o.share * 100)}%</span>
+                  <span className="flex-1" />
+                  <span className="text-slate-500 text-xs tnum">worth ${o.value}M</span>
+                  <span className={`tnum ${afford ? "text-emerald-300" : "text-slate-600"}`}>${o.price}M</span>
+                  <button className={`${btnGhost} text-xs px-2 py-1`} disabled={!afford}
+                    onClick={() => { const r = upd((g) => buyStake(g, o.teamId, o.share, o.price));
+                      notify(r.ok ? `You now hold ${Math.round(r.share * 100)}% of the ${t.name}.` : r.why); }}>
+                    Buy
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Section>
+
+      {(gm.ownHistory || []).length ? (
+        <Section title="What you've owned" className="p-3">
+          <div className="pt-1 space-y-0.5 text-sm">
+            {gm.ownHistory.map((h, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <button className="hover:text-sky-300" onClick={() => openTeam(h.teamId)}>{h.abbr}</button>
+                <span className="text-slate-500 text-xs">{h.from}–{h.to || "now"}</span>
+                <span className="flex-1" />
+                <span className="text-slate-400 text-xs">peak {Math.round(h.peak * 100)}%</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      ) : null}
+    </div>
+  );
+}
+
 /* Your own record, which the game kept for every club and not for you. */
 function ManagerCareer({ G, openTeam }) {
   const rows = (G.gmSeasons || []).slice().reverse();
@@ -10389,9 +10846,10 @@ function ManagerCareer({ G, openTeam }) {
   );
 }
 
-function HistoryTab({ G, openPlayer, openTeam }) {
+function HistoryTab({ G, setG, notify, openPlayer, openTeam }) {
   return (
     <div className="space-y-3">
+      <CareerAndOwnership G={G} setG={setG} notify={notify} openTeam={openTeam} />
       <ManagerCareer G={G} openTeam={openTeam} />
       <SeasonReview G={G} openPlayer={openPlayer} openTeam={openTeam} />
       <Section title="League history">
@@ -11589,7 +12047,7 @@ function App() {
         {tab === "offseason" && <OffseasonTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} />}
         {tab === "records" && <RecordsTab G={G} openPlayer={setPlayer} />}
         {tab === "hall" && <HallTab G={G} openPlayer={setPlayer} />}
-        {tab === "history" && <HistoryTab G={G} openPlayer={setPlayer} openTeam={setClub} />}
+        {tab === "history" && <HistoryTab G={G} setG={setG} notify={notify} openPlayer={setPlayer} openTeam={setClub} />}
       </div>
 
       {toast ? (

@@ -79,6 +79,9 @@ const EXPORTS = [
   "PROTECTIONS", "protectionOf", "pickConveys", "resolveProtections",
   "draftTier", "DRAFT_TIER_LABEL",
   "playoffDev", "DEV_PLAYOFF", "DEV_PLAYOFF_FULL", "DEV_DOUBLE_DIP", "DOUBLE_DIP_MIN_FARM",
+  "teamValue", "gmLegacy", "gmSalaryFor", "gmState", "payGm", "myShare", "isMajorityOwner",
+  "sellWillingness", "ownershipMarket", "buyStake", "sellStake", "ownerVoteChance",
+  "standDown", "takeBackTheJob", "draftPar",
   "keepScore", "deferPicksIfFull", "archiveDraft", "careerTotals", "updateCareerRecords",
   "CAREER_RECORD_DEFS", "recordGmSeason", "gmCareer", "retirementChance",
   "NEVER_MADE_IT_AGE", "FA_POOL_HARD",
@@ -3266,6 +3269,108 @@ const CHECKS = {
     // finishSeason has run: every playoff line is archived and cleared.
     ok(A.playersOf(G).every((p) => !p.po), "the playoff line is cleared after the rollover");
     ok(A.playersOf(G).some((p) => p.careerPO && p.careerPO.gp), "but the record of it survives");
+  },
+
+  /* A career with a second axis: what you're paid, what you're worth, and the
+     long road to owning the place outright. */
+  ownership(A) {
+    section("Getting paid");
+    const off = A.newGame(0, { seed: 1919, rules: { seasonLen: 41 } });
+    simSeason(A, off); simPlayoffs(A, off);
+    ok((A.gmState(off).cash || 0) === 0, "with the rule off you are not paid");
+
+    const G = A.newGame(0, { seed: 1919, rules: { seasonLen: 41, ownership: true, autoManage: true } });
+    ok(A.gmLegacy(G) === 0, "a new manager has no legacy");
+    const first = A.gmSalaryFor(G, 0);
+    ok(first > 0 && first < 6, `a first job pays a first job's money ($${first}M)`);
+    simSeason(A, G); simPlayoffs(A, G);
+    ok(A.gmState(G).cash > 0, `a season's work is paid ($${A.gmState(G).cash}M)`);
+    ok(G.gmOffer && G.gmOffer.salary > 0, "and a contract is put on the table");
+    // Signing it is your call, not the board's.
+    A.gmState(G).contract = { salary: G.gmOffer.salary, yrs: G.gmOffer.yrs };
+    G.gmOffer = null;
+
+    /* Legacy has to be worth money, or none of this is a career. */
+    const L = A.newGame(0, { seed: 1919, rules: { seasonLen: 41, ownership: true } });
+    L.gmSeasons = [{ year: 2026, cup: true, rounds: 4, playoffs: true, w: 50, l: 20, otl: 12 },
+                   { year: 2027, cup: true, rounds: 4, playoffs: true, w: 50, l: 20, otl: 12 }];
+    ok(A.gmLegacy(L) > 50, `two cups is a real legacy (${A.gmLegacy(L)})`);
+    ok(A.gmSalaryFor(L, 0) > first, `and it pays better ($${A.gmSalaryFor(L, 0)}M vs $${first}M)`);
+    L.tenure = [{}, {}, {}];
+    ok(A.gmLegacy(L) < A.gmLegacy({ ...L, tenure: [] }), "getting sacked costs you");
+
+    section("What a club is worth");
+    const vals = G.teams.map((t) => A.teamValue(G, t.id));
+    ok(Math.min(...vals) > 15, `every club is worth something ($${Math.min(...vals)}M)`);
+    ok(Math.max(...vals) > Math.min(...vals) * 1.4,
+      `and they differ a lot ($${Math.max(...vals)}M vs $${Math.min(...vals)}M)`);
+    const big = G.teams.slice().sort((a, b) => (b.mkt || 0) - (a.mkt || 0))[0];
+    const small = G.teams.slice().sort((a, b) => (a.mkt || 0) - (b.mkt || 0))[0];
+    ok(A.teamValue(G, big.id) > A.teamValue(G, small.id), "a big market is worth more than a small one");
+    /* A club has to cost far more than you earn, or there is no ladder. */
+    ok(Math.min(...vals) > A.gmSalaryFor(G, 0) * 4, "and far more than a season's salary");
+
+    section("Buying in");
+    const M = A.newGame(0, { seed: 1919, rules: { seasonLen: 41, ownership: true } });
+    ok(!A.ownershipMarket(off).length, "with the rule off nothing is for sale");
+    const mk = A.ownershipMarket(M);
+    ok(mk.length > 0, `something is always available to somebody (${mk.length})`);
+    ok(mk.every((o) => o.price > 0 && o.share > 0 && o.share <= 1), "priced and sized");
+    ok(mk.every((o) => o.price <= o.value * 1.3), "and nobody is asking silly money");
+    // Owners who never sell, never sell.
+    const willing = M.teams.map((t) => A.sellWillingness(M, t.id));
+    ok(Math.min(...willing) < 0.4 && Math.max(...willing) > 0.7, "owners differ in wanting out");
+    ok(A.sellWillingness(M, 3) === A.sellWillingness(M, 3), "and an owner's appetite is stable");
+
+    const gm = A.gmState(M);
+    gm.cash = 500;
+    const buy = mk.find((o) => o.kind !== "buyout");
+    const r = A.buyStake(M, buy.teamId, buy.share, buy.price);
+    ok(r.ok, "you can buy in");
+    ok(Math.abs(A.myShare(M, buy.teamId) - buy.share) < 0.02, "and you hold what you bought");
+    ok(gm.cash === 500 - buy.price, "the money is really spent");
+    ok(gm.ownHistory.length === 1 && gm.ownHistory[0].from === M.year, "it goes on your record");
+    gm.cash = 0;
+    ok(!A.buyStake(M, buy.teamId, 0.2, 50).ok, "and you can't buy what you can't afford");
+
+    /* Buying partners out is the road to control, and the last slice is the
+       dearest — the man holding it knows what it's worth to you. */
+    gm.cash = 5000;
+    let guard = 0;
+    while (A.myShare(M, buy.teamId) < 1 && guard++ < 30) {
+      const o = A.ownershipMarket(M).find((x) => x.teamId === buy.teamId && x.kind === "buyout");
+      if (!o) break;
+      A.buyStake(M, buy.teamId, o.share, o.price);
+    }
+    ok(A.myShare(M, buy.teamId) >= 1, "you can buy your way to the whole thing");
+    ok(A.isMajorityOwner(M, buy.teamId), "which is a majority by definition");
+
+    section("What ownership protects you from");
+    ok(A.ownerVoteChance(M, buy.teamId) === 0, "a majority owner cannot be voted out");
+    const P = A.newGame(0, { seed: 1919, rules: { seasonLen: 41, ownership: true } });
+    P.boardConfidence = 2;
+    ok(A.ownerVoteChance(P, 0) === 0, "somebody who owns nothing has no vote to face — the board just sacks him");
+    A.gmState(P).stakes[0] = 0.2;
+    const small20 = A.ownerVoteChance(P, 0);
+    A.gmState(P).stakes[0] = 0.45;
+    const big45 = A.ownerVoteChance(P, 0);
+    ok(small20 > 0 && big45 > 0, "a minority owner can be voted out");
+    ok(big45 < small20, `and a bigger stake is harder to remove (${big45.toFixed(2)} vs ${small20.toFixed(2)})`);
+    A.gmState(P).stakes[0] = 0.2;
+    P.boardConfidence = 80;
+    ok(A.ownerVoteChance(P, 0) === 0, "nobody moves against a manager who is winning");
+
+    // Owning it means choosing whether to run it.
+    const S = A.newGame(0, { seed: 1919, rules: { seasonLen: 41, ownership: true } });
+    ok(!A.standDown(S).ok, "you can't step back from a club you don't own");
+    A.gmState(S).stakes[S.userTeam] = 0.8;
+    ok(A.standDown(S).ok && S.gmStoodDown, "an owner can step back from running it");
+    ok(A.takeBackTheJob(S).ok && !S.gmStoodDown, "and take it back whenever he likes");
+
+    // Selling out is also how a career ends.
+    const sell = A.sellStake(M, buy.teamId, 0.5);
+    ok(sell.ok && sell.price > 0, `you can sell up ($${sell.price}M)`);
+    ok(Math.abs(A.myShare(M, buy.teamId) - 0.5) < 0.02, "and keep the rest");
   },
 
   /* The population, and the history it used to throw away. A ten-season audit
