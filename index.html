@@ -136,7 +136,7 @@ const RULES_DEFAULT = {
      catastrophic when you're simming. A decade of "sim season" without it ends
      82 points, 68, 76, then seven straight years last, because your entry-deal
      players walk at 21 and nobody replaces them. */
-  autoManage: false,
+  autoManage: false,       // false | "balanced" | "contend" | "build" | "frugal"
 
   /* ------------------------------ depth rules ------------------------------
    * Everything below is a system you can switch OFF, and every one of them
@@ -526,6 +526,66 @@ function sellStake(G, teamId, share) {
     if (h && h.to == null) h.to = G.year;
   }
   return { ok: true, price };
+}
+
+/* ------------------------------ running itself -----------------------------
+ * Auto-manage was a boolean that reached exactly two routines — the AI's
+ * extension offers and its free-agent sweep. Everything else in the game that
+ * an AI club does for itself explicitly SKIPPED the user, so a club left to run
+ * itself never made a deadline trade, never sold a rental, never answered a
+ * demand and never touched the cap floor. Thirty seasons of it went
+ * 888-1327-245. That isn't a club running itself badly; it's a club with most
+ * of its hands tied.
+ *
+ * `aiRuns` is now the single gate every one of those routines asks, and a STYLE
+ * says how. The four are real strategies with real costs, not difficulty
+ * settings: a club told to contend will mortgage picks for rentals and spend to
+ * the ceiling, one told to build will sell every veteran it has and play the
+ * kids, and one told to be frugal will do neither.
+ * ------------------------------------------------------------------------- */
+const AUTO_STYLES = {
+  /* `keepVet` / `keepKid` rather than one number, because a single multiplier
+     made "build" let its OWN PROSPECTS walk alongside the veterans — measured
+     over four seasons it came out OLDER than the win-now club, which is the
+     exact opposite of the instruction. Who you keep is the strategy; how many
+     you keep is just a budget. */
+  balanced: { label: "Balanced", blurb: "Runs the club the way the other thirty-one are run: buy when you're up, sell when you're down.",
+    fa: 1, extend: 1, keepVet: 1, keepKid: 1, deadline: null, kids: 0, spend: 1 },
+  contend:  { label: "Win now", blurb: "Buys at the deadline whatever the table says, re-signs its veterans and spends to the ceiling. The picks go.",
+    fa: 1.25, extend: 1.25, keepVet: 1.6, keepKid: 1.1, deadline: "buy", kids: -1, spend: 1 },
+  build:    { label: "Build", blurb: "Sells every veteran worth a pick, keeps every young player it has and plays them ahead of the men.",
+    fa: 0.55, extend: 0.75, keepVet: 0.3, keepKid: 1.4, deadline: "sell", kids: 1, spend: 0.85 },
+  /* `spend` has to clear the FLOOR to mean anything — at 0.70 against a floor
+     of 0.76 the club was pushed straight back up by `enforceFloor` and frugal
+     measured identically to balanced. Just above `CAP_FLOOR_PCT` is the lowest
+     a club can legally sit, which is exactly what this instruction means —
+     written out rather than derived because that constant is declared further
+     down the file and this object is evaluated on the way past. */
+  /* A budget club loses the players it develops — that is what being a budget
+     club MEANS, and without it frugal measured as the BEST strategy in the
+     game: young, cheap, improving and richer than everyone. `keepKid` below 1
+     is the cost, and it's the right one. It does not "bank the difference":
+     measured over three leagues it earns LESS than the others, because a club
+     that isn't good enough doesn't fill its building either. That is the
+     honest answer and the blurb says so. */
+  frugal:   { label: "Frugal", blurb: "Won't pay to keep anyone. A young squad, constantly turning over, that watches the players it develops leave — and finishes where you'd expect.",
+    fa: 0.35, extend: 0.5, keepVet: 0.4, keepKid: 0.8, deadline: null, kids: 0.5, spend: 0.79 },
+};
+/* Which style the user's club is on, or null when he's running it himself.
+   `true` is the old boolean, kept working so an existing save doesn't lose it. */
+function autoStyle(G) {
+  const v = ruleValue(G, "autoManage");
+  if (!v) return null;
+  return AUTO_STYLES[v] || AUTO_STYLES.balanced;
+}
+/* THE question every AI routine should ask, and the reason most of them were
+   quietly leaving one club out of the league. */
+function aiRuns(G, teamId) { return teamId !== G.userTeam || !!autoStyle(G); }
+/* And how it should behave, for the routines that care. Every other club gets
+   the balanced numbers, which are all 1 — so nothing about the other
+   thirty-one changes, ever. */
+function styleFor(G, teamId) {
+  return teamId === G.userTeam ? (autoStyle(G) || AUTO_STYLES.balanced) : AUTO_STYLES.balanced;
 }
 
 /* ------------------------- what owning actually pays ------------------------
@@ -971,7 +1031,8 @@ function checkPromises(G) {
 function aiAnswerDemands(G) {
   if (!depthOn(G, "demands")) return G;
   G.teams.forEach((t) => {
-    if (t.id === G.userTeam) return;            // your room is yours to manage
+    // Your room is yours to manage — unless you've handed the club over.
+    if (!aiRuns(G, t.id)) return;
     rosterOf(G, t.id, true).forEach((p) => {
       if (!p.demand) return;
       const squad = rosterOf(G, t.id).slice().sort((a, b) => b.ovr - a.ovr);
@@ -2091,8 +2152,21 @@ function homeEdge(G, isHome) {
   return isHome ? HOME_EDGE : 1 / HOME_EDGE;
 }
 
+/* Who gets the minutes, and who gets sent down — the same question, so the same
+   answer. Ordinarily the best available, full stop; but a club told to build
+   gives a young player the benefit of the doubt over a veteran of the same
+   rating, and one told to win now does the reverse.
+   `kids` is 0 for every club in the league except yours, and only non-zero when
+   you have handed yours over with an instruction, so this is bit-for-bit the
+   old ordering in every other case. */
+function dressRank(G, teamId) {
+  const kids = styleFor(G, teamId).kids;
+  if (!kids) return (p) => p.ovr;
+  return (p) => p.ovr + kids * clamp(24 - p.age, -4, 5) * 0.8;
+}
 function autoLines(G, teamId) {
-  const r = activeRoster(G, teamId).slice().sort((a, b) => b.ovr - a.ovr);
+  const rank = dressRank(G, teamId);
+  const r = activeRoster(G, teamId).slice().sort((a, b) => rank(b) - rank(a));
   const byPos = (pos) => r.filter((p) => p.pos === pos);
   const cs = byPos("C"), lws = byPos("LW"), rws = byPos("RW"), ds = byPos("D");
   // A club needs TWO healthy goaltenders dressed, not one. If the backup is
@@ -4533,7 +4607,7 @@ function finishSeason(G) {
       // Your own expiring players are yours to re-sign — unless you've asked
       // the club to run itself, in which case it makes the same call the other
       // thirty-one clubs make.
-      if (p.teamId !== G.userTeam || ruleValue(G, "autoManage")) {
+      if (aiRuns(G, p.teamId)) {
         const offer = aiExtensionOffer(G, p);
         if (offer && rnd(G) < offer.want) {
           p.contract = { amt: offer.ask, yrs: offer.yrs };
@@ -5321,7 +5395,7 @@ function signPlayer(G, pid, teamId, amt, yrs, opts) {
 }
 function aiFreeAgency(G) {
   const order = G.teams.map((t) => t.id)
-    .filter((id) => id !== G.userTeam || ruleValue(G, "autoManage"))
+    .filter((id) => aiRuns(G, id))
     .sort((a, b) => capSpace(G, b) - capSpace(G, a));
   /* Clubs stop before the market is bare. With seven rounds there were always
      hundreds of spare bodies and this never mattered; at three rounds the AI
@@ -5339,7 +5413,11 @@ function aiFreeAgency(G) {
         const worst = roster.slice().sort((a, b) => a.ovr - b.ovr)[0];
         const top = G.freeAgents.map((id) => G.players[id]).filter(Boolean)
           .sort((a, b) => b.ovr - a.ovr)[0];
-        if (!top || !worst || top.ovr <= worst.ovr + 1) continue;
+        /* How big an upgrade it takes to bother. Exactly the old +1 for every
+           club in the league; a club told to contend will take a marginal one,
+           one told to be frugal wants a real difference. */
+        const bar = 1 + (1 - styleFor(G, tid).fa) * 4;
+        if (!top || !worst || top.ovr <= worst.ovr + bar) continue;
       }
       const needG = roster.filter((p) => p.pos === "G").length < 2;
       const needD = roster.filter((p) => p.pos === "D").length < 6;
@@ -5348,12 +5426,22 @@ function aiFreeAgency(G) {
         if (needD) return p.pos === "D";
         return true;
       });
-      const best = cands.sort((a, b) => b.ovr - a.ovr)[0];
+      /* Which of them. Ordinarily the best rating on the board — but a club
+         shedding its own veterans and then signing everybody else's is not
+         building, and that is exactly what a flat rating sort produced. */
+      const pref = dressRank(G, tid);
+      const best = cands.sort((a, b) => pref(b) - pref(a))[0];
       if (!best) continue;
       const yrs = ri(G, 1, 5);
       const opts = aiBonusTerms(G, best, yrs);
       const ask = askingPrice(G, best.id, tid, yrs, opts);
       if (rules(G).hardCap && capHit(G, tid) + ask > rules(G).capAmount) continue;
+      /* How much of the ceiling this club is willing to use. Exactly 1 for
+         every club but yours, and only different when you've told it to run
+         itself a particular way — so the league's spending is untouched. */
+      const st = styleFor(G, tid);
+      if (st.spend < 1 && capHit(G, tid) + ask > rules(G).capAmount * st.spend
+        && roster.length >= ROSTER_MIN) continue;
       signPlayer(G, best.id, tid, ask, yrs, opts);
       signedAny = true;
     }
@@ -6357,7 +6445,11 @@ function enforceRosterLimits(G) {
     const nhl = alive().filter((p) => !p.farm);
     if (nhl.length > ROSTER_MAX) {
       const atPos = (pos) => alive().filter((p) => !p.farm && p.pos === pos).length;
-      nhl.slice().sort((a, b) => a.ovr - b.ovr).forEach((p) => {
+      /* Worst first — but by the same measure the lineup uses. Sorting on raw
+         rating here is what kept a club told to build OLDER than one told to
+         win now: it played the kids and then sent them straight back down. */
+      const rank = dressRank(G, t.id);
+      nhl.slice().sort((a, b) => rank(a) - rank(b)).forEach((p) => {
         if (alive().filter((x) => !x.farm).length <= ROSTER_MAX) return;
         if (atPos(p.pos) <= (DRESS_MIN[p.pos] || 0)) return;
         p.farm = true; moved = true;
@@ -6483,10 +6575,21 @@ function aiExtensionOffer(G, p) {
   const pos = standings(G).findIndex((x) => x.id === p.teamId);
   if (pos > 20 && past) want -= 0.2;
   if (pos < 8 && core) want += 0.12;
+  /* And how keen the club is to keep THIS man. All three numbers are 1 for the
+     other thirty-one, so nothing about them changes; only your own club, and
+     only when you have told it how to run. A club told to build keeps its kids
+     and lets the veterans go, and one told to contend does the reverse. */
+  const st = styleFor(G, p.teamId);
+  want *= past ? st.keepVet : rising ? st.keepKid : st.extend;
   if (want <= 0) return null;
   const yrs = rising ? ri(G, 3, 5) : past ? ri(G, 1, 2) : ri(G, 2, 4);
   const ask = extensionAsk(G, p.id, p.teamId, yrs);
-  if (rules(G).hardCap && capHit(G, p.teamId) - effectiveCap(G, p) + ask > rules(G).capAmount) return null;
+  const after = capHit(G, p.teamId) - effectiveCap(G, p) + ask;
+  if (rules(G).hardCap && after > rules(G).capAmount) return null;
+  /* And the club's own ceiling, if it has been given one. Gating only the
+     free-agent sweep left a club told to be frugal re-signing its way past the
+     budget anyway — it ended up SPENDING MORE than one told to contend. */
+  if (rules(G).hardCap && st.spend < 1 && after > rules(G).capAmount * st.spend) return null;
   return { want, ask, yrs };
 }
 function recall(G, pid) {
@@ -6920,7 +7023,9 @@ function deadlineBoard(G) {
   G.teams.forEach((t) => {
     if (buyers.has(t.id)) return;
     rosterOf(G, t.id)
-      .filter((p) => isRental(p) && p.teamId !== G.userTeam)
+      // Your own rentals appear on the board too when the club runs itself —
+      // this is a view of who's available, and yours are.
+      .filter((p) => isRental(p) && (p.teamId !== G.userTeam || !!autoStyle(G)))
       .sort((a, b) => b.ovr - a.ovr)
       .slice(0, 2)
       .forEach((p) => rentals.push({ p, from: t.id, round: priceOf(p), blocked: hasNtc(p) }));
@@ -6946,8 +7051,18 @@ function deadlineBoard(G) {
 function aiDeadlineMoves(G) {
   const table = standings(G);
   const cut = Math.floor(G.teams.length / 2);
-  const buyers = table.slice(0, cut).map((t) => t.id).filter((id) => id !== G.userTeam);
-  const sellers = table.slice(cut).map((t) => t.id).filter((id) => id !== G.userTeam);
+  /* A club running itself belongs on one side of the deadline or the other.
+     Leaving it out of both is why an auto-managed club never made a trade in
+     thirty seasons — and a STYLE can override the table, which is the whole
+     point of telling it to build while it's still winning games. */
+  const stance = (id) => {
+    if (!aiRuns(G, id)) return null;
+    const s = styleFor(G, id).deadline;
+    if (s) return s;
+    return table.findIndex((t) => t.id === id) < cut ? "buy" : "sell";
+  };
+  const buyers = table.map((t) => t.id).filter((id) => stance(id) === "buy");
+  const sellers = table.map((t) => t.id).filter((id) => stance(id) === "sell");
   let done = 0;
   sellers.forEach((sid) => {
     if (done >= 6) return;
@@ -12849,9 +12964,14 @@ function RulesModal({ G, setG, onClose }) {
       <Row label="Cap amount" hint="$M per club"><Sel k="capAmount" opts={[[75, "$75M"], [88, "$88M"], [105, "$105M"]]} /></Row>
       <Row label="Retained salary" hint="keep part of a contract you trade away"><Sel k="retainedSalary" opts={[[true, "On"], [false, "Off"]]} /></Row>
       <Row label="Injuries" hint="how often bodies break"><Sel k="injuries" opts={[["low", "Low"], ["normal", "Normal"], ["high", "High"]]} /></Row>
+      {/* Not a switch but an instruction: the club runs itself, and this is
+          how. Each one is a real strategy with a real cost. */}
       <Row label="Auto-manage my club"
-        hint="the club re-signs its own players and works the market for you — for simming years at a time">
-        <Sel k="autoManage" opts={[[false, "Off"], [true, "On"]]} /></Row>
+        hint={autoStyle(G) ? AUTO_STYLES[ruleValue(G, "autoManage")]
+            ? AUTO_STYLES[ruleValue(G, "autoManage")].blurb : AUTO_STYLES.balanced.blurb
+          : "the club runs itself — signings, extensions, the deadline, the room — for simming years at a time"}>
+        <Sel k="autoManage" opts={[[false, "Off"]].concat(
+          Object.entries(AUTO_STYLES).map(([k, v]) => [k, v.label]))} /></Row>
 
       {/* The optional systems. Each one defaults to what the game already did,
           so switching them all off is not a downgrade — it's the original. */}

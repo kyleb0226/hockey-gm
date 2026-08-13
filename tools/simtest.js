@@ -82,6 +82,7 @@ const EXPORTS = [
   "teamValue", "gmLegacy", "gmSalaryFor", "gmState", "payGm", "myShare", "isMajorityOwner",
   "sellWillingness", "ownershipMarket", "buyStake", "sellStake", "ownerVoteChance",
   "standDown", "takeBackTheJob", "draftPar",
+  "AUTO_STYLES", "autoStyle", "aiRuns", "styleFor", "aiDeadlineMoves", "aiExtensionOffer",
   "clubProfit", "payDividends", "DIVIDEND_YIELD", "DIRECTIONS", "directionOf", "setDirection",
   "INVESTMENTS", "investLevel", "investCost", "investInClub", "ownsAny",
   "brokerFee", "brokerCandidates", "brokerTrade", "BROKER_FEE_RATE",
@@ -3398,6 +3399,113 @@ const CHECKS = {
     const whole = A.buyStake(W, away.id, 1, A.teamValue(W, away.id) * 1.12);
     ok(whole.ok, "a club going in one piece can be bought from anywhere");
     ok(W.userTeam === away.id, "and you take the chair yourself");
+  },
+
+  /* A club left to run itself. It used to reach exactly two routines and went
+     888-1327-245 over thirty seasons — not a club managing itself badly, a club
+     with most of its hands tied. */
+  autoManage(A) {
+    section("Who the AI runs");
+    const off = A.newGame(0, { seed: 4711, rules: { seasonLen: 41 } });
+    ok(A.autoStyle(off) === null, "off by default");
+    ok(!A.aiRuns(off, off.userTeam), "and nobody touches your club");
+    ok(off.teams.every((t) => t.id === off.userTeam || A.aiRuns(off, t.id)),
+      "while every other club is run");
+    const on = A.newGame(0, { seed: 4711, rules: { seasonLen: 41, autoManage: "balanced" } });
+    ok(A.aiRuns(on, on.userTeam), "handed over, yours is run too");
+    // The old boolean still means something, so an existing save keeps working.
+    const legacy = A.newGame(0, { seed: 4711, rules: { seasonLen: 41, autoManage: true } });
+    ok(A.autoStyle(legacy) === A.AUTO_STYLES.balanced, "and an old on/off save reads as balanced");
+
+    section("Every other club is untouched");
+    /* The whole safety argument: a style is YOUR club's instruction and nothing
+       else's, so switching one on can't move the league around you. */
+    Object.keys(A.AUTO_STYLES).forEach((k) => {
+      const G = A.newGame(0, { seed: 4711, rules: { seasonLen: 41, autoManage: k } });
+      const others = G.teams.filter((t) => t.id !== G.userTeam);
+      ok(others.every((t) => A.styleFor(G, t.id) === A.AUTO_STYLES.balanced),
+        `on "${k}", the other thirty-one are still run normally`);
+    });
+
+    section("The instructions differ");
+    const S = A.AUTO_STYLES;
+    ok(S.contend.deadline === "buy" && S.build.deadline === "sell",
+      "one buys at the deadline whatever the table says, one sells");
+    ok(S.balanced.deadline === null && S.frugal.deadline === null,
+      "and two read the table like everyone else");
+    ok(S.contend.extend > S.balanced.extend && S.build.extend < S.balanced.extend,
+      "one keeps its veterans, one lets them walk");
+    ok(S.build.kids > 0 && S.contend.kids < 0, "one plays the kids, one plays the men");
+    ok(S.frugal.spend < S.balanced.spend, "and one won't spend");
+    /* A spend cap below the floor is inert — `enforceFloor` signs the club
+       straight back up, which is exactly how frugal measured identical to
+       balanced the first time round. */
+    ok(S.frugal.spend > 0.76, "the frugal ceiling clears the cap floor, or it means nothing");
+
+    section("They really play differently");
+    const play = (style) => {
+      const G = A.newGame(0, { seed: 4711, rules: { seasonLen: 41, autoManage: style } });
+      for (let y = 0; y < 4; y++) {
+        simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+      }
+      /* The NHL roster, not the organisation. Every club's farm is full of
+         teenagers whatever it's been told, so including it washed the
+         difference out entirely — the question is who actually DRESSES. */
+      const r = A.rosterOf(G, G.userTeam).filter((p) => !p.retired);
+      return { cap: A.capHit(G, G.userTeam), kids: r.filter((p) => p.age <= 23).length,
+        age: r.reduce((s, p) => s + p.age, 0) / Math.max(1, r.length), n: r.length };
+    };
+    const bal = play("balanced"), con = play("contend"), bui = play("build"), fru = play("frugal");
+    ok(con.cap > fru.cap, `contending costs more than being frugal ($${con.cap}M vs $${fru.cap}M)`);
+    ok(bui.age < con.age, `building runs younger (${bui.age.toFixed(1)} vs ${con.age.toFixed(1)})`);
+    ok([bal, con, bui, fru].every((x) => x.n >= 20), "and all four still ice a legal team");
+
+    section("Now against later");
+    /* The thing that makes these strategies rather than difficulty settings:
+       win-now should be front-loaded and building back-loaded. Measured over
+       four leagues and twelve seasons the real numbers are 101 → 86 for the
+       one and 95 → 90 for the other; this is the same shape, cheaply. */
+    const arc = (style) => {
+      const G = A.newGame(0, { seed: 8642, rules: { seasonLen: 82, autoManage: style } });
+      const early = [], late = [];
+      for (let y = 0; y < 8; y++) {
+        simSeason(A, G);
+        (y < 4 ? early : late).push(G.teams[G.userTeam].pts);
+        simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+      }
+      const m = (xs) => xs.reduce((s, x) => s + x, 0) / xs.length;
+      return { early: m(early), late: m(late), drop: m(early) - m(late) };
+    };
+    const cA = arc("contend"), bA = arc("build");
+    /* The DROP is what's asserted, not the early number. Over four leagues the
+       early gap is real (101 vs 95) but it's six points across eight seasons,
+       which one league cannot resolve — the shape of each club's own arc can,
+       and that is the actual design claim. */
+    ok(cA.drop > bA.drop,
+      `win-now gives back what building gains (${Math.round(cA.drop)} vs ${Math.round(bA.drop)} points, `
+      + `from ${Math.round(cA.early)}/${Math.round(bA.early)} early)`);
+    ok(bA.late > bA.early - 1, `and a building club is no worse by the end (${Math.round(bA.late)} pts)`);
+
+    section("It leaves a club worth managing");
+    /* The measure that matters. Nobody managing it at all is the disaster
+       case — over three leagues and twelve seasons that ran 33 points a year
+       and twenty-eighth; handed over, it runs at ninety and mid-table. */
+    const alone = A.newGame(0, { seed: 4711, rules: { seasonLen: 82 } });
+    const run = A.newGame(0, { seed: 4711, rules: { seasonLen: 82, autoManage: "balanced" } });
+    [alone, run].forEach((G) => {
+      for (let y = 0; y < 5; y++) {
+        simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+      }
+    });
+    const pts = (G) => G.teams[G.userTeam].seasons.reduce((s, x) => s + x.pts, 0) / G.teams[G.userTeam].seasons.length;
+    ok(pts(run) > pts(alone) + 20,
+      `a club left to itself collapses; one handed over doesn't (${Math.round(pts(run))} vs ${Math.round(pts(alone))} pts a year)`);
+    /* A payroll that is actually paying players rather than a shell of
+       minimum deals — measured against the club nobody managed, which is what
+       the difference is really about. */
+    ok(A.capHit(run, run.userTeam) > A.capHit(alone, alone.userTeam) * 1.5,
+      `and it pays a real payroll ($${A.capHit(run, run.userTeam)}M vs $${A.capHit(alone, alone.userTeam)}M)`);
+    ok(A.rosterOf(run, run.userTeam).length >= A.ROSTER_MIN, "with a full team dressed");
   },
 
   /* What owning actually pays, and what an owner actually decides. Thirty

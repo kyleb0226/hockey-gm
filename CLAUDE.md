@@ -195,6 +195,53 @@ could take away, and a twenty-season career had nothing to show for itself but a
   job back whenever he likes. That is the whole difference between owning the place and working
   there.
 
+## A club that runs itself
+`autoManage` was a boolean that reached exactly TWO routines — AI extension offers and the AI
+free-agent sweep. Every other thing an AI club does for itself explicitly skipped the user, so a club
+left to run itself never made a deadline trade, never sold a rental, never answered a demand and
+never touched the cap floor. Measured over three leagues and twelve seasons it ran **55 points in the
+first half and 10 in the second** while the payroll withered to $18M. That is not a club managing
+itself badly; it's a club with most of its hands tied.
+
+**`aiRuns(G, teamId)`** is now the single gate all of them ask. And the setting is no longer on/off
+but an INSTRUCTION — `AUTO_STYLES`, four real strategies with real costs:
+
+| | deadline | keeps | dresses | spends |
+|---|---|---|---|---|
+| Balanced | reads the table | everyone equally | best available | to the ceiling |
+| Win now | always buys | veterans (`keepVet` 1.6) | the men | to the ceiling |
+| Build | always sells | its own kids (`keepKid` 1.4) | the kids | 0.85 |
+| Frugal | reads the table | almost nobody | slight youth lean | 0.79 |
+
+`styleFor` returns the balanced numbers — all 1 — for **every club but yours**, so switching a style
+on cannot move the league around you. There is a check for exactly that.
+
+Measured, three leagues × twelve seasons, points in the first half vs the second:
+
+| | early | late | finish | age | U24 | payroll |
+|---|---|---|---|---|---|---|
+| nobody managing | 55 | 10 | 28.8 | — | — | $18M |
+| Balanced | 94 | 87 | 15.0 | 24.9 | 13 | $72.8M |
+| Win now | **98** | 85 | 14.7 | 26.4 | 12 | $75.6M |
+| Build | 94 | **88** | 15.0 | 22.9 | 18 | $77.8M |
+| Frugal | 90 | 89 | 15.9 | 23.4 | 18 | $72.9M |
+
+Win-now is front-loaded and gives it back; building is flat and young. **Frugal does NOT bank the
+difference** — it earns less than the others, because a club that isn't good enough doesn't fill its
+building either. The blurb says so rather than pretending otherwise.
+
+Three things the runs caught that a unit test never would:
+- **A single `extend` multiplier made "build" let its own prospects walk** alongside the veterans, so
+  it measured OLDER than the win-now club. Split into `keepVet` / `keepKid`: who you keep IS the
+  strategy, how many you keep is just a budget.
+- **`dressRank` had to reach three places, not one.** Setting the lineup wasn't enough — the roster
+  trim sorted on raw rating and sent the kids straight back down, and the free-agent sweep signed the
+  best rating available, so a building club shed its own veterans and then signed everyone else's.
+- **`spend` gated only free agency**, so a frugal club re-signed its way past the budget anyway and
+  ended up spending MORE than one told to contend. It gates extensions too now. And a ceiling below
+  `CAP_FLOOR_PCT` is inert, because `enforceFloor` signs the club straight back up — which is exactly
+  how frugal measured identical to balanced the first time.
+
 ## What thirty simulated years found
 The ownership layer shipped, and then got played — thirty seasons, buying whatever was affordable.
 It failed in four separate ways, none of which a unit test would have caught.
