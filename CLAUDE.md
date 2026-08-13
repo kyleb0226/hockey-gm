@@ -195,6 +195,31 @@ could take away, and a twenty-season career had nothing to show for itself but a
   job back whenever he likes. That is the whole difference between owning the place and working
   there.
 
+## The world tournament
+Behind the `worldCup` rule. Every fourth winter the midwinter break belongs to the countries
+instead — there is no All-Star game that year, which is what the league actually does.
+
+**Nationality is derived, never stored.** `nationOf(p)` runs `hashUnit(p.id)` against a weighted
+table, so all fourteen hundred players in an existing save get a country for free: no save size, no
+draw, no migration, and the same answer every time. The weights are the shape of the sport, which is
+what makes an upset an upset.
+
+Squads come off the season to date (`worldSquad`), so a hot winter is worth something beyond the
+standings. Eight nations, straight knockout, seeded by `squadStrength`; no game ends level. Medals
+land on `p.medals` and survive `pruneSave` — a gold medallist counts as `honoured` even if his club
+career never amounted to anything. `G.worldCups` keeps every tournament ever played, like the drafts.
+
+## Pulling the goalie
+`PULL_TIMINGS` + `t.pull`. The engine already resolved the last two minutes — at one fixed pair of
+odds for all thirty-two clubs, which is the one moment of a game where coaches most visibly differ.
+`normal` IS the old pair (0.17/0.45), the draw stays exactly where it was and there is still exactly
+one of it, so only the thresholds move and every calibrated seed replays unchanged. Measured over a
+season: 118 empty-net goals against on `early`, 70 on `late`.
+
+**The AI's derivation sits behind `coachStaff`** — thirty-one benches all calling it differently
+moves the league's goal totals, and three realism checks caught exactly that. Your own choice always
+applies, because you asked for it.
+
 ## The third club
 `brokerTrade`. The deal that dies at the cap: you have the pieces, they have the piece, neither of
 you can fit the contract, so the best player available at the deadline goes nowhere. In real hockey

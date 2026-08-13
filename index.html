@@ -163,6 +163,7 @@ const RULES_DEFAULT = {
   coachStaff: false,       // hire assistants rather than one do-everything coach
   rivalryGrowth: false,    // rivalries harden when clubs meet in the spring
   contractBonuses: false,  // signing bonuses and performance bonuses on deals
+  worldCup: false,         // the break belongs to the countries every fourth year
   pickProtection: false,   // traded picks can carry protections
   ownership: false,        // you are paid, and you can buy in
 };
@@ -217,6 +218,9 @@ const DEPTH_RULES = [
     opts: [[false, "Off"], [true, "On"]] },
   { k: "rivalryGrowth", deep: true, group: "The game", label: "Rivalries build",
     blurb: "Meeting in the playoffs makes it personal, and it stays that way.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "worldCup", deep: true, group: "The game", label: "World tournament",
+    blurb: "Every fourth winter the break belongs to the countries instead. Your best man comes back with a medal, or doesn't.",
     opts: [[false, "Off"], [true, "On"]] },
   { k: "contractBonuses", deep: true, group: "The game", label: "Bonuses",
     blurb: "Pay a man up front and he'll take less — but you can never buy that part back. Kids and old men can also play for bonuses.",
@@ -2278,6 +2282,38 @@ function matchupMix(G, side, li, oppT) {
   return tot > 0 ? mix.map((v) => v / tot) : [1, 0, 0, 0];
 }
 
+/* ------------------------------ the last minute ---------------------------
+ * Down one with the clock going, a coach decides how early the goalie comes
+ * off. The engine already resolved this — at one fixed pair of odds for all
+ * thirty-two clubs, which is the one moment of a hockey game where coaches most
+ * visibly differ.
+ *
+ * `normal` IS the old pair of numbers, so the default changes nothing. Going
+ * early buys chances at the cost of empty nets; sitting tight does the reverse.
+ *
+ * An AI club's choice comes off the system its coach plays — needing no storage
+ * and no draw, since a trap coach was never going to pull with three minutes
+ * left. That part sits behind `coachStaff`, because thirty-one benches all
+ * making different calls moves the league's goal totals, and the calibrated
+ * engine has to still be measurable underneath. YOUR OWN choice always applies:
+ * you asked for it.
+ * ------------------------------------------------------------------------- */
+const PULL_TIMINGS = {
+  late:   { label: "Late", tie: 0.11, eng: 0.33, blurb: "Give him the last twenty seconds and no more. Fewer empty nets against, and fewer nights you tie it." },
+  normal: { label: "Normal", tie: 0.17, eng: 0.45, blurb: "A minute or so, the way most clubs do it." },
+  early:  { label: "Early", tie: 0.24, eng: 0.56, blurb: "Two minutes, six skaters, and take what comes. More ties, and more losses by two." },
+};
+function pullTiming(G, teamId) {
+  const t = G.teams[teamId];
+  if (t && t.pull && PULL_TIMINGS[t.pull]) return PULL_TIMINGS[t.pull];
+  if (t && teamId !== G.userTeam && depthOn(G, "coachStaff")) {
+    const sys = coachOf(t).system;
+    if (sys === "trap") return PULL_TIMINGS.late;
+    if (sys === "aggressive") return PULL_TIMINGS.early;
+  }
+  return PULL_TIMINGS.normal;
+}
+
 const ES_MINUTES = 47;      // even strength
 const PP_MIN_PER = 1.7;     // ice time per power play
 // How the two special-teams units split the work, as real clubs do.
@@ -2765,11 +2801,17 @@ function simGame(G, homeId, awayId, opts) {
     const tLines = trailing === home ? hl : al;
     const lLines = leading === home ? hl : al;
     const roll = rnd(G);
-    if (roll < 0.17) {
+    /* HOW EARLY he goes for it. The draw stays exactly where it was and there
+       is still exactly one of it — only the two thresholds move — so a club on
+       the default reproduces the old numbers to the goal and every calibrated
+       seed replays unchanged. Going early buys chances at the cost of empty
+       nets, which is the entire bargain and the reason coaches disagree. */
+    const pull = pullTiming(G, trailing.teamId);
+    if (roll < pull.tie) {
       const unit = tLines.PP[0].length ? tLines.PP[0] : tLines.F[0];
       resolveShots(G, { sBox: trailing, gBox: leading, oppBox: leading, events: ev, shots: shotLog },
         1, unit, [], leading.goalie, "en6");
-    } else if (roll < 0.45) {
+    } else if (roll < pull.eng) {
       const sc = shooterFrom(G, lLines.F[0], 0.3);
       if (sc && leading.players[sc.id]) {
         leading.g++; leading.sog++;
@@ -3088,7 +3130,13 @@ function simDay(G) {
   // Clubs ring about listed players every few days rather than instantly.
   if ((G.block || []).length && G.day % 5 === 0) generateOffers(G);
   if (G.day === deadlineDay(G)) { aiDeadlineMoves(G); news(G, "The trade deadline has passed.", "info"); }
-  if (G.day === G.allStarDay && !G.allStar) runAllStar(G);
+  /* The break is one fortnight, so it's one thing or the other — in a
+     tournament year the All-Star game simply doesn't happen, which is exactly
+     what the league does. */
+  if (G.day === G.allStarDay && !G.allStar) {
+    if (worldCupYear(G) && (!G.worldCup || G.worldCup.year !== G.year)) runWorldCup(G);
+    else runAllStar(G);
+  }
 
   // Recovery. Injuries are quoted in GAMES, so they only tick down for clubs
   // that actually played — an injury doesn't heal on an off day. Fatigue does.
@@ -3639,6 +3687,132 @@ function runAllStar(G) {
   const mine = rosters.east.concat(rosters.west).filter((id) => G.players[id] && G.players[id].teamId === G.userTeam);
   if (mine.length) news(G, `All-Star selections: ${mine.map((id) => fullName(G.players[id])).join(", ")}.`, "good");
   return G.allStar;
+}
+
+/* ---------------------------- the world tournament -------------------------
+ * Every four years the midwinter break is somebody else's fortnight. Your best
+ * player disappears to play for his country, comes back with a medal or a limp,
+ * and for two weeks the league is not the only thing that matters.
+ *
+ * NATIONALITY IS DERIVED, never stored. `hashUnit(p.id)` against a weighted
+ * table gives every player in the game — past, present, and the fourteen
+ * hundred already in your save — a country for free: no save size, no draw, no
+ * migration, and the same answer every time you ask. The weights are the shape
+ * of the sport, so the two big hockey nations supply most of the league and the
+ * rest are real but thin, which is what makes an upset an upset.
+ *
+ * Behind the `worldCup` rule and off by default, because a career that never
+ * leaves the league is a perfectly good career.
+ * ------------------------------------------------------------------------- */
+const NATIONS = [
+  { k: "CAN", name: "Canada", w: 0.42 },
+  { k: "USA", name: "United States", w: 0.24 },
+  { k: "SWE", name: "Sweden", w: 0.09 },
+  { k: "FIN", name: "Finland", w: 0.07 },
+  { k: "RUS", name: "Russia", w: 0.07 },
+  { k: "CZE", name: "Czechia", w: 0.05 },
+  { k: "SVK", name: "Slovakia", w: 0.03 },
+  { k: "SUI", name: "Switzerland", w: 0.03 },
+];
+const WORLD_CUP_EVERY = 4;      // an Olympic rhythm
+const WORLD_SQUAD = 20;
+function nationOf(p) {
+  if (!p) return NATIONS[0];
+  let x = hashUnit(p.id * 7 + 13);
+  for (let i = 0; i < NATIONS.length; i++) { x -= NATIONS[i].w; if (x <= 0) return NATIONS[i]; }
+  return NATIONS[NATIONS.length - 1];
+}
+const worldCupYear = (G) => depthOn(G, "worldCup") && G.year % WORLD_CUP_EVERY === 0;
+/* Who he'd pick. The season to date is the whole selection argument, which is
+   why a hot winter is worth something beyond the standings. */
+function worldSquad(G, key) {
+  const pool = playersOf(G).filter((p) => p.teamId != null && !p.retired
+    && nationOf(p).k === key && p.season && p.season.gp >= 5);
+  const rank = (p) => (p.pos === "G" ? svPct(p.season) * 100 : pts(p.season) / Math.max(1, p.season.gp) * 40)
+    + p.ovr * 0.6;
+  const g = pool.filter((p) => p.pos === "G").sort((a, b) => rank(b) - rank(a)).slice(0, 2);
+  const d = pool.filter((p) => p.pos === "D").sort((a, b) => rank(b) - rank(a)).slice(0, 6);
+  const f = pool.filter((p) => p.pos !== "D" && p.pos !== "G").sort((a, b) => rank(b) - rank(a))
+    .slice(0, WORLD_SQUAD - g.length - d.length);
+  return g.concat(d, f).map((p) => p.id);
+}
+function squadStrength(G, ids) {
+  const ps = ids.map((id) => G.players[id]).filter(Boolean);
+  if (!ps.length) return 0;
+  // The top of a national squad decides the game; the twentieth man never plays.
+  const sorted = ps.slice().sort((a, b) => b.ovr - a.ovr).slice(0, 14);
+  return round1(sorted.reduce((s, p) => s + p.ovr, 0) / sorted.length);
+}
+/* A straight eight-nation knockout. Seeded by squad, so the shape of an upset
+   is the shape of an upset: possible every round, likelier the closer it is. */
+function runWorldCup(G) {
+  const entrants = NATIONS.map((n) => {
+    const ids = worldSquad(G, n.k);
+    return { ...n, ids, str: squadStrength(G, ids) };
+  }).filter((n) => n.ids.length >= 10).sort((a, b) => b.str - a.str);
+  if (entrants.length < 4) return null;
+  const rounds = [];
+  let alive = entrants.slice(0, 8);
+  // Seed one against eight, and so on down.
+  alive = alive.map((n, i) => n).sort((a, b) => b.str - a.str);
+  let order = alive.slice();
+  const bracket = [];
+  for (let i = 0; i < Math.floor(order.length / 2); i++) bracket.push([order[i], order[order.length - 1 - i]]);
+  let ties = bracket;
+  let bronzePair = null;
+  while (ties.length >= 1) {
+    const results = ties.map(([a, b]) => {
+      if (!b) return { a, b: null, aG: 0, bG: 0, win: a };
+      const edge = (a.str - b.str) * 0.09;
+      const aG = Math.max(0, Math.round(gauss(G, 2.9 + edge, 1.35)));
+      let bG = Math.max(0, Math.round(gauss(G, 2.9 - edge, 1.35)));
+      // Somebody has to go home, so a draw goes to overtime and one goal.
+      if (aG === bG) return { a, b, aG: aG + 1, bG, win: rnd(G) < clamp(0.5 + edge * 0.5, 0.2, 0.8) ? a : b, ot: true };
+      return { a, b, aG, bG, win: aG > bG ? a : b };
+    });
+    // Fix the overtime scoreline to match who actually won it.
+    results.forEach((r) => { if (r.ot && r.win === r.b) { const t = r.aG; r.aG = r.bG; r.bG = t; } });
+    rounds.push(results.map((r) => ({ a: r.a.k, b: r.b ? r.b.k : null, aG: r.aG, bG: r.bG, win: r.win.k, ot: !!r.ot })));
+    const winners = results.map((r) => r.win);
+    if (winners.length === 1) break;
+    if (winners.length === 2) bronzePair = results.map((r) => (r.win === r.a ? r.b : r.a)).filter(Boolean);
+    ties = [];
+    for (let i = 0; i < winners.length; i += 2) ties.push([winners[i], winners[i + 1]]);
+  }
+  const final = rounds[rounds.length - 1][0];
+  const gold = final.win;
+  const silver = final.win === final.a ? final.b : final.a;
+  let bronze = null;
+  if (bronzePair && bronzePair.length === 2) {
+    const [x, y] = bronzePair;
+    const edge = (x.str - y.str) * 0.09;
+    bronze = (rnd(G) < clamp(0.5 + edge * 0.35, 0.2, 0.8) ? x : y).k;
+  }
+  const champ = entrants.find((n) => n.k === gold);
+  const mvp = champ.ids.map((id) => G.players[id]).filter(Boolean)
+    .sort((a, b) => (pts(b.season) || 0) - (pts(a.season) || 0))[0];
+  const cup = {
+    year: G.year, gold, silver, bronze, rounds,
+    mvp: mvp ? mvp.id : null,
+    squads: entrants.reduce((m, n) => { m[n.k] = { ids: n.ids, str: n.str }; return m; }, {}),
+  };
+  // On the player, so a medal outlives the tournament that produced it.
+  [["gold", gold], ["silver", silver], ["bronze", bronze]].forEach(([kind, key]) => {
+    if (!key) return;
+    (entrants.find((n) => n.k === key) || { ids: [] }).ids.forEach((id) => {
+      const p = G.players[id];
+      if (!p) return;
+      p.medals = p.medals || [];
+      p.medals.push({ year: G.year, kind, nation: key });
+    });
+  });
+  G.worldCup = cup;
+  G.worldCups = (G.worldCups || []).concat(cup);
+  const mine = (champ.ids || []).filter((id) => G.players[id] && G.players[id].teamId === G.userTeam);
+  news(G, `${NATIONS.find((n) => n.k === gold).name} win the world tournament`
+    + (mine.length ? ` — ${mine.map((id) => fullName(G.players[id])).join(", ")} bring one home.` : "."),
+    mine.length ? "good" : "info");
+  return cup;
 }
 
 /* --------------------------------- awards --------------------------------- */
@@ -6711,6 +6885,9 @@ function startNextSeason(G) {
   G.playoffs = null;
   G.awards = null;
   G.allStar = null;
+  /* The tournament itself is cleared, but `G.worldCups` is not — every medal
+     ever won stays, the way the drafts do. */
+  G.worldCup = null;
   G.lastGame = null;
   // The logs are a this-season view; a career's worth would dwarf the save.
   G.shotLog = {};
@@ -6766,7 +6943,9 @@ function pruneSave(G) {
     // Anyone with no trophies and no honours is not history, just clutter.
     const honoured = p.hof != null
       || G.teams.some((t) => (t.honours || []).some((h) => h.pid === p.id))
-      || (p.rings || []).length > 0;
+      || (p.rings || []).length > 0
+      // A man who won it for his country is history too, whatever his club did.
+      || (p.medals || []).some((m) => m.kind === "gold");
     if (!honoured && !(p.trophies || []).length) keep.push(p.id);
   });
   // Keep the most recent departures around so history pages can still name them.
@@ -7441,7 +7620,12 @@ function TrophyCase({ G, p }) {
     (byAward[t.award] = byAward[t.award] || []).push(t.year);
   });
   const awards = Object.entries(byAward).sort((a, b) => b[1].length - a[1].length);
-  if (!rings.length && !stars.length && !awards.length) return null;
+  // A medal is won in a different sweater, so it sits apart from the club stuff.
+  const medals = depthOn(G, "worldCup") ? (p.medals || []) : [];
+  if (!rings.length && !stars.length && !awards.length && !medals.length) return null;
+  const MEDAL = { gold: ["text-amber-200", "bg-amber-500/15 border-amber-500/40", "Gold"],
+                  silver: ["text-slate-200", "bg-slate-400/15 border-slate-400/40", "Silver"],
+                  bronze: ["text-orange-200", "bg-orange-700/20 border-orange-600/40", "Bronze"] };
 
   return (
     <Section title="Trophy case" className="p-3">
@@ -7485,6 +7669,25 @@ function TrophyCase({ G, p }) {
             <span className="text-slate-200">All-Star</span>
             {stars.length > 1 ? <span className="text-sky-300 font-semibold">×{stars.length}</span> : null}
             <span className="text-slate-500 text-xs">{stars.slice().sort().join(", ")}</span>
+          </div>
+        ) : null}
+
+        {medals.length ? (
+          <div>
+            <div className="text-sm text-slate-300">
+              For {nationOf(p).name}
+            </div>
+            <div className="flex flex-wrap gap-1.5 mt-1.5">
+              {medals.slice().sort((a, b) => a.year - b.year).map((m, i) => {
+                const [tone, chip, label] = MEDAL[m.kind] || MEDAL.bronze;
+                return (
+                  <span key={i} title={`${label} — ${m.year}`}
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${chip} ${tone}`}>
+                    {label} {m.year}
+                  </span>
+                );
+              })}
+            </div>
           </div>
         ) : null}
       </div>
@@ -7833,6 +8036,10 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
     <Modal wide title={
       <span className="flex items-center gap-2">
         <PosBadge pos={p.pos} /> {fullName(p)}
+        {depthOn(G, "worldCup") ? (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#16233c] text-slate-300"
+            title={nationOf(p).name}>{nationOf(p).k}</span>
+        ) : null}
         <HonourMark G={G} p={p} />
         {hasNtc(p) ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900 text-amber-200">NTC</span> : null}
         {p.inj > 0 ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-900 text-rose-200">INJ {p.inj}</span> : null}
@@ -9274,6 +9481,25 @@ function LinesTab({ G, setG }) {
               ))}
             </div>
           </div>
+          <div>
+            <div className="text-xs text-slate-400 mb-1">
+              Pulling the goalie — how early he comes off when you're down one late.
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              {Object.entries(PULL_TIMINGS).map(([k, v]) => (
+                <button key={k} title={v.blurb}
+                  className={(G.teams[G.userTeam].pull || "normal") === k ? btnPri : btnGhost}
+                  onClick={() => {
+                    const g2 = { ...G, teams: G.teams.slice() };
+                    g2.teams[G.userTeam] = { ...g2.teams[G.userTeam], pull: k };
+                    setG(g2);
+                  }}>{v.label}</button>
+              ))}
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1">
+              {PULL_TIMINGS[G.teams[G.userTeam].pull || "normal"].blurb}
+            </div>
+          </div>
         </div>
       </Section>
 
@@ -10444,9 +10670,77 @@ function PlayoffsTab({ G, setG, openPlayer }) {
 
 /* -------------------------------- All-Star -------------------------------- */
 
+/* This winter's tournament, round by round, with the squad of whoever won it. */
+function WorldCupBracket({ G, cup, openPlayer }) {
+  const name = (k) => (NATIONS.find((n) => n.k === k) || { name: k }).name;
+  const champSquad = ((cup.squads || {})[cup.gold] || { ids: [] }).ids
+    .map((id) => G.players[id]).filter(Boolean)
+    .sort((a, b) => (pts(b.season) || 0) - (pts(a.season) || 0));
+  const ROUND = ["Quarter-finals", "Semi-finals", "Final"];
+  return (
+    <div className="space-y-3">
+      <div className={`${card} p-4 text-center`}>
+        <div className="text-xs uppercase tracking-wide text-slate-400">{cup.year} World Tournament</div>
+        <div className="text-lg font-semibold mt-1 text-amber-200">{name(cup.gold)}</div>
+        <div className="text-sm text-slate-400 mt-0.5">
+          {name(cup.silver)} second{cup.bronze ? ` · ${name(cup.bronze)} third` : ""}
+        </div>
+        {cup.mvp != null && G.players[cup.mvp] ? (
+          <button className="text-sm text-sky-400 hover:underline mt-1" onClick={() => openPlayer(cup.mvp)}>
+            Best player: {fullName(G.players[cup.mvp])}
+          </button>
+        ) : null}
+      </div>
+      <div className="grid md:grid-cols-3 gap-3">
+        {cup.rounds.map((r, ri) => (
+          <Section key={ri} title={ROUND[ri] || `Round ${ri + 1}`} className="p-3">
+            <div className="space-y-1 pt-1 text-sm">
+              {r.map((t, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span className={t.win === t.a ? "text-slate-100" : "text-slate-500"}>{name(t.a)}</span>
+                  <span className="text-slate-500 tnum">{t.aG}–{t.bG}</span>
+                  <span className={t.win === t.b ? "text-slate-100" : "text-slate-500"}>{name(t.b)}</span>
+                  {t.ot ? <span className="text-[10px] text-amber-400">OT</span> : null}
+                </div>
+              ))}
+            </div>
+          </Section>
+        ))}
+      </div>
+      <Section title={`${name(cup.gold)} — the squad`} className="p-3">
+        <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 pt-1 text-sm">
+          {champSquad.map((p) => (
+            <div key={p.id} className="flex items-center gap-2">
+              <PosBadge pos={p.pos} />
+              <button className="flex-1 text-left truncate hover:text-sky-300" onClick={() => openPlayer(p.id)}>
+                {fullName(p)}
+              </button>
+              <span className="text-slate-500 text-xs">
+                {p.teamId != null ? G.teams[p.teamId].abbr : "—"}
+              </span>
+              <span className="text-slate-400 tnum text-xs w-6 text-right">{p.ovr}</span>
+            </div>
+          ))}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
 function AllStarTab({ G, openPlayer }) {
   const a = G.allStar;
-  if (!a) return <div className="text-slate-400 text-sm">The All-Star break hasn't come round yet.</div>;
+  /* In a tournament year there IS no All-Star game — the break belongs to the
+     countries — so this tab shows the tournament rather than an empty room. */
+  if (G.worldCup) return <WorldCupBracket G={G} cup={G.worldCup} openPlayer={openPlayer} />;
+  if (!a) {
+    return (
+      <div className="text-slate-400 text-sm">
+        {worldCupYear(G)
+          ? "The countries have the break this winter — no All-Star game this year."
+          : "The All-Star break hasn't come round yet."}
+      </div>
+    );
+  }
   const Side = ({ title, ids, score }) => (
     <Section title={title} className="p-3">
       <div className="text-3xl font-bold tnum text-center py-1">{score}</div>
@@ -11293,6 +11587,64 @@ function ManagerCareer({ G, openTeam }) {
   );
 }
 
+/* Every tournament ever played, newest first, with the run that won it. Like
+   the drafts, nothing here is ever thrown away. */
+function WorldCupHistory({ G, openPlayer }) {
+  const cups = (G.worldCups || []).slice().sort((a, b) => b.year - a.year);
+  if (!depthOn(G, "worldCup")) return null;
+  const name = (k) => (NATIONS.find((n) => n.k === k) || { name: k }).name;
+  if (!cups.length) {
+    const next = G.year + ((WORLD_CUP_EVERY - (G.year % WORLD_CUP_EVERY)) % WORLD_CUP_EVERY);
+    return (
+      <Section title="World tournament" className="p-3">
+        <div className="text-sm text-slate-400 pt-1">
+          The countries take the break in {next === G.year ? "this winter" : next}.
+        </div>
+      </Section>
+    );
+  }
+  return (
+    <Section title="World tournament">
+      <div className="divide-y divide-[#16223a]">
+        {cups.map((c) => (
+          <div key={c.year} className="p-3 space-y-2">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="text-slate-500 text-sm tnum">{c.year}</span>
+              <span className="text-amber-200 font-medium">{name(c.gold)}</span>
+              <span className="text-slate-500 text-xs">beat</span>
+              <span className="text-slate-300">{name(c.silver)}</span>
+              {c.bronze ? <span className="text-orange-200 text-xs">· {name(c.bronze)} third</span> : null}
+              <span className="flex-1" />
+              {c.mvp != null && G.players[c.mvp] ? (
+                <button className="text-xs text-sky-400 hover:underline" onClick={() => openPlayer(c.mvp)}>
+                  {fullName(G.players[c.mvp])}
+                </button>
+              ) : null}
+            </div>
+            {/* The winners' road, one line — quarters, semi, final. */}
+            <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
+              {c.rounds.map((r, ri) => {
+                const tie = r.find((t) => t.win === c.gold);
+                if (!tie) return null;
+                const them = tie.a === c.gold ? tie.b : tie.a;
+                const us = tie.a === c.gold ? tie.aG : tie.bG;
+                const they = tie.a === c.gold ? tie.bG : tie.aG;
+                return (
+                  <span key={ri}>
+                    {["Quarters", "Semi", "Final"][ri] || `Round ${ri + 1}`}
+                    <span className="text-slate-300"> {us}–{they}</span> v {name(them)}
+                    {tie.ot ? <span className="text-amber-400"> OT</span> : null}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
 function HistoryTab({ G, setG, notify, openPlayer, openTeam }) {
   return (
     <div className="space-y-3">
@@ -11315,6 +11667,7 @@ function HistoryTab({ G, setG, notify, openPlayer, openTeam }) {
                 : "—" },
           ]} empty="No completed seasons yet." />
       </Section>
+      <WorldCupHistory G={G} openPlayer={openPlayer} />
       <DraftClassReport G={G} openPlayer={openPlayer} />
       <Section title="Clubs">
         <SortTable min={560} rows={G.teams} initial="cupWins" rowKey={(t) => t.id}

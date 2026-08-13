@@ -83,6 +83,9 @@ const EXPORTS = [
   "sellWillingness", "ownershipMarket", "buyStake", "sellStake", "ownerVoteChance",
   "standDown", "takeBackTheJob", "draftPar",
   "brokerFee", "brokerCandidates", "brokerTrade", "BROKER_FEE_RATE",
+  "PULL_TIMINGS", "pullTiming",
+  "NATIONS", "nationOf", "worldSquad", "squadStrength", "runWorldCup", "worldCupYear",
+  "WORLD_CUP_EVERY", "WORLD_SQUAD",
   "bonusesOn", "canPerfBonus", "sbOf", "pbOf", "perfBonusTarget", "perfBonusProgress",
   "settleBonuses", "applyBonusTerms", "aiBonusTerms",
   "SB_MAX", "SB_DISCOUNT", "PB_MAX", "PB_DISCOUNT", "PB_YOUNG", "PB_OLD",
@@ -3375,6 +3378,94 @@ const CHECKS = {
     const sell = A.sellStake(M, buy.teamId, 0.5);
     ok(sell.ok && sell.price > 0, `you can sell up ($${sell.price}M)`);
     ok(Math.abs(A.myShare(M, buy.teamId) - 0.5) < 0.02, "and keep the rest");
+  },
+
+  /* A fortnight in midwinter that belongs to somebody else. */
+  worldCup(A) {
+    section("Where everybody's from");
+    const G = A.newGame(0, { seed: 2610, rules: { seasonLen: 82, worldCup: true } });
+    const all = A.playersOf(G);
+    const counts = {};
+    all.forEach((p) => { const k = A.nationOf(p).k; counts[k] = (counts[k] || 0) + 1; });
+    ok(Object.keys(counts).length === A.NATIONS.length, "every nation is represented");
+    ok(counts.CAN > counts.SUI * 3, `and the big ones are big (CAN ${counts.CAN} vs SUI ${counts.SUI})`);
+    const one = all[10];
+    ok(A.nationOf(one).k === A.nationOf(one).k, "a man's country doesn't change");
+    ok(one.nat === undefined && one.nation === undefined, "and nothing is stored on him for it");
+
+    section("The tournament");
+    ok(!A.worldCupYear(A.newGame(0, { seed: 2610, rules: { seasonLen: 82 } })),
+      "with the rule off it never comes round");
+    // Play into the season so there are stat lines to pick a squad from.
+    while (G.day < G.allStarDay + 1 && G.phase === "regular") A.simDays(G, 5);
+    const isYear = G.year % A.WORLD_CUP_EVERY === 0;
+    if (!isYear) {
+      ok(!G.worldCup && !!G.allStar, "in an ordinary year the break is the All-Star game");
+    }
+    // Force one so the tournament itself is always exercised.
+    const cup = A.runWorldCup(G);
+    ok(cup && cup.gold, `somebody wins it (${cup.gold})`);
+    ok(cup.silver && cup.silver !== cup.gold, "and somebody loses the final");
+    ok(cup.bronze && cup.bronze !== cup.gold && cup.bronze !== cup.silver, "third place is played off");
+    ok(cup.rounds.length === 3, `eight nations, three rounds (${cup.rounds.length})`);
+    ok(cup.rounds[0].length === 4 && cup.rounds[2].length === 1, "and the bracket halves each time");
+    ok(cup.rounds.every((r) => r.every((t) => t.aG !== t.bG)), "no game ends level — somebody goes home");
+    ok(cup.mvp != null && G.players[cup.mvp], "the winners have a best player");
+
+    section("What a player brings home");
+    const golds = A.playersOf(G).filter((p) => (p.medals || []).some((m) => m.kind === "gold"));
+    ok(golds.length >= 10, `a whole squad is decorated (${golds.length})`);
+    ok(golds.every((p) => A.nationOf(p).k === cup.gold), "and they all played for the winners");
+    ok(golds[0].medals[0].year === G.year, "stamped with the year it was won");
+    const squad = A.worldSquad(G, cup.gold);
+    ok(squad.length >= 10 && squad.length <= A.WORLD_SQUAD, `a real squad size (${squad.length})`);
+    ok(squad.filter((id) => G.players[id].pos === "G").length <= 2, "and it doesn't take five goalies");
+    ok(A.squadStrength(G, squad) > 0, "with a strength you can seed on");
+
+    section("It doesn't disappear")
+    ok((G.worldCups || []).length === 1, "the tournament goes into the record");
+    A.simDays(G, 3);
+    ok((G.worldCups || []).length === 1, "and stays there");
+  },
+
+  /* The one moment of a hockey game where coaches most visibly differ. */
+  pull(A) {
+    section("When the goalie comes off");
+    const G = A.newGame(0, { seed: 5150, rules: { seasonLen: 41, coachStaff: true } });
+    ok(A.pullTiming(G, G.userTeam) === A.PULL_TIMINGS.normal, "the default is what it always was");
+    ok(A.PULL_TIMINGS.normal.tie === 0.17 && A.PULL_TIMINGS.normal.eng === 0.45,
+      "and those are the numbers the engine has always used");
+    ok(A.PULL_TIMINGS.early.tie > A.PULL_TIMINGS.normal.tie
+      && A.PULL_TIMINGS.early.eng > A.PULL_TIMINGS.normal.eng,
+      "going early buys chances AND concedes empty nets — both, or it isn't a decision");
+    ok(A.PULL_TIMINGS.late.tie < A.PULL_TIMINGS.normal.tie
+      && A.PULL_TIMINGS.late.eng < A.PULL_TIMINGS.normal.eng, "and sitting tight does the reverse");
+    G.teams[G.userTeam].pull = "early";
+    ok(A.pullTiming(G, G.userTeam) === A.PULL_TIMINGS.early, "your call is your call");
+
+    /* An AI club's comes off its coach, which needs no storage and no draw. */
+    const trap = G.teams.find((t) => t.id !== G.userTeam && A.coachOf(t).system === "trap");
+    const agg = G.teams.find((t) => t.id !== G.userTeam && A.coachOf(t).system === "aggressive");
+    ok(!trap || A.pullTiming(G, trap.id) === A.PULL_TIMINGS.late, "a trap coach waits");
+    ok(!agg || A.pullTiming(G, agg.id) === A.PULL_TIMINGS.early, "and a forechecking one doesn't");
+    /* Thirty-one benches all calling it differently moves the league's goal
+       totals, so it waits for the coaching rule — the calibrated engine has to
+       still be measurable underneath. */
+    const plain = A.newGame(0, { seed: 5150, rules: { seasonLen: 41 } });
+    ok(plain.teams.every((t) => A.pullTiming(plain, t.id) === A.PULL_TIMINGS.normal),
+      "on Classic every bench does what the engine always did");
+
+    section("It really changes games");
+    /* Same seed, same league, one club's setting different. Every other draw in
+       the season is identical, so any difference in empty-net goals is this. */
+    const count = (setting) => {
+      const L = A.newGame(0, { seed: 5150, rules: { seasonLen: 82 } });
+      L.teams.forEach((t) => { t.pull = setting; });
+      simSeason(A, L);
+      return A.playersOf(L).reduce((s, p) => s + ((p.season && p.season.eng) || 0), 0);
+    };
+    const late = count("late"), early = count("early");
+    ok(early > late, `early pulls concede more empty nets over a season (${early} vs ${late})`);
   },
 
   /* The deal that dies at the cap, and the club that saves it for a price. */
