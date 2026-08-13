@@ -195,6 +195,32 @@ could take away, and a twenty-season career had nothing to show for itself but a
   job back whenever he likes. That is the whole difference between owning the place and working
   there.
 
+## What thirty simulated years found
+The ownership layer shipped, and then got played — thirty seasons, buying whatever was affordable.
+It failed in four separate ways, none of which a unit test would have caught.
+
+- **A stake earned nothing.** The only income was the GM salary, so a career banked $2.4M a year
+  against slices priced at $26M and NEVER REACHED A MAJORITY: six clubs held at 15% after thirty
+  seasons, control of none of them. `clubProfit` / `payDividends` fix it — a yield on what the place
+  is worth, scaled by how it's actually run. A winning club clears real money, a losing one at the
+  cap LOSES it and every owner pays his share, so the stake compounds and buying into a badly run
+  club is the mistake it should be.
+- **The slices were too big.** 45% of the remainder in one lump meant thirteen years of saving with
+  no partial progress. A quarter buys a step every few years — a takeover you creep up on.
+- **You could own six clubs, and manage a seventh.** The run ended holding pieces of both sides of
+  a playoff series while working somewhere else entirely. `buyStake` now allows the club you RUN,
+  a slice at a time — plus the one exception of a club going in its entirety, which you can take on
+  from anywhere and then go and run.
+- **There was nothing to DO with a stake.** You bought it and the game carried on identically.
+  `DIRECTIONS` (rebuild / compete / win now) is the thing an owner actually decides: it costs
+  something real either way — a rebuild develops kids fast, empties the building and has to overpay
+  to sign anyone; going for it fills the place and signs cheap and stops anyone young learning —
+  and **an owner is not judged by his own board**, so `setMandate` returns the course he chose.
+  `INVESTMENTS` (building / facility / scouting) is where career earnings turn into hockey.
+
+After: first stake year 7, majority year 25, outright by 30 on a winning club — and on a losing one
+it stalls, which is the point.
+
 ## Brought over from the sibling games
 `~/soccer-gm` and `~/baseball-gm` are the same architecture; these are the ideas worth having here,
 written for hockey rather than translated knob-for-knob.

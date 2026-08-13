@@ -82,6 +82,8 @@ const EXPORTS = [
   "teamValue", "gmLegacy", "gmSalaryFor", "gmState", "payGm", "myShare", "isMajorityOwner",
   "sellWillingness", "ownershipMarket", "buyStake", "sellStake", "ownerVoteChance",
   "standDown", "takeBackTheJob", "draftPar",
+  "clubProfit", "payDividends", "DIVIDEND_YIELD", "DIRECTIONS", "directionOf", "setDirection",
+  "INVESTMENTS", "investLevel", "investCost", "investInClub", "ownsAny",
   "brokerFee", "brokerCandidates", "brokerTrade", "BROKER_FEE_RATE",
   "PULL_TIMINGS", "pullTiming",
   "PRESSERS", "pickPresser", "answerPresser", "fanMood", "moveFans", "PRESSER_COOLDOWN",
@@ -3333,9 +3335,16 @@ const CHECKS = {
 
     const gm = A.gmState(M);
     gm.cash = 500;
-    const buy = mk.find((o) => o.kind !== "buyout");
+    /* THE CLUB YOU RUN. A thirty-year playthrough ended holding minority
+       stakes in six clubs at once — several in the same division — while
+       managing a seventh. No league permits either. */
+    const buy = { teamId: M.userTeam, share: 0.2, price: 20 };
+    const rival = M.teams.find((t) => t.id !== M.userTeam);
+    ok(!A.buyStake(M, rival.id, 0.2, 20).ok, "you can't buy a piece of somebody else's club");
     const r = A.buyStake(M, buy.teamId, buy.share, buy.price);
     ok(r.ok, "you can buy in");
+    ok(!A.buyStake(M, rival.id, 1, A.teamValue(M, rival.id) * 1.2).ok,
+      "and not even a whole one while you hold a stake somewhere");
     ok(Math.abs(A.myShare(M, buy.teamId) - buy.share) < 0.02, "and you hold what you bought");
     ok(gm.cash === 500 - buy.price, "the money is really spent");
     ok(gm.ownHistory.length === 1 && gm.ownHistory[0].from === M.year, "it goes on your record");
@@ -3380,6 +3389,100 @@ const CHECKS = {
     const sell = A.sellStake(M, buy.teamId, 0.5);
     ok(sell.ok && sell.price > 0, `you can sell up ($${sell.price}M)`);
     ok(Math.abs(A.myShare(M, buy.teamId) - 0.5) < 0.02, "and keep the rest");
+
+    /* Buying a club WHOLE from outside is the one exception — and then you go
+       and run it, because that's what buying a hockey club means. */
+    const W = A.newGame(0, { seed: 1919, rules: { seasonLen: 41, ownership: true } });
+    const away = W.teams.find((t) => t.id !== W.userTeam);
+    A.gmState(W).cash = 5000;
+    const whole = A.buyStake(W, away.id, 1, A.teamValue(W, away.id) * 1.12);
+    ok(whole.ok, "a club going in one piece can be bought from anywhere");
+    ok(W.userTeam === away.id, "and you take the chair yourself");
+  },
+
+  /* What owning actually pays, and what an owner actually decides. Thirty
+     simulated years found both holes: a stake earned nothing, and there was
+     nothing to do with one. */
+  ownerDirection(A) {
+    section("A club pays its owners");
+    const G = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true, autoManage: true } });
+    const me = G.userTeam;
+    ok(A.clubProfit(G, me) !== undefined, "a club has a bottom line");
+    // A winning club clears money; a losing one at the cap burns it.
+    const good = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
+    good.teams[me].seasons = [{ year: good.year, pts: 66, playoffs: true, rounds: 2 }];
+    const bad = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
+    bad.teams[me].seasons = [{ year: bad.year, pts: 30, playoffs: false, rounds: 0 }];
+    ok(A.clubProfit(good, me) > 0, `a good year clears money ($${A.clubProfit(good, me)}M)`);
+    ok(A.clubProfit(bad, me) < 0, `a bad one loses it ($${A.clubProfit(bad, me)}M)`);
+    ok(A.clubProfit(good, me) > A.clubProfit(bad, me), "and the gap is the whole point");
+
+    A.gmState(good).stakes[me] = 0.5;
+    const before = A.gmState(good).cash;
+    A.payDividends(good);
+    ok(A.gmState(good).cash > before, `an owner is paid his share ($${A.gmState(good).cash - before}M)`);
+    ok((A.gmState(good).dividends || []).length === 1, "and it goes on the record");
+    A.gmState(bad).stakes[me] = 0.5;
+    const bcash = A.gmState(bad).cash;
+    A.payDividends(bad);
+    ok(A.gmState(bad).cash < bcash, "a share of a loss is also a share");
+    // With no stake there is nothing to pay.
+    const none = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
+    const ncash = A.gmState(none).cash;
+    A.payDividends(none);
+    ok(A.gmState(none).cash === ncash, "and a man who owns nothing is paid nothing for it");
+
+    section("Setting the course");
+    ok(!A.directionOf(G, me), "a manager doesn't set the club's direction");
+    ok(!A.setDirection(G, "rebuild").ok, "and can't be asked to");
+    A.gmState(G).stakes[me] = 0.6;
+    const d = A.setDirection(G, "rebuild");
+    ok(d.ok && A.directionOf(G, me) === A.DIRECTIONS.rebuild, "a controlling owner can");
+    ok(G.mandate.key === "rebuild" && G.mandate.owner,
+      "and the board's expectation becomes the thing HE chose");
+    A.setMandate(G);
+    ok(G.mandate.key === "rebuild", "which survives the next time the mandate is set");
+    ok(!A.directionOf(G, G.teams.find((t) => t.id !== me).id), "nobody else's club has one");
+
+    /* Each direction has to cost something, or it's a free win. */
+    ok(A.DIRECTIONS.rebuild.dev > 1 && A.DIRECTIONS.rebuild.gate < 1 && A.DIRECTIONS.rebuild.ask > 1,
+      "a rebuild develops kids, empties the building and has to overpay to sign anyone");
+    ok(A.DIRECTIONS.winNow.dev < 1 && A.DIRECTIONS.winNow.gate > 1 && A.DIRECTIONS.winNow.ask < 1,
+      "going for it fills it and signs cheap, and nobody young learns a thing");
+    const R = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
+    const fa = R.freeAgents.map((id) => R.players[id]).sort((a, b) => b.ovr - a.ovr)[0];
+    const flat = A.askingPrice(R, fa.id, R.userTeam, 3);
+    A.gmState(R).stakes[R.userTeam] = 0.6;
+    A.setDirection(R, "winNow");
+    ok(A.askingPrice(R, fa.id, R.userTeam, 3) < flat,
+      `players take less to come and chase it ($${A.askingPrice(R, fa.id, R.userTeam, 3)}M vs $${flat}M)`);
+    A.setDirection(R, "rebuild");
+    ok(A.askingPrice(R, fa.id, R.userTeam, 3) > flat, "and have to be paid to come and lose");
+
+    section("Putting your own money in");
+    const I = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
+    ok(!A.investInClub(I, I.userTeam, "arena").ok, "you can't build on a club you don't own");
+    A.gmState(I).stakes[I.userTeam] = 0.3;
+    A.gmState(I).cash = 200;
+    const gate0 = A.gateFor(I, I.userTeam);
+    const inv = A.investInClub(I, I.userTeam, "arena");
+    ok(inv.ok && A.investLevel(I, I.userTeam, "arena") === 1, "a minority owner can still build");
+    ok(A.gmState(I).cash === 200 - inv.cost, "out of his own pocket");
+    ok(A.gateFor(I, I.userTeam) > gate0, `and every home date is worth more ($${A.gateFor(I, I.userTeam)}M vs $${gate0}M)`);
+    ok(A.investCost(I, I.userTeam, "arena") > inv.cost, "the next one costs more");
+    let g2 = 0;
+    while (A.investInClub(I, I.userTeam, "arena").ok && g2++ < 10);
+    ok(A.investLevel(I, I.userTeam, "arena") === A.INVESTMENTS.arena.max,
+      `there's a ceiling (${A.INVESTMENTS.arena.max})`);
+    // Scouting is the one that shows up somewhere other than money.
+    const S = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
+    A.gmState(S).stakes[S.userTeam] = 0.3; A.gmState(S).cash = 200;
+    A.investInClub(S, S.userTeam, "scouting");
+    simSeason(A, S); simPlayoffs(A, S);
+    const plain = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
+    simSeason(A, plain); simPlayoffs(A, plain);
+    ok(S.scoutPoints > plain.scoutPoints,
+      `more eyes on more rinks (${S.scoutPoints} vs ${plain.scoutPoints})`);
   },
 
   /* Two things brought over from the sibling games: the running number a fan

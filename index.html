@@ -437,7 +437,12 @@ function ownershipMarket(G) {
       /* You're already in. Partners will sell you more, and the price goes up
          as your stake does — the last slice is always the dearest, because the
          man holding it knows exactly what it's worth to you. */
-      const slice = Math.min(1 - mine, Math.max(STAKE_MIN, (1 - mine) * 0.45));
+      /* A QUARTER of what's left, not nearly half. At 45% the first step up
+         from a 15% stake was 38% in one $27M lump — thirteen years of saving
+         with no partial progress, and a thirty-year career that reached a
+         majority of nothing. A quarter buys a step every few years, which is
+         how a takeover actually feels: you creep up on it. */
+      const slice = Math.min(1 - mine, Math.max(STAKE_MIN, (1 - mine) * 0.25));
       out.push({ kind: "buyout", teamId: t.id, share: round1(slice * 100) / 100,
         price: round1(value * slice * (1.08 + mine * 0.5)), value, willing: w });
       return;
@@ -461,7 +466,25 @@ function buyStake(G, teamId, share, price) {
   if (!depthOn(G, "ownership")) return { ok: false, why: "ownership is switched off" };
   const gm = gmState(G);
   if (price > gm.cash) return { ok: false, why: `you have $${gm.cash}M — that costs $${price}M` };
+  /* ONE CLUB, AND IT HAS TO BE YOURS. Thirty simulated years ended with
+     minority stakes in six clubs at once, several in the same division — a man
+     holding a piece of both sides of a playoff series — and, worse, running
+     Hartford while owning Boise. No league permits either.
+     What's left is the thing the ladder was always for: you buy the club you
+     work at, a slice at a time. The one exception is a club going in its
+     ENTIRETY, which you can take on from anywhere — and then you go and run it,
+     because that's what buying a hockey club means. */
   const before = myShare(G, teamId);
+  const elsewhere = ownsAny(G).filter((k) => +k !== teamId);
+  if (elsewhere.length) {
+    return { ok: false, why: `you already hold part of the ${G.teams[+elsewhere[0]].name}`
+      + " — no league lets one man own two clubs. Sell that stake first." };
+  }
+  const outright = before <= 0 && share >= 1;
+  if (teamId !== G.userTeam && !outright) {
+    return { ok: false, why: `you can only buy into the club you run`
+      + ` — unless the ${G.teams[teamId].name} go in one piece.` };
+  }
   const after = Math.min(1, round1((before + share) * 100) / 100);
   gm.cash = round1(gm.cash - price);
   gm.stakes[teamId] = after;
@@ -478,6 +501,13 @@ function buyStake(G, teamId, share, price) {
     "good");
   if (before <= 0.5 && after > 0.5) {
     news(G, `You hold a controlling interest in the ${t.name}. The board cannot sack you.`, "good");
+  }
+  /* Bought a club whole from outside: you go and run it. Anything else would
+     leave you managing one club and owning another, which is the thing this
+     rule exists to prevent. */
+  if (teamId !== G.userTeam && after >= 1) {
+    takeJob(G, teamId);
+    news(G, `You own the ${t.name}, and you're taking the chair yourself.`, "good");
   }
   return { ok: true, share: after };
 }
@@ -496,6 +526,140 @@ function sellStake(G, teamId, share) {
     if (h && h.to == null) h.to = G.year;
   }
   return { ok: true, price };
+}
+
+/* ------------------------- what owning actually pays ------------------------
+ * Thirty simulated years found the hole: an owner's only income was his GM
+ * salary. Fifteen per cent of a sixty-million-dollar club paid nothing at all,
+ * so a career banked $2.4M a year against slices priced at $26M and NEVER
+ * REACHED A MAJORITY — six clubs held at 15% after thirty seasons and no
+ * control of any of them. The ladder had no rungs above the first.
+ *
+ * A club pays its owners now. `clubProfit` is a yield on what the place is
+ * worth, scaled by how it's actually run: a full building and a winning side
+ * clears real money, a bad one LOSES it and every owner pays his share. That
+ * makes the stake compound — the more you hold the faster you buy the rest,
+ * which is exactly how this works in life — and it makes buying into a badly
+ * run club the mistake it ought to be.
+ * ------------------------------------------------------------------------- */
+const DIVIDEND_YIELD = 0.13;      // a well-run club, per year, on its value
+function clubProfit(G, teamId) {
+  const t = G.teams[teamId];
+  if (!t) return 0;
+  const value = teamValue(G, teamId);
+  /* How the season went. Points percentage runs about .35–.65, so this lands
+     between roughly −0.6 and +1.4 — a bad year really does cost the owners. */
+  const last = (t.seasons || [])[Math.max(0, (t.seasons || []).length - 1)];
+  const pace = last && last.pts ? clamp(last.pts / (2 * ruleValue(G, "seasonLen")), 0.25, 0.72) : 0.5;
+  let run = (pace - 0.44) * 5;
+  if (last && last.cup) run += 0.5;
+  else if (last && last.playoffs) run += 0.25;
+  /* And what it's paying out. A club at the ceiling with nothing to show for it
+     is the classic way to lose money in this sport. */
+  const payroll = capHit(G, teamId) / Math.max(1, rules(G).capAmount);
+  run -= (payroll - 0.82) * 1.1;
+  return round1(value * DIVIDEND_YIELD * clamp(run, -0.55, 1.45));
+}
+/* Paid at the rollover, alongside the salary. Losses are paid too — that is
+   what a share is. */
+function payDividends(G) {
+  if (!depthOn(G, "ownership")) return G;
+  const gm = gmState(G);
+  let total = 0;
+  Object.keys(gm.stakes || {}).forEach((k) => {
+    const share = gm.stakes[k];
+    if (!share) return;
+    const cut = round1(clubProfit(G, +k) * share);
+    if (!cut) return;
+    total += cut;
+    gm.dividends = (gm.dividends || []).concat([{ year: G.year, teamId: +k, amt: cut }]).slice(-40);
+  });
+  if (!total) return G;
+  gm.cash = round1(gm.cash + total);
+  news(G, total > 0
+    ? `Your share of the year's profit: $${round1(total)}M.`
+    : `Your share of the year's losses: $${round1(-total)}M.`, total > 0 ? "good" : "bad");
+  return G;
+}
+
+/* --------------------------- an owner's decisions --------------------------
+ * The other half of what thirty years showed: there was nothing to DO with a
+ * stake. You bought it, and then the game carried on exactly as before.
+ *
+ * A direction is the thing an owner actually sets. As a GM the board hands you
+ * a mandate and judges you against it; as an owner you decide where the club is
+ * going and the board's job is to agree. It isn't free — each direction costs
+ * something real — and it only unlocks at a controlling interest, because a man
+ * with 15% doesn't get to decide.
+ * ------------------------------------------------------------------------- */
+const DIRECTIONS = {
+  rebuild: { label: "Rebuild", mandate: "rebuild",
+    blurb: "Lose now, on purpose. The kids play and come along much faster for it — but the building empties, and anybody you sign has to be paid to come and lose.",
+    dev: 1.22, gate: 0.86, ask: 1.1 },
+  compete: { label: "Compete", mandate: "playoffs",
+    blurb: "A playoff club every year. Nothing gained and nothing given up.",
+    dev: 1, gate: 1, ask: 1 },
+  winNow: { label: "Win now", mandate: "contend",
+    blurb: "Buy the years you have left. The place is full and players take less to come and chase it — and nobody under twenty-three learns a thing.",
+    dev: 0.82, gate: 1.14, ask: 0.9 },
+};
+function directionOf(G, teamId) {
+  if (!depthOn(G, "ownership")) return null;
+  if (teamId !== G.userTeam || !isMajorityOwner(G, teamId)) return null;
+  return DIRECTIONS[G.direction] || null;
+}
+function setDirection(G, key) {
+  if (!DIRECTIONS[key]) return { ok: false, why: "no such direction" };
+  if (!isMajorityOwner(G, G.userTeam))
+    return { ok: false, why: "you'd need a controlling interest to set the club's course" };
+  G.direction = key;
+  /* An owner is not judged by his own board. The mandate becomes the thing YOU
+     chose, which is the entire difference between owning it and working here. */
+  G.mandate = { key: DIRECTIONS[key].mandate, year: G.year, owner: true, ...MANDATES[DIRECTIONS[key].mandate] };
+  news(G, `You have set the club's course: ${DIRECTIONS[key].label.toLowerCase()}.`, "info");
+  return { ok: true };
+}
+
+/* --------------------------------- capital ---------------------------------
+ * And somewhere for the money to go besides another slice. An owner can put his
+ * own cash into the club — permanently, out of his pocket, never recoverable —
+ * and get something the club keeps for ever. It is the one way a manager's
+ * career earnings turn into hockey rather than into a bigger number.
+ * ------------------------------------------------------------------------- */
+const INVESTMENTS = {
+  arena: { label: "The building", cost: 12, max: 3,
+    blurb: "Seats, boards, a roof that doesn't leak. Every home date is worth more, for ever." },
+  facility: { label: "Training facility", cost: 15, max: 3,
+    blurb: "Where your young players actually get better. Compounds over a decade in a way nothing else does." },
+  scouting: { label: "Scouting department", cost: 9, max: 3,
+    blurb: "More eyes on more rinks — extra scouting visits every summer, permanently." },
+};
+function investLevel(G, teamId, k) {
+  const t = G.teams[teamId];
+  return (t && t.invest && t.invest[k]) || 0;
+}
+function investCost(G, teamId, k) {
+  const def = INVESTMENTS[k];
+  if (!def) return 0;
+  // Each one after the first costs more, so a club can't simply be bought good.
+  return round1(def.cost * (1 + investLevel(G, teamId, k) * 0.75));
+}
+function investInClub(G, teamId, k) {
+  if (!depthOn(G, "ownership")) return { ok: false, why: "ownership is switched off" };
+  const def = INVESTMENTS[k];
+  if (!def) return { ok: false, why: "no such thing to build" };
+  if (myShare(G, teamId) <= 0) return { ok: false, why: "you don't own any of this club" };
+  const lvl = investLevel(G, teamId, k);
+  if (lvl >= def.max) return { ok: false, why: `${def.label} is as good as it gets` };
+  const gm = gmState(G);
+  const cost = investCost(G, teamId, k);
+  if (cost > gm.cash) return { ok: false, why: `that costs $${cost}M and you have $${gm.cash}M` };
+  gm.cash = round1(gm.cash - cost);
+  const t = G.teams[teamId];
+  t.invest = t.invest || {};
+  t.invest[k] = lvl + 1;
+  news(G, `You have put $${cost}M of your own money into the ${def.label.toLowerCase()}.`, "good");
+  return { ok: true, level: lvl + 1, cost };
 }
 
 /* ------------------------------- the vote ----------------------------------
@@ -552,6 +716,13 @@ function takeJob(G, teamId) {
 }
 
 function setMandate(G) {
+  /* A man who owns the club is not handed a mandate by his own board. The
+     course he set IS the expectation, and it stands until he changes it. */
+  const owned = directionOf(G, G.userTeam);
+  if (owned) {
+    G.mandate = { key: owned.mandate, year: G.year, owner: true, ...MANDATES[owned.mandate] };
+    return G.mandate;
+  }
   const t = G.teams[G.userTeam];
   const strength = teamStrength(G, G.userTeam);
   const last = t.seasons && t.seasons.length ? t.seasons[t.seasons.length - 1] : null;
@@ -1225,7 +1396,12 @@ function gateFor(G, teamId) {
      club that never opens its mouth takes the same gate it always did. */
   const mood = teamId === G.userTeam && depthOn(G, "pressers")
     ? 1 + (fanMood(G) - 50) / 250 : 1;
-  return round1((GATE_BASE + (t.mkt || 3) * GATE_PER_MKT) * (0.7 + pace) * room * mood);
+  /* An owner's own money in the place, and the course he has set. A club that
+     announced a rebuild sells fewer seats; one going for it sells more. */
+  const dir = directionOf(G, teamId);
+  const built = 1 + investLevel(G, teamId, "arena") * 0.07;
+  return round1((GATE_BASE + (t.mkt || 3) * GATE_PER_MKT) * (0.7 + pace) * room * mood
+    * built * (dir ? dir.gate : 1));
 }
 /* Charged once a season, at the rollover, so a hire mid-year is paid for the
    year it happens in rather than pro-rated — the simplest rule that still
@@ -4388,8 +4564,12 @@ function finishSeason(G) {
   });
   // The manager's own row, written from the same numbers as the club's.
   recordGmSeason(G);
-  // And he gets paid, which is what makes the other half of the career possible.
+  /* And he gets paid, which is what makes the other half of the career
+     possible. The salary first, then his share of what the club cleared —
+     `t.seasons` has just been written above, so `clubProfit` reads the year
+     that actually finished rather than the one before it. */
   payGm(G);
+  payDividends(G);
   /* A contract that has run out is renegotiated on what you're worth NOW —
      which is the whole point of a legacy. Offered rather than imposed: it sits
      in `G.gmOffer` until you accept it. */
@@ -4791,7 +4971,8 @@ function buildDraftClass(G) {
     G.players[p.id] = p;
     G.draftClass.push(p.id);
   }
-  G.scoutPoints = SCOUT_POINTS;
+  // More eyes on more rinks, if an owner paid for them.
+  G.scoutPoints = SCOUT_POINTS + investLevel(G, G.userTeam, "scouting") * 5;
   G.draftLog = [];
   // Lottery order: non-playoff teams worst-first, with a real lottery on top.
   /* A career that STARTS in the offseason has no season behind it, so every
@@ -6418,6 +6599,11 @@ function askingPrice(G, pid, teamId, yrs, opts) {
     // Winners get a discount; a club at the bottom has to overpay.
     want *= 1 + (pos / G.teams.length - 0.5) * 0.16;
     want *= 1 - (t.cupWins > 0 ? 0.03 : 0);
+    /* A club that has announced it's going for it is somewhere players want to
+       be; one that has announced a rebuild has to pay a man to come and lose.
+       Only ever your own club, and only when you own it. */
+    const dir = directionOf(G, teamId);
+    if (dir) want *= dir.ask;
   }
   return round1(Math.max(MIN_SALARY, want - bonusDeferral(G, p, opts)));
 }
@@ -6951,6 +7137,14 @@ function progress(G, p, po) {
      intact here — the table is reset in `startNextSeason` and the title was
      awarded by `runFarmPlayoffs` back at the end of the regular season. */
   delta += devEnvironment(p, p.stats, p.farmSeason, farmRoom(G, p), po) * devAgeWeight(p.age);
+  /* An owner's building, and the course he set. Both only touch a player young
+     enough for his surroundings to matter, and both are exactly 1 for every
+     club in the league that isn't yours — so nothing here moves unless you own
+     the place and decided it should. */
+  if (p.teamId != null && devAgeWeight(p.age) > 0 && delta > 0) {
+    const dir = directionOf(G, p.teamId);
+    delta *= (1 + investLevel(G, p.teamId, "facility") * 0.06) * (dir ? dir.dev : 1);
+  }
   // A coach who develops players is worth real progression on top of that —
   // and on the farm it's the affiliate's coach whose job that is.
   if (p.age <= 24 && p.teamId != null) {
@@ -11735,6 +11929,76 @@ function CareerAndOwnership({ G, setG, notify, openTeam }) {
                 Sell 25%
               </button>
             </div>
+            {/* What the place actually cleared, and therefore what your share
+                of it was worth. A losing club at the cap costs you money. */}
+            <div className="flex flex-wrap items-baseline gap-2 pt-1 text-xs">
+              <span className="text-slate-500">Last year the club</span>
+              <b className={clubProfit(G, G.userTeam) >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                {clubProfit(G, G.userTeam) >= 0 ? "cleared" : "lost"} ${Math.abs(clubProfit(G, G.userTeam))}M
+              </b>
+              <span className="text-slate-500">
+                — your share, ${round1(clubProfit(G, G.userTeam) * here)}M
+              </span>
+            </div>
+          </div>
+        </Section>
+      ) : null}
+
+      {/* The two things an owner decides that a manager cannot. */}
+      {here > 0 ? (
+        <Section title="The club's course" className="p-3"
+          right={<span className="text-xs text-slate-500">
+            {here > 0.5 ? "yours to set" : "you'd need control"}</span>}>
+          <div className="pt-1 space-y-2">
+            <div className="flex gap-2 flex-wrap">
+              {Object.entries(DIRECTIONS).map(([k, d]) => (
+                <button key={k} disabled={here <= 0.5}
+                  className={(G.direction || "") === k ? btnPri : btnGhost}
+                  onClick={() => { const r = upd((g) => setDirection(g, k));
+                    notify(r.ok ? `The club is ${d.label.toLowerCase()}${k === "compete" ? "" : "ing"}.` : r.why); }}>
+                  {d.label}
+                </button>
+              ))}
+            </div>
+            <div className="text-xs text-slate-500">
+              {(DIRECTIONS[G.direction] || DIRECTIONS.compete).blurb}
+            </div>
+            {here > 0.5 ? (
+              <div className="text-xs text-sky-300">
+                An owner isn't judged by his own board — the course you set IS the expectation.
+              </div>
+            ) : null}
+          </div>
+        </Section>
+      ) : null}
+
+      {here > 0 ? (
+        <Section title="Putting your money into the club" className="p-3"
+          right={<span className="text-xs text-slate-500">out of your pocket, and it never comes back</span>}>
+          <div className="pt-1 space-y-2">
+            {Object.entries(INVESTMENTS).map(([k, d]) => {
+              const lvl = investLevel(G, G.userTeam, k);
+              const cost = investCost(G, G.userTeam, k);
+              const maxed = lvl >= d.max;
+              const afford = cost <= (gm.cash || 0);
+              return (
+                <div key={k} className="flex flex-wrap items-center gap-2 text-sm">
+                  <span className="w-36 shrink-0">{d.label}</span>
+                  <span className="flex gap-0.5">
+                    {Array.from({ length: d.max }, (_, i) => (
+                      <span key={i} className={`w-2.5 h-2.5 rounded-sm ${i < lvl ? "bg-emerald-500" : "bg-[#1e2b45]"}`} />
+                    ))}
+                  </span>
+                  <span className="flex-1 text-xs text-slate-500 min-w-[12rem]">{d.blurb}</span>
+                  <button className={`${btnGhost} text-xs px-2 py-1 whitespace-nowrap`}
+                    disabled={maxed || !afford}
+                    onClick={() => { const r = upd((g) => investInClub(g, g.userTeam, k));
+                      notify(r.ok ? `${d.label} improved — $${r.cost}M.` : r.why); }}>
+                    {maxed ? "done" : `$${cost}M`}
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </Section>
       ) : null}
