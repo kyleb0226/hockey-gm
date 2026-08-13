@@ -83,6 +83,7 @@ const EXPORTS = [
   "sellWillingness", "ownershipMarket", "buyStake", "sellStake", "ownerVoteChance",
   "standDown", "takeBackTheJob", "draftPar",
   "AUTO_STYLES", "autoStyle", "aiRuns", "styleFor", "aiDeadlineMoves", "aiExtensionOffer",
+  "strengthRank", "HONOUR_YEARS",
   "clubProfit", "payDividends", "DIVIDEND_YIELD", "DIRECTIONS", "directionOf", "setDirection",
   "INVESTMENTS", "investLevel", "investCost", "investInClub", "ownsAny",
   "brokerFee", "brokerCandidates", "brokerTrade", "BROKER_FEE_RATE",
@@ -4887,6 +4888,224 @@ const CHECKS = {
         "and names a scorer for every goal but a shootout winner");
       ok(r.scorers.every((s) => s.t === r.home || s.t === r.away), "each credited to a club that played");
     } else { ok(true, ""); ok(true, ""); ok(true, ""); }
+  },
+
+  /* ------------------------------ the audit -------------------------------
+   * Everything above tests one feature at a time on a fresh league. This runs
+   * a real career — twelve full seasons with every system on and the club
+   * running itself — and then asks whether the SAVE is still coherent.
+   *
+   * That's a different question, and it's the one that actually bites: a
+   * dangling id, a player on two rosters, a history array that quietly stopped
+   * growing, dead money owed to somebody the prune deleted. None of it shows
+   * up in a feature test, and all of it shows up in a save you've played for
+   * an hour.
+   * ---------------------------------------------------------------------- */
+  audit(A) {
+    const YEARS = 12;
+    const G = A.newGame(0, { seed: 5309, rules: { seasonLen: 82 } });
+    A.applyDepthPreset(G, "deep");
+    A.applyPendingRules(G);
+    A.setRule(G, "autoManage", "balanced");
+    A.gmState(G).stakes[G.userTeam] = 0.6;   // exercise the owner paths too
+    for (let y = 0; y < YEARS; y++) {
+      while (G.phase === "regular") { A.simDays(G, 25); if (G.presser) A.answerPresser(G, 0); }
+      while (G.phase === "playoffs") A.simPlayoffRound(G);
+      A.autoDraft(G, false);
+      if (G.fired) { G.fired = null; G.boardConfidence = 55; }
+      A.startNextSeason(G);
+    }
+    const all = A.playersOf(G);
+    const clubs = G.teams.map((t) => t.id);
+
+    section(`Referential integrity after ${YEARS} seasons`);
+    ok(all.every((p) => p.teamId == null || clubs.includes(p.teamId)),
+      "every player is either free or at a club that exists");
+    const rostered = new Set();
+    let dupes = 0;
+    all.forEach((p) => { if (p.teamId != null) { if (rostered.has(p.id)) dupes++; rostered.add(p.id); } });
+    ok(dupes === 0, "nobody is on two rosters");
+    ok(new Set(G.freeAgents).size === G.freeAgents.length, "the free-agent list has no duplicates");
+    ok(G.freeAgents.every((id) => G.players[id]), "and no ghosts on it");
+    ok(G.freeAgents.every((id) => G.players[id].teamId == null),
+      "nobody is a free agent AND under contract");
+    ok(!G.freeAgents.some((id) => G.players[id].retired), "and nobody retired is on the market");
+    ok((G.picks || []).every((pk) => clubs.includes(pk.owner)), "every draft pick is owned by a real club");
+    ok((G.picks || []).every((pk) => pk.year >= G.year - 1), "and no pick is stranded in the past");
+    ok((G.retained || []).every((r) => clubs.includes(r.from)),
+      "every dollar of dead money is charged to a real club");
+    ok(G.teams.every((t) => (t.honours || []).every((h) => h.pid == null || h.name)),
+      "a retired number keeps the name, for when the player is pruned");
+    ok((G.worldCups || []).every((c) => c.gold && c.silver), "every tournament has a winner and a loser");
+    ok(Object.keys(A.gmState(G).stakes || {}).every((k) => clubs.includes(+k)),
+      "and you don't own a club that doesn't exist");
+
+    section("The league is still legal");
+    G.teams.forEach((t) => {
+      const nhl = A.rosterOf(G, t.id);
+      if (nhl.length < A.ROSTER_MIN || nhl.length > A.ROSTER_MAX) {
+        ok(false, `${t.abbr} dresses a legal roster (${nhl.length})`);
+      }
+    });
+    ok(G.teams.every((t) => {
+      const n = A.rosterOf(G, t.id).length;
+      return n >= A.ROSTER_MIN && n <= A.ROSTER_MAX;
+    }), `all thirty-two dress between ${A.ROSTER_MIN} and ${A.ROSTER_MAX}`);
+    ok(G.teams.every((t) => A.rosterOf(G, t.id, true).filter((p) => p.pos === "G").length >= 2),
+      "and every organisation has two goalies in it");
+    const over = G.teams.filter((t) => A.capHit(G, t.id) > A.rules(G).capAmount);
+    ok(!over.length, `nobody is over the cap${over.length ? ` (${over.map((t) => t.abbr).join(",")})` : ""}`);
+    ok(all.every((p) => p.teamId == null || p.contract.yrs >= 0),
+      "and nobody is signed for a negative number of years");
+
+    section("History kept growing");
+    ok(G.history.length === YEARS, `one row per season (${G.history.length}/${YEARS})`);
+    ok((G.draftHistory || []).length === YEARS, `one draft per season (${(G.draftHistory || []).length})`);
+    ok((G.gmSeasons || []).length === YEARS, `one of your own per season (${(G.gmSeasons || []).length})`);
+    ok(G.history.every((h) => h.awards), "every season kept its awards");
+    ok(G.history.every((h) => h.leaders), "and who led it");
+    ok(G.history.every((h) => h.standings && h.standings.length === 32), "and the whole table");
+    const years = G.history.map((h) => h.year);
+    ok(new Set(years).size === years.length, "no season is recorded twice");
+    ok(years.every((y, i) => i === 0 || y === years[i - 1] + 1), "and they run consecutively");
+
+    section("The record book advanced");
+    const recs = G.records || {};
+    ok(A.RECORD_DEFS.every((d) => recs[d.key] && recs[d.key].v > 0),
+      "every season record is held by somebody");
+    ok(A.RECORD_DEFS.every((d) => recs[d.key].name), "with a name attached");
+    ok(recs.pointStreak && recs.pointStreak.v >= 5, `a point streak is on the books (${recs.pointStreak && recs.pointStreak.v})`);
+    ok(recs.winStreak && recs.winStreak.v >= 4, `and a club's winning run (${recs.winStreak && recs.winStreak.v})`);
+    ok(A.CAREER_RECORD_DEFS.every((d) => (G.careerRecords || {})[d.key]),
+      "and the career book has an entry for everything");
+    /* A record can only ever go UP. Re-running the update on a finished save
+       must not move a single one of them. */
+    const before = JSON.stringify(G.records);
+    A.updateRecords(G);
+    ok(JSON.stringify(G.records) === before, "and running the update again changes nothing");
+
+    section("Twelve years actually happened");
+    const retired = all.filter((p) => p.retired);
+    ok(retired.length > 40, `players retired (${retired.length})`);
+    ok(retired.some((p) => p.hof != null), "somebody made the Hall of Fame");
+    ok(all.some((p) => (p.trophies || []).length), "trophies were won");
+    ok(all.some((p) => (p.rings || []).length), "and rings");
+    ok(all.some((p) => (p.medals || []).length), "and medals");
+    ok((G.worldCups || []).length === Math.floor(YEARS / A.WORLD_CUP_EVERY)
+      || (G.worldCups || []).length === Math.ceil(YEARS / A.WORLD_CUP_EVERY),
+      `a tournament every four winters (${(G.worldCups || []).length})`);
+    ok(G.teams.some((t) => (t.honours || []).length), "a number was retired somewhere");
+    ok(all.some((p) => (p.career || []).length >= 6), "and somebody has a long career behind him");
+
+    section("Nothing ran away");
+    const json = JSON.stringify(G);
+    ok(json.length / 1048576 < 3.6, `the save still fits (${(json.length / 1048576).toFixed(2)} MB)`);
+    ok(all.length < 1700, `the population settled (${all.length} players)`);
+    const ages = all.filter((p) => p.teamId != null && !p.retired).map((p) => p.age);
+    const meanAge = ages.reduce((s, a) => s + a, 0) / ages.length;
+    ok(meanAge > 23.5 && meanAge < 27.5, `the league is a grown-up age (${meanAge.toFixed(1)})`);
+    ok(ages.filter((a) => a >= 33).length > 25, `and it still has veterans (${ages.filter((a) => a >= 33).length} aged 33+)`);
+    ok(G.news.length <= 80, `the wire is bounded (${G.news.length})`);
+    const unhappy = all.filter((p) => p.demand).length;
+    ok(unhappy < 220, `demands didn't spiral (${unhappy})`);
+    ok(all.filter((p) => p.holdout).length < 12, `nor holdouts (${all.filter((p) => p.holdout).length})`);
+    ok(!all.some((p) => p.ltir && p.inj <= 0), "and nobody is stuck on long-term reserve while fit");
+
+    section("And it is not still growing");
+    /* The check the twelve-season audit could not make. A leak that adds a
+       little every year looks fine at twelve and is fatal at twenty: the
+       retired archive kept EVERY Cup winner for ever — twenty-three men a
+       spring — and the save went 2.5 MB to 5.4 MB, past what localStorage
+       holds, somewhere around year seventeen. What matters is not the size but
+       the SLOPE, so this measures the second half against the first. */
+    const size12 = json.length;
+    const before12 = A.playersOf(G).filter((p) => p.retired).length;
+    for (let y = 0; y < 8; y++) {
+      simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false);
+      if (G.fired) { G.fired = null; G.boardConfidence = 55; }
+      A.startNextSeason(G);
+    }
+    const size20 = JSON.stringify(G).length;
+    const after20 = A.playersOf(G).filter((p) => p.retired).length;
+    ok(size20 / 1048576 < 4.4, `twenty seasons still fits (${(size20 / 1048576).toFixed(2)} MB)`);
+    ok(size20 < size12 * 1.35,
+      `and the save flattens instead of climbing (${(size12 / 1048576).toFixed(2)} → ${(size20 / 1048576).toFixed(2)} MB)`);
+    ok(after20 < before12 * 1.7,
+      `the retired archive is bounded (${before12} → ${after20})`);
+    ok(A.playersOf(G).length < 1650, `and so is the league (${A.playersOf(G).length})`);
+    /* Whatever is dropped, the things a screen can still click on must survive:
+       the Hall, retired numbers, and everyone named in a season's history. */
+    ok(A.playersOf(G).filter((p) => p.hof != null).length > 0, "the Hall of Fame is untouched");
+    ok(G.teams.every((t) => (t.honours || []).every((h) => h.name)),
+      "and every retired number can still be named");
+
+    section("The board is still sane in year twenty");
+    /* The bug this section exists for: `teamStrength` is a plain average of
+       overall ratings, and the league INFLATES — the average NHL player goes
+       from 62 to 75 across twenty seasons. Against fixed thresholds (73 for the
+       Cup) every one of the thirty-two clubs cleared the bar by about year
+       twelve, so every club in the league was told to win the same Cup. A
+       mandate has to be read against the other thirty-one, not against a
+       number that stopped meaning anything. */
+    const ranks = G.teams.map((t) => A.strengthRank(G, t.id)).sort((a, b) => a - b);
+    ok(ranks.join(",") === G.teams.map((_, i) => i).join(","),
+      "every club has its own place in the league, 0 through 31");
+    /* Every club given the SAME strong season behind it, so the escalation
+       ceiling ("only one step more than you just did") permits any answer and
+       the only thing separating them is where their roster ranks. */
+    const asks = G.teams.map((t) => {
+      const H = A.migrate(JSON.parse(JSON.stringify(G)));
+      H.userTeam = t.id;
+      H.teams[t.id].seasons = [{ year: H.year - 1, pts: 100, playoffs: true, rounds: 3, cup: false }];
+      A.setMandate(H);
+      return { id: t.id, key: H.mandate.key, rank: A.strengthRank(G, t.id) };
+    });
+    const cups = asks.filter((a) => a.key === "cup").length;
+    ok(cups > 0 && cups <= 6, `a handful are asked to win the Cup, not all of them (${cups} of 32)`);
+    ok(new Set(asks.map((a) => a.key)).size >= 3,
+      `and different clubs are asked for different things (${new Set(asks.map((a) => a.key)).size} kinds)`);
+    /* And it's the GOOD ones. Without this the count could be right by accident
+       while the board asked the wrong clubs. */
+    const askedCup = asks.filter((a) => a.key === "cup").map((a) => a.rank);
+    ok(askedCup.every((r) => r < 8), `and it's the best rosters that get asked (ranks ${askedCup.join(",")})`);
+    const worst = asks.find((a) => a.rank === 31);
+    ok(worst && worst.key !== "cup", "the worst club in the league is not asked to win it");
+
+    section("The history agrees with itself");
+    /* A season row can be present and still be nonsense. These are the joins:
+       the champion actually appears in that year's table, the scoring leader
+       actually led it, and the MVP was somebody worth voting for. */
+    ok(G.history.every((h) => h.champion == null || h.standings.some((s) => s.id === h.champion)),
+      "every champion played in the season it won");
+    ok(G.history.every((h) => {
+      const top = h.standings.slice().sort((a, b) => b.pts - a.pts)[0];
+      return top && top.pts > 0;
+    }), "every table has somebody at the top of it");
+    ok(G.history.every((h) => h.standings.every((s) => s.w + s.l + s.otl === 82)),
+      "and every club in it played a full season");
+    ok(G.history.every((h) => !h.leaders.points || h.leaders.points.v >= 40),
+      "the scoring leader actually led (nobody won it with twelve points)");
+    ok(G.history.every((h) => !h.leaders.goals || h.leaders.goals.v >= 20), "and the goal leader");
+    ok(G.history.every((h) => !h.leaders.wins || h.leaders.wins.v >= 20), "and the wins leader");
+    ok(G.history.every((h) => h.awards && h.awards.mvp != null), "every season named an MVP");
+    ok(G.history.every((h) => h.userRecord && h.userRecord.w + h.userRecord.l + h.userRecord.otl === 82),
+      "and your own record adds up in all of them");
+    /* The league's numbers must not DRIFT across a career. A goal environment
+       that creeps every year is the kind of thing only a long run shows. */
+    const gpg = G.history.map((h) => h.standings.reduce((s, x) => s + x.pts, 0));
+    const first3 = gpg.slice(0, 3).reduce((s, x) => s + x, 0) / 3;
+    const last3 = gpg.slice(-3).reduce((s, x) => s + x, 0) / 3;
+    ok(Math.abs(first3 - last3) / first3 < 0.06,
+      `the league's points total is stable across the career (${Math.round(first3)} → ${Math.round(last3)})`);
+
+    section("It reloads as the same league");
+    const R = A.migrate(JSON.parse(json));
+    ok(R.teams.length === 32, "reloaded");
+    ok(Object.keys(R.players).length === all.length, "with everybody still in it");
+    ok(R.history.length === YEARS && (R.draftHistory || []).length === YEARS, "and all of the history");
+    simSeason(A, R); simPlayoffs(A, R);
+    ok(R.teams.every((t) => t.gp === 82), "and it plays another full season");
+    ok(!R.teams.some((t) => A.capHit(R, t.id) > A.rules(R).capAmount), "still under the cap at the end of it");
   },
 
   determinism(A) {

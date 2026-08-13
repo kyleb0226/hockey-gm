@@ -195,6 +195,30 @@ could take away, and a twenty-season career had nothing to show for itself but a
   job back whenever he likes. That is the whole difference between owning the place and working
   there.
 
+## The audit
+`node tools/simtest.js audit`. Every other case tests one feature on a fresh league; this plays a
+real career — twelve full seasons on Deep with the club running itself, then eight more — and asks
+whether the **save** is still coherent. Referential integrity (no dangling ids, nobody on two
+rosters, no dead money owed by a club that doesn't exist), league legality, history that kept
+growing and agrees with itself, the record book, and the growth SLOPE.
+
+It found three things a feature test structurally cannot:
+
+- **The save grew without a ceiling.** `pruneSave` kept every "honoured" player for ever, and a Cup
+  decorates twenty-three men every spring — 476 retired players by season twenty and **2.5 → 5.4 MB,
+  past what localStorage holds around year seventeen**. The Hall and retired numbers are permanent
+  now; a ring, trophy or medal keeps a man for `HONOUR_YEARS` (30) and then lets him go, by which
+  point nothing on any screen names him. 5.40 → 4.10 MB at twenty, and the slope flattens.
+- **THE LEAGUE INFLATES.** Average NHL overall runs 62 → 75 across twenty seasons, and goalies
+  inflate faster than skaters (62 → 82 against 62 → 75) — which is why goals per game slide 6.08 →
+  5.62 and save percentage climbs .898 → .906 while shot volume stays flat. The inflation itself is
+  still there and is the next thing worth looking at; what's fixed is the damage it did.
+- **…which had already broken the board.** `teamStrength` is a plain average of overall, and
+  `setMandate` compared it to FIXED numbers (73 for the Cup). By about year twelve every one of the
+  thirty-two clubs cleared the bar, so every club in the league was being asked to win the same Cup.
+  `strengthRank` reads a club against the other thirty-one instead — "top two", "top seven" — which
+  survives any amount of inflation. Verified in year twenty: five clubs asked, ranks 0–4.
+
 ## A club that runs itself
 `autoManage` was a boolean that reached exactly TWO routines — AI extension offers and the AI
 free-agent sweep. Every other thing an AI club does for itself explicitly skipped the user, so a club

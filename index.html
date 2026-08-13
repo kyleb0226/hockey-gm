@@ -794,19 +794,31 @@ function setMandate(G) {
      ratings say. */
   const recent = (t.seasons || []).slice(-2);
   const dire = recent.length >= 2 && recent.every((s) => !s.playoffs && s.pts < 60);
-  /* Asking for the Cup should be RARE. Club strength runs 47–80 with quartiles
-     at 60/65/69, so a threshold of 66 handed a win-the-Cup mandate to the top
-     third of the league every single year — eleven clubs asked for a thing one
-     club can have. It now takes a genuine juggernaut, or a side that reached
-     the final last spring and has unfinished business. */
+  /* Asking for the Cup should be RARE, and it has to STAY rare.
+   *
+   * These were absolute numbers — 73 for the Cup, 68 to contend, and so on —
+   * against a `teamStrength` that is a plain average of overall ratings. And
+   * the league INFLATES: measured over twenty seasons the average NHL player
+   * goes from 62 to 75, so club strength climbs with it and by about year
+   * twelve every one of the thirty-two clears 73. Every club in the league
+   * asked to win the same Cup, for ever, on a fixed scale that stopped meaning
+   * anything the moment the ratings moved.
+   *
+   * A board doesn't grade a roster against a number, it grades it against the
+   * other thirty-one. `strengthRank` is 0 for the best club in the league, so
+   * these read as "top two", "top seven", and so on — which survives any amount
+   * of inflation and says exactly what was always meant. */
   const wentDeep = !!(last && last.rounds >= 3);
+  const rank = strengthRank(G, G.userTeam);
+  const n = G.teams.length;
+  const within = (frac) => rank < Math.max(1, Math.round(n * frac));
   let key = "rebuild";
   if (dire) key = recent.every((s) => s.pts < 45) ? "rebuild" : "compete";
-  else if (wonCup || strength >= 73 || (wentDeep && strength >= 68)) key = "cup";
-  else if (strength >= 68) key = "contend";
-  else if (strength >= 64) key = "round";
-  else if (strength >= 59) key = "playoffs";
-  else if (strength >= 55) key = "compete";
+  else if (wonCup || within(0.06) || (wentDeep && within(0.16))) key = "cup";
+  else if (within(0.22)) key = "contend";
+  else if (within(0.38)) key = "round";
+  else if (within(0.56)) key = "playoffs";
+  else if (within(0.78)) key = "compete";
   /* AND IT CAN ONLY ASK FOR ONE STEP MORE THAN YOU JUST DID. Strength is a
      rating, not a result: a club that rates 73 and finishes twentieth was
      still being told to win the Cup, year after year, because the paper said
@@ -2266,6 +2278,15 @@ function teamStrength(G, teamId) {
   if (!r.length) return 50;
   const top = r.slice(0, 18);
   return Math.round(top.reduce((s, p) => s + p.ovr, 0) / top.length);
+}
+/* Where a club sits against the other thirty-one, 0 for the best. Any judgement
+   about how good a side is has to be made on this rather than on the raw
+   number, because the raw number inflates across a career and a fixed
+   threshold quietly stops meaning what it meant. */
+function strengthRank(G, teamId) {
+  return G.teams.map((t) => ({ id: t.id, s: teamStrength(G, t.id) }))
+    .sort((a, b) => b.s - a.s || a.id - b.id)
+    .findIndex((x) => x.id === teamId);
 }
 
 /* ------------------------------- the schedule ------------------------------ */
@@ -3883,6 +3904,11 @@ function endRegularSeason(G) {
  * class is capped so induction stays worth something.
  * ------------------------------------------------------------------------- */
 const HOF_WAIT = 3;         // years after retirement before he's on the ballot
+/* How long a decorated but un-enshrined player is kept after he retires. The
+   Hall and a retired number are for ever; a ring is not, or the save grows
+   without a ceiling — see `pruneSave`. Long enough that nothing you can still
+   click on ever goes missing. */
+const HONOUR_YEARS = 30;
 const HOF_CLASS_MAX = 3;    // inducted per year
 const HOF_BAR = 62;         // career score needed
 
@@ -7426,13 +7452,24 @@ function pruneSave(G) {
     // Blank rather than null: plenty of code walks every player and reads these.
     p.season = blankStats(p.pos); p.stats = blankStats(p.pos);
     p.po = null; p.farmSeason = null; p.farmCareer = null; p.marks = null;
-    // Anyone with no trophies and no honours is not history, just clutter.
-    const honoured = p.hof != null
-      || G.teams.some((t) => (t.honours || []).some((h) => h.pid === p.id))
-      || (p.rings || []).length > 0
-      // A man who won it for his country is history too, whatever his club did.
+    /* Anyone with no trophies and no honours is not history, just clutter.
+     *
+     * But "honoured" was FOR EVER, and a Cup gives twenty-three men a ring
+     * every single spring — so a twenty-season career carried four hundred and
+     * seventy-six retired players and the save grew without a ceiling: 2.5 MB
+     * at year one, 5.4 MB by year twenty, past what localStorage will take
+     * somewhere around year seventeen. A trend nothing showed at twelve.
+     *
+     * The Hall of Fame and a retired number are permanent, because those are
+     * the two things the game will still show you in fifty years. Everything
+     * else — a ring, a trophy, a gold medal — keeps a man for `HONOUR_YEARS`
+     * and then lets him go, by which time nothing on any screen names him. */
+    const permanent = p.hof != null
+      || G.teams.some((t) => (t.honours || []).some((h) => h.pid === p.id));
+    const decorated = (p.rings || []).length > 0 || (p.trophies || []).length > 0
       || (p.medals || []).some((m) => m.kind === "gold");
-    if (!honoured && !(p.trophies || []).length) keep.push(p.id);
+    const gone = G.year - (p.retiredYear || p.hof || G.year);
+    if (!permanent && (!decorated || gone > HONOUR_YEARS)) keep.push(p.id);
   });
   // Keep the most recent departures around so history pages can still name them.
   keep.slice(0, Math.max(0, keep.length - 250)).forEach((id) => { delete G.players[id]; });
