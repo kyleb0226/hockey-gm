@@ -84,6 +84,8 @@ const EXPORTS = [
   "standDown", "takeBackTheJob", "draftPar",
   "brokerFee", "brokerCandidates", "brokerTrade", "BROKER_FEE_RATE",
   "PULL_TIMINGS", "pullTiming",
+  "PRESSERS", "pickPresser", "answerPresser", "fanMood", "moveFans", "PRESSER_COOLDOWN",
+  "POINT_STREAK_NEWS", "WIN_STREAK_NEWS",
   "NATIONS", "nationOf", "worldSquad", "squadStrength", "runWorldCup", "worldCupYear",
   "WORLD_CUP_EVERY", "WORLD_SQUAD",
   "bonusesOn", "canPerfBonus", "sbOf", "pbOf", "perfBonusTarget", "perfBonusProgress",
@@ -3378,6 +3380,103 @@ const CHECKS = {
     const sell = A.sellStake(M, buy.teamId, 0.5);
     ok(sell.ok && sell.price > 0, `you can sell up ($${sell.price}M)`);
     ok(Math.abs(A.myShare(M, buy.teamId) - 0.5) < 0.02, "and keep the rest");
+  },
+
+  /* Two things brought over from the sibling games: the running number a fan
+     follows night to night, and the one place you have to speak out loud. */
+  streaks(A) {
+    section("A run of points");
+    const G = A.newGame(0, { seed: 3131, rules: { seasonLen: 82 } });
+    simSeason(A, G);
+    const skaters = A.playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 40);
+    ok(skaters.some((p) => (p.bestStreak || 0) >= 5), "somebody put a run together");
+    const longest = skaters.reduce((m, p) => Math.max(m, p.bestStreak || 0), 0);
+    ok(longest >= 8 && longest <= 40, `and it's a hockey number, not a fantasy (${longest})`);
+    ok(skaters.every((p) => (p.streak || 0) <= (p.bestStreak || 0)),
+      "a live run never exceeds the best one");
+    /* A goalie doesn't have a point streak, and neither does a man who didn't
+       play — both used to be silently included by naive counters. */
+    ok(A.playersOf(G).filter((p) => p.pos === "G").every((p) => !p.streak && !p.bestStreak),
+      "goalies don't get one");
+
+    section("The longest winning run");
+    ok(G.teams.some((t) => (t.wsMax || 0) >= 4), "clubs go on runs too");
+    ok(G.teams.every((t) => (t.wsMax || 0) >= Math.max(0, t.streak || 0)),
+      "and the season's best is never behind the live one");
+
+    section("Into the book");
+    A.finishSeason(G);
+    A.updateRecords(G);
+    ok(G.records.pointStreak && G.records.pointStreak.v >= 5,
+      `the longest run of the year is a record (${G.records.pointStreak.v})`);
+    ok(G.records.winStreak && G.records.winStreak.v >= 4,
+      `and so is the club's (${G.records.winStreak.v})`);
+    ok(G.records.pointStreak.name, "with a name attached, for when the player is forgotten");
+    A.startNextSeason(G);
+    ok(A.playersOf(G).every((p) => !p.streak), "a run doesn't carry over a summer");
+    ok(G.teams.every((t) => !t.wsMax), "nor does a club's");
+    ok(A.playersOf(G).some((p) => (p.bestStreak || 0) >= 5), "but the career best does");
+  },
+
+  pressers(A) {
+    section("Nothing to say");
+    const off = A.newGame(0, { seed: 3131, rules: { seasonLen: 82 } });
+    A.simDays(off, 40);
+    ok(!A.pickPresser(off) && !off.presser, "with the rule off nobody asks you anything");
+
+    const G = A.newGame(0, { seed: 3131, rules: { seasonLen: 82, pressers: true } });
+    ok(A.pickPresser(G) === null, "and nobody asks before there's anything to ask about");
+
+    section("A question with a cost");
+    /* Drive the state rather than waiting for it, so the branch is always
+       exercised: `pickPresser` reads the club and draws nothing, which is the
+       whole reason this can be switched on mid-career. */
+    A.simDays(G, 30);
+    const t = G.teams[G.userTeam];
+    t.gp = Math.max(10, t.gp); t.streak = -4; G.presser = null; G.lastPresser = null;
+    const q = A.pickPresser(G);
+    ok(q && q.kind === "badRun", `a losing run gets asked about (${q && q.kind})`);
+    ok(q.runLen === 4, "with the right number in the question");
+    ok(A.PRESSERS[q.kind].opts.length === 3, "three ways to answer it");
+
+    G.presser = q;
+    const room0 = A.roomMorale(G, G.userTeam), fans0 = A.fanMood(G), board0 = G.boardConfidence;
+    // "Demand more": hard on the room, good with the board and the city.
+    const r = A.answerPresser(G, 1);
+    ok(r.ok && r.line, "answering says something");
+    ok(A.roomMorale(G, G.userTeam) < room0, "and being hard on them costs you the room");
+    ok(A.fanMood(G) > fans0, "while the city likes to hear it");
+    ok(G.boardConfidence > board0, "and so does the board");
+    ok(!G.presser, "the question is gone once answered");
+    ok(G.lastPresser === G.day, "and there's a cooldown before the next");
+    ok(!A.pickPresser(G), "which really holds");
+
+    section("Backing them costs the other way");
+    const B = A.newGame(0, { seed: 3131, rules: { seasonLen: 82, pressers: true } });
+    A.simDays(B, 30);
+    B.teams[B.userTeam].streak = -4;
+    // Clear whatever the sim already put there, or `pickPresser` declines.
+    B.presser = null; B.lastPresser = null;
+    B.presser = A.pickPresser(B);
+    ok(B.presser, "there's a question on the table");
+    const bRoom = A.roomMorale(B, B.userTeam), bBoard = B.boardConfidence;
+    A.answerPresser(B, 0);   // back the room
+    ok(A.roomMorale(B, B.userTeam) > bRoom, "backing them in public buys you the room");
+    ok(B.boardConfidence < bBoard, "at the board's expense");
+
+    section("The building");
+    const C = A.newGame(0, { seed: 3131, rules: { seasonLen: 82, pressers: true } });
+    A.simDays(C, 20);
+    const base = A.gateFor(C, C.userTeam);
+    A.moveFans(C, 40);
+    ok(A.gateFor(C, C.userTeam) > base, `a city that likes you fills the building ($${A.gateFor(C, C.userTeam)}M vs $${base}M)`);
+    A.moveFans(C, -80);
+    ok(A.gateFor(C, C.userTeam) < base, "and one that doesn't, doesn't");
+    // Nobody else holds press conferences, so nobody else's gate moves.
+    const other = C.userTeam === 0 ? 1 : 0;
+    const D = A.newGame(0, { seed: 3131, rules: { seasonLen: 82, pressers: true } });
+    A.simDays(D, 20);
+    ok(A.gateFor(C, other) === A.gateFor(D, other), "and it never touches another club's gate");
   },
 
   /* A fortnight in midwinter that belongs to somebody else. */

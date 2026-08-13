@@ -195,6 +195,29 @@ could take away, and a twenty-season career had nothing to show for itself but a
   job back whenever he likes. That is the whole difference between owning the place and working
   there.
 
+## Brought over from the sibling games
+`~/soccer-gm` and `~/baseball-gm` are the same architecture; these are the ideas worth having here,
+written for hockey rather than translated knob-for-knob.
+
+**Press conferences** (from soccer, where it's the best thing in the game). Behind the `pressers`
+rule. Everything a manager does here he does through a spreadsheet; this is the one place he has to
+say something out loud and then live with it. Three constituencies who want different things: the
+room wants backing, the board wants accountability, and **the building** — `G.fanMood`, which is
+new, feeds `gateFor`, and is exactly 1.0 at neutral so a club that never opens its mouth takes the
+gate it always did. Triggers are hockey-native: a losing run, a winning run, a rivalry game next,
+a man who's asked out, and a goalie whose save percentage has cratered. `pickPresser` **draws
+nothing** — it reads club state and returns the first thing worth asking — so switching it on
+mid-career cannot shift a downstream number.
+
+`addRoomHit` now accepts NEGATIVES (clamped -20..40) so backing the room in public is credit rather
+than the absence of a debt, and `decayRoomHits` fades by magnitude. Nothing else in the game ever
+passes a negative, so a club with the rule off sees the identical number.
+
+**Streaks** (from baseball). `p.streak` / `p.bestStreak` for points, `t.wsMax` for a club's longest
+winning run — the live `t.streak` was erased by the next loss, so fourteen straight in November left
+nothing behind by April. Both go in the record book (`pointStreak`, `winStreak`), which needed them
+outside `RECORD_DEFS` because neither lives on a stat line. Zero RNG; pure accounting off results.
+
 ## The world tournament
 Behind the `worldCup` rule. Every fourth winter the midwinter break belongs to the countries
 instead — there is no All-Star game that year, which is what the league actually does.

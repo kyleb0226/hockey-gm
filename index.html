@@ -164,6 +164,7 @@ const RULES_DEFAULT = {
   rivalryGrowth: false,    // rivalries harden when clubs meet in the spring
   contractBonuses: false,  // signing bonuses and performance bonuses on deals
   worldCup: false,         // the break belongs to the countries every fourth year
+  pressers: false,         // the media ask, and what you say costs you something
   pickProtection: false,   // traded picks can carry protections
   ownership: false,        // you are paid, and you can buy in
 };
@@ -218,6 +219,9 @@ const DEPTH_RULES = [
     opts: [[false, "Off"], [true, "On"]] },
   { k: "rivalryGrowth", deep: true, group: "The game", label: "Rivalries build",
     blurb: "Meeting in the playoffs makes it personal, and it stays that way.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "pressers", deep: true, group: "The game", label: "Press conferences",
+    blurb: "The one place you have to say something out loud. The room, the board and the building want different things — and a city that likes you fills the arena.",
     opts: [[false, "Off"], [true, "On"]] },
   { k: "worldCup", deep: true, group: "The game", label: "World tournament",
     blurb: "Every fourth winter the break belongs to the countries instead. Your best man comes back with a medal, or doesn't.",
@@ -969,14 +973,18 @@ function roomHitOf(t) { return (t && t.roomHit) || 0; }
 function addRoomHit(G, teamId, n) {
   const t = G.teams[teamId];
   if (!t) return G;
-  t.roomHit = Math.min(40, roomHitOf(t) + n);
+  /* It runs both ways now. Backing the room in public is CREDIT, not the
+     absence of a debt — and nothing else in the game passes a negative, so a
+     club that never holds a press conference sees exactly the old number. */
+  t.roomHit = clamp(roomHitOf(t) + n, -20, 40);
   return G;
 }
 function decayRoomHits(G) {
   G.teams.forEach((t) => {
     if (!t.roomHit) return;
     t.roomHit = t.roomHit * ROOM_HIT_DECAY;
-    if (t.roomHit < 0.4) t.roomHit = 0;
+    // Magnitude, so credit fades at the same rate a grievance does.
+    if (Math.abs(t.roomHit) < 0.4) t.roomHit = 0;
   });
   return G;
 }
@@ -995,6 +1003,122 @@ function roomMorale(G, teamId) {
   const unhappy = rosterOf(G, teamId, true).filter((p) => p.demand).length;
   return Math.round(clamp(50 + form * 3.4 + (steady - 1.1) * 18 + capBonus
     - roomHitOf(t) - unhappy * 2.5, 0, 100));
+}
+
+/* ------------------------------ facing the room ----------------------------
+ * Ported from the football game, where it's the best thing in it. Everything a
+ * manager does here he does through a spreadsheet; a press conference is the
+ * one place he has to say something out loud and then live with it.
+ *
+ * There are three constituencies and they want different things. The dressing
+ * room wants backing. The board wants accountability. THE BUILDING wants to be
+ * told this club is going somewhere — and the building is new: `G.fanMood`
+ * feeds `gateFor`, so a manager who keeps the city onside earns the club real
+ * money, and one who talks down every season empties the place.
+ *
+ * `pickPresser` DRAWS NOTHING. It reads the club's own state and returns the
+ * first thing worth asking about, so switching this on cannot shift a single
+ * downstream number. Answering is your action and moves what it says it moves.
+ * ------------------------------------------------------------------------- */
+const PRESSER_COOLDOWN = 12;      // days between questions
+function fanMood(G) { return clamp(G.fanMood == null ? 50 : G.fanMood, 0, 100); }
+function moveFans(G, n) { G.fanMood = clamp(fanMood(G) + n, 0, 100); return G; }
+const PRESSERS = {
+  badRun: {
+    q: (c) => `${c.name} have lost ${c.runLen} in a row. Is your job safe?`,
+    opts: [
+      { label: "Back the room", room: -6, fans: -5, board: -2,
+        line: () => "“These are the players I want. I'd pick every one of them again tomorrow.”" },
+      { label: "Demand more", room: +7, fans: +6, board: +3,
+        line: () => "“Not good enough. Nobody's spot in that lineup is safe.”" },
+      { label: "Take the blame", room: -3, fans: +2, board: +1,
+        line: () => "“That's mine. I picked the lineup, I put them out there.”" },
+    ],
+  },
+  goodRun: {
+    q: (c) => `${c.runLen} straight wins. Is this club a contender?`,
+    opts: [
+      { label: "Say it out loud", room: -4, fans: +9, board: +1,
+        line: () => "“We're in it. I'm not going to stand here and pretend we're not.”" },
+      { label: "One at a time", room: 0, fans: -4, board: +2,
+        line: () => "“We've won nothing. The next one is the only one that matters.”" },
+      { label: "Credit the players", room: -7, fans: +2, board: 0,
+        line: () => "“All them. Best group I've had.”" },
+    ],
+  },
+  rival: {
+    q: (c) => `${c.rivalName} next. What does that game mean here?`,
+    opts: [
+      { label: "Everything", room: -5, fans: +9, board: 0,
+        line: (c) => `“Ask anybody in this city what ${c.rivalName} means. Everything.”` },
+      { label: "Two points", room: 0, fans: -7, board: +2,
+        line: () => "“Two points, the same as any other night.”" },
+      { label: "Fire a shot", room: -4, fans: +7, board: -3,
+        line: () => "“They know exactly where we are. Let them worry about that.”" },
+    ],
+  },
+  unsettled: {
+    q: (c) => `${c.playerName} has asked to be moved. Is he going anywhere?`,
+    opts: [
+      { label: "He's not for sale", room: -6, fans: +5, board: -3,
+        line: (c) => `“${c.playerName} is going nowhere. That's the end of it.”` },
+      { label: "Everyone has a price", room: +8, fans: -3, board: +4,
+        line: () => "“If the number's right we listen. That's the business.”" },
+      { label: "Not doing this here", room: 0, fans: -2, board: 0,
+        line: () => "“I'm not negotiating in a press room.”" },
+    ],
+  },
+  goalie: {
+    q: (c) => `${c.playerName} has let in a lot lately. Is he still your starter?`,
+    opts: [
+      { label: "He's my goalie", room: -6, fans: -4, board: -1,
+        line: (c) => `“${c.playerName} is my goalie. He'll be in that net on Saturday.”` },
+      { label: "The job's open", room: +6, fans: +4, board: +2,
+        line: () => "“Whoever gives us a chance to win plays. That's always been the rule.”" },
+      { label: "It isn't the goalie", room: -4, fans: 0, board: +1,
+        line: () => "“We're giving up chances nobody stops. Look at the five in front of him.”" },
+    ],
+  },
+};
+/* What the media would ask today, or nothing. Reads state, draws nothing. */
+function pickPresser(G) {
+  if (!depthOn(G, "pressers") || G.presser) return null;
+  if (G.phase !== "regular") return null;
+  const t = G.teams[G.userTeam];
+  if (!t || (t.gp || 0) < 5) return null;
+  if ((G.day || 0) - (G.lastPresser == null ? -999 : G.lastPresser) < PRESSER_COOLDOWN) return null;
+  if ((t.streak || 0) <= -3) return { kind: "badRun", runLen: -t.streak, name: t.name };
+  if ((t.streak || 0) >= 4) return { kind: "goodRun", runLen: t.streak, name: t.name };
+  const next = nextOpponent(G);
+  if (next && next.id != null && isRivalry(G, t.id, next.id))
+    return { kind: "rival", name: t.name, rivalName: `${next.city} ${next.name}` };
+  const asked = rosterOf(G, t.id, true).find((p) => p.demand && p.demand.kind === "trade");
+  if (asked) return { kind: "unsettled", name: t.name, playerName: fullName(asked), pid: asked.id };
+  /* A goalie having a bad month is the most hockey question there is, and the
+     one the room is most sensitive about. Only asked once he's played enough
+     for the number to mean anything. */
+  const g = rosterOf(G, t.id).filter((p) => p.pos === "G" && p.season.gp >= 8)
+    .sort((a, b) => b.season.gp - a.season.gp)[0];
+  if (g && svPct(g.season) < 0.885)
+    return { kind: "goalie", name: t.name, playerName: fullName(g), pid: g.id };
+  return null;
+}
+function answerPresser(G, i) {
+  const p = G.presser;
+  if (!p) return { ok: false, why: "nothing to answer" };
+  const def = PRESSERS[p.kind];
+  const opt = def && def.opts[i];
+  if (!opt) return { ok: false, why: "no such answer" };
+  /* `room` is a HIT, so a POSITIVE number is you being hard on them — the same
+     sign convention as everything else that pushes `roomHit` up. */
+  if (opt.room) addRoomHit(G, G.userTeam, opt.room);
+  moveFans(G, opt.fans || 0);
+  G.boardConfidence = clamp((G.boardConfidence == null ? 50 : G.boardConfidence) + (opt.board || 0), 0, 100);
+  const line = typeof opt.line === "function" ? opt.line(p) : opt.line;
+  news(G, line, (opt.fans || 0) > 0 ? "good" : (opt.board || 0) < 0 ? "bad" : "info");
+  G.lastPresser = G.day;
+  G.presser = null;
+  return { ok: true, line };
 }
 
 /* ------------------------------ the staff ---------------------------------
@@ -1096,7 +1220,12 @@ function gateFor(G, teamId) {
   // Winning fills a building; losing empties it. Points percentage, not luck.
   const pace = t.gp ? clamp(t.pts / (2 * t.gp), 0.2, 0.8) : 0.5;
   const room = clamp(roomMorale(G, teamId) / 100, 0.6, 1.1);
-  return round1((GATE_BASE + (t.mkt || 3) * GATE_PER_MKT) * (0.7 + pace) * room);
+  /* And what the city thinks of the man running it — YOUR building only, since
+     nobody else holds press conferences. Exactly 1 at the neutral mood, so a
+     club that never opens its mouth takes the same gate it always did. */
+  const mood = teamId === G.userTeam && depthOn(G, "pressers")
+    ? 1 + (fanMood(G) - 50) / 250 : 1;
+  return round1((GATE_BASE + (t.mkt || 3) * GATE_PER_MKT) * (0.7 + pace) * room * mood);
 }
 /* Charged once a season, at the rollover, so a hire mid-year is paid for the
    year it happens in rather than pro-rated — the simplest rule that still
@@ -2912,6 +3041,14 @@ function applyGame(G, res, opts) {
       else if (won) { t.w++; t.pts += 2; t.streak = t.streak >= 0 ? t.streak + 1 : 1; }
       else if ((res.ot || res.so) && R.otLoserPoint) { t.otl++; t.pts += 1; t.streak = t.streak <= 0 ? t.streak - 1 : -1; }
       else { t.l++; t.streak = t.streak <= 0 ? t.streak - 1 : -1; }
+      /* The longest run of the year, kept as it happens. `t.streak` is a live
+         number that the next loss erases, so a club that won fourteen in a row
+         in November had nothing to show for it by April. */
+      if (t.streak > (t.wsMax || 0)) {
+        t.wsMax = t.streak;
+        if (t.streak >= WIN_STREAK_NEWS && t.id === G.userTeam)
+          news(G, `${t.streak} in a row.`, "good");
+      }
       t.l10.push(won ? "W" : (res.ot || res.so) ? "O" : "L");
       if (t.l10.length > 10) t.l10.shift();
     }
@@ -2948,6 +3085,21 @@ function applyGame(G, res, opts) {
           d.att += s.att || 0; d.miss += s.miss || 0; d.blkd += s.blkd || 0;
         }
       });
+      /* A point streak. The one running number in hockey that a fan follows
+         night to night, and the engine threw away every line the moment it
+         wrote it. Regular season only — a run doesn't carry into the spring. */
+      if (!opts.playoff && p.pos !== "G") {
+        if ((s.g || 0) + (s.a || 0) > 0) {
+          p.streak = (p.streak || 0) + 1;
+          if (p.streak > (p.bestStreak || 0)) p.bestStreak = p.streak;
+          const milestone = p.streak >= POINT_STREAK_NEWS
+            && (p.streak === POINT_STREAK_NEWS || p.streak % 5 === 0);
+          if (milestone && (tid === G.userTeam || p.streak >= POINT_STREAK_LEAGUE)) {
+            news(G, `${fullName(p)} has a point in ${p.streak} straight.`,
+              tid === G.userTeam ? "good" : "info");
+          }
+        } else p.streak = 0;
+      }
       addZones(dest, s.z);
       addNet(dest, s.net);
       // A goalie's night costs far more than a skater's shift — that's what
@@ -3127,6 +3279,8 @@ function simDay(G) {
     checkPromises(G); demandOffers(G); rollHoldouts(G); aiAnswerDemands(G);
   }
   checkMilestones(G);
+  // The media, if there's anything worth asking. Reads state; draws nothing.
+  if (!G.presser) { const q = pickPresser(G); if (q) G.presser = q; }
   // Clubs ring about listed players every few days rather than instantly.
   if ((G.block || []).length && G.day % 5 === 0) generateOffers(G);
   if (G.day === deadlineDay(G)) { aiDeadlineMoves(G); news(G, "The trade deadline has passed.", "info"); }
@@ -3542,6 +3696,9 @@ const RECORD_DEFS = [
   { key: "shutouts", label: "Shutouts",           pos: "G", get: (s) => s.so },
 ];
 const MILESTONES = { goals: [40, 50, 60], points: [80, 100, 120] };
+/* Streaks. `POINT_STREAK_NEWS` is where the wire starts caring about your own
+   player; `POINT_STREAK_LEAGUE` is where it's a story whoever he plays for. */
+const POINT_STREAK_NEWS = 8, POINT_STREAK_LEAGUE = 15, WIN_STREAK_NEWS = 6;
 
 /* Who led each category THIS season. The record book only ever kept the
    all-time best, so a year in which somebody scored 54 goals left no trace
@@ -3575,6 +3732,21 @@ function updateRecords(G) {
       const cur = G.records[def.key];
       if (!cur || v > cur.v) G.records[def.key] = { v, pid: p.id, name: fullName(p), year: G.year, team: p.teamId };
     });
+  });
+  /* Streaks don't live on a stat line, so they can't come through RECORD_DEFS —
+     but they belong in the same book. The season's best point run by anybody,
+     and the longest winning run any club put together. */
+  playersOf(G).forEach((p) => {
+    const v = p.bestStreak || 0;
+    if (v < 3) return;
+    const cur = G.records.pointStreak;
+    if (!cur || v > cur.v) G.records.pointStreak = { v, pid: p.id, name: fullName(p), year: G.year, team: p.teamId };
+  });
+  G.teams.forEach((t) => {
+    const v = t.wsMax || 0;
+    if (v < 3) return;
+    const cur = G.records.winStreak;
+    if (!cur || v > cur.v) G.records.winStreak = { v, pid: null, name: `${t.city} ${t.name}`, year: G.year, team: t.id };
   });
   updateCareerRecords(G);
   return G.records;
@@ -4122,6 +4294,9 @@ function finishSeason(G) {
     const { z: _lz, net: _ln, ...lastYear } = p.season;
     p.stats = stampShares(G, p, lastYear);
     p.season = blankStats(p.pos);
+    /* A run doesn't carry across a summer. The CAREER best does, which is the
+       whole reason it's worth keeping — one number a man carries for ever. */
+    p.streak = 0;
     // A playoff run used to be thrown away at the rollover, which meant a
     // twenty-year career had no postseason record at all. Keep the running
     // total and a count of the springs he played.
@@ -6874,6 +7049,8 @@ function startNextSeason(G) {
   });
   G.teams.forEach((t) => {
     t.w = 0; t.l = 0; t.otl = 0; t.pts = 0; t.gf = 0; t.ga = 0; t.gp = 0; t.streak = 0; t.l10 = [];
+    // The season's best run is a season thing; the record book already has it.
+    t.wsMax = 0;
     t.farmRec = blankFarmRec();
     t.farmLog = null;
     t.lines = null;
@@ -7837,6 +8014,25 @@ function DevFocusPicker({ G, setG, p }) {
 
 /* Where he came from, in one line. A founding player gets nothing rather than a
    claim the save can't support — see `draftOrigin`. */
+/* The one running number a fan follows night to night. */
+function StreakNote({ p }) {
+  const live = p.streak || 0, best = p.bestStreak || 0;
+  if (live < 3 && best < 5) return null;
+  return (
+    <div className={`${card} px-3 py-2 text-xs`}>
+      {live >= 3 ? (
+        <>
+          <span className="text-slate-500">Point in </span>
+          <span className={live >= POINT_STREAK_NEWS ? "text-emerald-300 font-medium" : "text-slate-200"}>
+            {live} straight
+          </span>
+        </>
+      ) : <span className="text-slate-500">No run going</span>}
+      {best >= 5 ? <span className="text-slate-500"> · best {best}</span> : null}
+    </div>
+  );
+}
+
 /* What he's playing for on top of the salary. Shows the chase while the season
    is live, which is the only time the number means anything. */
 function BonusNote({ G, p }) {
@@ -8060,6 +8256,7 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
               tone={p.inj > 0 ? "text-rose-400" : p.rust > 0 ? "text-amber-300" : ""} />
           </div>
           <DraftLine G={G} p={p} />
+          <StreakNote p={p} />
           <BonusNote G={G} p={p} />
           {/* A demand is the only thing in the game that makes character cost
               something, so it belongs at the top of his page, not in the wire. */}
@@ -8629,6 +8826,42 @@ function Splash({ onStart }) {
 
 function form5(t) { return (t.l10 || []).slice(-5); }
 
+/* The one place in the game you have to say something out loud. Sits at the top
+   of the club page because it can't wait — and vanishes the moment you answer. */
+function PresserCard({ G, setG }) {
+  const q = G.presser;
+  if (!q || !depthOn(G, "pressers")) return null;
+  const def = PRESSERS[q.kind];
+  if (!def) return null;
+  const mood = fanMood(G);
+  return (
+    <div className={`${card} p-3 border-l-2 border-sky-500`}>
+      <div className="flex items-baseline gap-2 mb-1.5">
+        <span className="text-[10px] uppercase tracking-wide text-sky-400">The media</span>
+        <span className="flex-1" />
+        <span className="text-[11px] text-slate-500" title="how the city feels about you">
+          City {Math.round(mood)}
+        </span>
+      </div>
+      <div className="text-sm text-slate-200 mb-2">{def.q(q)}</div>
+      <div className="flex flex-wrap gap-2">
+        {def.opts.map((o, i) => (
+          <button key={i} className={btnGhost}
+            title={[o.room ? `room ${o.room > 0 ? "−" : "+"}${Math.abs(o.room)}` : null,
+                    o.fans ? `city ${o.fans > 0 ? "+" : ""}${o.fans}` : null,
+                    o.board ? `board ${o.board > 0 ? "+" : ""}${o.board}` : null]
+              .filter(Boolean).join(" · ") || "no consequence at all"}
+            onClick={() => {
+              const g2 = migrate(JSON.parse(JSON.stringify(G)));
+              answerPresser(g2, i);
+              setG(g2);
+            }}>{o.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function HomeTab({ G, setG, go, openPlayer }) {
   const t = G.teams[G.userTeam];
   const today = G.schedule[G.day] || [];
@@ -8653,6 +8886,8 @@ function HomeTab({ G, setG, go, openPlayer }) {
         <Stat label="Board" value={Math.round(G.boardConfidence)} sub="confidence"
           tone={G.boardConfidence < 30 ? "text-rose-400" : G.boardConfidence > 70 ? "text-emerald-400" : ""} />
       </div>
+
+      <PresserCard G={G} setG={setG} />
 
       <div className={`${card} p-3 flex flex-wrap items-center gap-x-4 gap-y-1`}>
         <div className="text-sm font-medium text-slate-300">
@@ -11015,14 +11250,21 @@ function RecordsTab({ G, openPlayer }) {
     <div className="space-y-3">
       <Section title="League record book" className="p-3">
         <div className="space-y-1 pt-1">
-          {RECORD_DEFS.map((d) => {
+          {RECORD_DEFS.concat([
+            // Not stat lines, so they can't come through RECORD_DEFS — but the
+            // longest run of the year belongs on the same page as everything else.
+            { key: "pointStreak", label: "Point streak" },
+            { key: "winStreak", label: "Winning streak by a club" },
+          ]).map((d) => {
             const r = recs[d.key];
             return (
               <div key={d.key} className="flex items-center gap-3 text-sm py-0.5">
                 <span className="flex-1 text-slate-400">{d.label}</span>
                 {r ? (
                   <>
-                    <button className="hover:text-sky-300" onClick={() => openPlayer(r.pid)}>{r.name}</button>
+                    {r.pid != null
+                      ? <button className="hover:text-sky-300" onClick={() => openPlayer(r.pid)}>{r.name}</button>
+                      : <span>{r.name}</span>}
                     <span className="text-slate-500 text-xs w-12 text-right">{r.year}</span>
                     <span className="tnum font-semibold w-10 text-right">{r.v}</span>
                   </>
