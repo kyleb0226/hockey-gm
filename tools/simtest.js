@@ -82,6 +82,7 @@ const EXPORTS = [
   "teamValue", "gmLegacy", "gmSalaryFor", "gmState", "payGm", "myShare", "isMajorityOwner",
   "sellWillingness", "ownershipMarket", "buyStake", "sellStake", "ownerVoteChance",
   "standDown", "takeBackTheJob", "draftPar",
+  "brokerFee", "brokerCandidates", "brokerTrade", "BROKER_FEE_RATE",
   "bonusesOn", "canPerfBonus", "sbOf", "pbOf", "perfBonusTarget", "perfBonusProgress",
   "settleBonuses", "applyBonusTerms", "aiBonusTerms",
   "SB_MAX", "SB_DISCOUNT", "PB_MAX", "PB_DISCOUNT", "PB_YOUNG", "PB_OLD",
@@ -3374,6 +3375,68 @@ const CHECKS = {
     const sell = A.sellStake(M, buy.teamId, 0.5);
     ok(sell.ok && sell.price > 0, `you can sell up ($${sell.price}M)`);
     ok(Math.abs(A.myShare(M, buy.teamId) - 0.5) < 0.02, "and keep the rest");
+  },
+
+  /* The deal that dies at the cap, and the club that saves it for a price. */
+  broker(A) {
+    section("Who can help");
+    const G = A.newGame(0, { seed: 7711, rules: { seasonLen: 41 } });
+    A.setRule(G, "retainedSalary", true);
+    A.applyPendingRules(G);
+    /* Somebody expensive, on a club that isn't ours. */
+    const star = A.playersOf(G)
+      .filter((p) => p.teamId != null && p.teamId !== G.userTeam && p.contract.amt > 4)
+      .sort((a, b) => b.contract.amt - a.contract.amt)[0];
+    const seller = star.teamId;
+    const cands = A.brokerCandidates(G, star.id, 0.5, [G.userTeam, seller]);
+    ok(cands.length > 0, `clubs with room will take money on (${cands.length})`);
+    ok(!cands.some((c) => c.teamId === G.userTeam || c.teamId === seller),
+      "and neither side of the deal is one of them");
+    ok(cands.every((c) => c.space >= c.eats), "each of them can actually fit it");
+    ok(cands.every((c) => c.fee > 0), "nobody does it for nothing");
+    ok(cands[0].fee <= cands[cands.length - 1].fee, "cheapest first");
+
+    section("What it costs");
+    ok(A.brokerFee(G, star.id, 0.5) > A.brokerFee(G, star.id, 0.25),
+      "eating more of a deal costs more");
+    const off = A.newGame(0, { seed: 7711, rules: { seasonLen: 41 } });
+    A.setRule(off, "retainedSalary", false);
+    A.applyPendingRules(off);
+    ok(!A.brokerCandidates(off, star.id, 0.5, []).length,
+      "with retained salary off nobody can broker anything");
+
+    section("The deal");
+    const help = cands[0];
+    const picks = A.tradablePicks(G, G.userTeam);
+    const pay = picks.find((pk) => A.pickValue(G, pk) >= help.fee) || picks[0];
+    /* Pay properly, or the two clubs never get as far as needing a broker: our
+       best man plus whatever picks aren't already spoken for as the fee. */
+    const mine = A.rosterOf(G, G.userTeam).sort((a, b) => b.ovr - a.ovr)[0];
+    const sweetener = picks.filter((pk) => pk !== pay);
+
+    // Refusals first, so a failed attempt leaves nothing behind.
+    const before = (G.retained || []).length;
+    ok(!A.brokerTrade(G, G.userTeam, [mine.id], [], seller, [star.id], [],
+      { teamId: seller, pid: star.id, pct: 0.5, picks: [pay] }).ok,
+      "the third club has to be a third club");
+    ok(!A.brokerTrade(G, G.userTeam, [mine.id], [], seller, [star.id], [],
+      { teamId: help.teamId, pid: star.id, pct: 0.5, picks: [] }).ok,
+      "and won't do it for free");
+    ok((G.retained || []).length === before, "a refused broker leaves the books alone");
+
+    const r = A.brokerTrade(G, G.userTeam, [mine.id], sweetener, seller, [star.id], [],
+      { teamId: help.teamId, pid: star.id, pct: 0.5, picks: [pay] });
+    ok(r.ok, `a fair offer with a third club behind it goes through (${r.why || "done"})`);
+    ok(G.players[star.id].teamId === G.userTeam, "the player moves");
+    const row = (G.retained || []).find((x) => x.broker);
+    ok(row && row.from === help.teamId, "the money stays with the third club");
+    ok(A.effectiveCap(G, G.players[star.id]) < G.players[star.id].contract.amt,
+      `and his hit is smaller for it ($${A.effectiveCap(G, G.players[star.id])}M `
+      + `vs $${G.players[star.id].contract.amt}M)`);
+    ok(A.retainedBy(G, help.teamId).some((x) => x.broker), "it's on the broker's books");
+    ok(A.capHit(G, help.teamId) > 0, "which is to say he is really paying it");
+    const owner = G.picks.find((x) => x.year === pay.year && x.round === pay.round && x.orig === pay.orig);
+    ok(owner.owner === help.teamId, "and he's been paid his pick");
   },
 
   /* The two contract shapes that cost a club something other than money. */

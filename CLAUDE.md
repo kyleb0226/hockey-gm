@@ -195,6 +195,19 @@ could take away, and a twenty-season career had nothing to show for itself but a
   job back whenever he likes. That is the whole difference between owning the place and working
   there.
 
+## The third club
+`brokerTrade`. The deal that dies at the cap: you have the pieces, they have the piece, neither of
+you can fit the contract, so the best player available at the deadline goes nowhere. In real hockey
+somebody else eats the money — which is the only reason a bad team's cap space is an asset.
+
+It reuses everything that already exists. The broker's share is an ordinary `G.retained` row stamped
+with HIS club id, so `effectiveCap` discounts the contract and `capHit` charges him for it with no
+new accounting anywhere. **The row goes on the books BEFORE `evalTrade` runs** — that's the point,
+since the deal only clears the cap because of it — and is spliced straight back off if the two clubs
+still can't agree. `brokerCandidates` ranks clubs by fee; the further from a playoff place the
+cheaper they are, because this is a favour a contender never does. The fee is quoted in trade-value
+points and settled in picks.
+
 ## Bonus money
 Behind the `contractBonuses` rule. A contract was an amount and a term, and both of those are just
 cap. The two shapes that matter are the two that cost a club something other than money.

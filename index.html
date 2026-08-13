@@ -5043,6 +5043,107 @@ function doTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts) {
   return ev;
 }
 
+/* ------------------------------ the third club -----------------------------
+ * The deal that dies at the cap. You have the pieces, they have the piece, and
+ * neither of you can fit the contract — so it doesn't happen, and the best
+ * player available at the deadline goes nowhere.
+ *
+ * In real hockey somebody else eats the money. A club going nowhere with room
+ * on its books takes a share of the salary and charges a pick for it, which is
+ * the only reason a bad team's cap space is an asset at all.
+ *
+ * It reuses every part of the machinery that already exists: the broker's share
+ * is an ordinary `G.retained` row stamped with HIS club id, so `effectiveCap`
+ * discounts the contract and `capHit` charges him for it without a line of new
+ * accounting. The row goes on the books BEFORE the trade is evaluated — which
+ * is the whole point, since the deal only passes the cap because of it — and is
+ * taken straight back off if the two clubs still can't agree.
+ * ------------------------------------------------------------------------- */
+const BROKER_FEE_RATE = 0.9;    // trade-value points charged per $M-year eaten
+const BROKER_MIN_SPACE = 2;     // a club with no room is no use to anybody
+/* What eating this costs, and therefore what the third club charges. Money is
+   worth more the longer it's owed, which is why a rental is brokered cheaply
+   and four years of somebody's mistake is not. */
+function brokerFee(G, pid, pct) {
+  const p = G.players[pid];
+  if (!p) return 0;
+  const amt = round1(p.contract.amt * clamp(pct, 0, RETAIN_MAX_PCT));
+  return round1(amt * Math.max(1, p.contract.yrs) * BROKER_FEE_RATE);
+}
+/* Who could do it. Anyone with the room and a free retention slot who isn't
+   already in the deal — and, because this is a favour a contender never does,
+   the further from the playoffs the cheaper he is to hire. */
+function brokerCandidates(G, pid, pct, involved) {
+  if (!rules(G).retainedSalary) return [];
+  const p = G.players[pid];
+  if (!p) return [];
+  const out = [];
+  const order = standings(G);
+  const need = round1(p.contract.amt * clamp(pct, 0, RETAIN_MAX_PCT));
+  G.teams.forEach((t) => {
+    if ((involved || []).includes(t.id)) return;
+    if (retainedTraded(G, t.id).length >= MAX_RETAINED) return;
+    const space = capSpace(G, t.id);
+    if (space < Math.max(BROKER_MIN_SPACE, need)) return;
+    /* 0 at the top of the table, 1 at the bottom. A club out of it wants the
+       pick; a club chasing one wants its room. */
+    const pos = order.findIndex((x) => x.id === t.id);
+    const outOfIt = clamp(pos / Math.max(1, G.teams.length - 1), 0, 1);
+    out.push({ teamId: t.id, space, eats: need,
+      fee: round1(brokerFee(G, pid, pct) * (1.6 - 0.7 * outOfIt)) });
+  });
+  return out.sort((a, b) => a.fee - b.fee);
+}
+/* The deal itself. `broker` is `{teamId, pid, pct, picks}` — who helps, whose
+   contract, how much of it, and what he's paid with. */
+function brokerTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, broker, opts) {
+  if (!broker || broker.teamId == null) return { ok: false, why: "no third club" };
+  if (!rules(G).retainedSalary) return { ok: false, why: "retained salary is switched off" };
+  const { teamId: cId, pid, pct } = broker;
+  const p = G.players[pid];
+  if (!p) return { ok: false, why: "no such player" };
+  if (p.teamId !== aId && p.teamId !== bId) return { ok: false, why: "he isn't in this trade" };
+  if (cId === aId || cId === bId) return { ok: false, why: "the third club has to be a third club" };
+  if (retainedTraded(G, cId).length >= MAX_RETAINED)
+    return { ok: false, why: `${G.teams[cId].abbr} already holds ${MAX_RETAINED} retained contracts` };
+  const share = clamp(pct || 0, 0, RETAIN_MAX_PCT);
+  if (share <= 0) return { ok: false, why: "there's nothing for him to take on" };
+  const amt = round1(p.contract.amt * share);
+  if (capSpace(G, cId) < amt) return { ok: false, why: `${G.teams[cId].abbr} hasn't the room` };
+
+  /* What he's paid. The fee is quoted in trade-value points and settled in
+     picks, which is how these are settled in life. */
+  const fee = brokerFee(G, pid, share);
+  const paid = (broker.picks || []);
+  const paidVal = paid.reduce((s, pk) => s + pickValue(G, pk), 0);
+  const ownerOf = (pk) => {
+    const r = (G.picks || []).find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig);
+    return r ? r.owner : null;
+  };
+  const payer = paid.length === 0 ? null
+    : paid.every((pk) => ownerOf(pk) === aId) ? aId
+    : paid.every((pk) => ownerOf(pk) === bId) ? bId : null;
+  if (paid.length && payer == null) return { ok: false, why: "the fee has to come from one club" };
+  if (paidVal < fee * 0.97)
+    return { ok: false, why: `${G.teams[cId].abbr} wants more for eating $${amt}M — about ${round1(fee)} in value` };
+
+  // On the books first: the deal only clears the cap because of it.
+  G.retained = G.retained || [];
+  const row = { pid, from: cId, amt, yrs: Math.max(1, p.contract.yrs), broker: true };
+  G.retained.push(row);
+  const ev = evalTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts);
+  if (!ev.ok) { G.retained.splice(G.retained.indexOf(row), 1); return ev; }
+  paid.forEach((pk) => {
+    const r = G.picks.find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig);
+    if (r) r.owner = cId;
+  });
+  const done = doTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts);
+  if (!done.ok) { G.retained.splice(G.retained.indexOf(row), 1); return done; }
+  G.teams[cId].lines = null;
+  news(G, `${G.teams[cId].name} brokered it — $${amt}M of ${fullName(p)}'s deal stays with them.`, "info");
+  return { ...done, broker: { teamId: cId, amt, fee: round1(fee), paid: round1(paidVal) } };
+}
+
 /* -------------------------------- the market -------------------------------
  * Two things a GM does that the game only let the AI do: listen to offers, and
  * trade on draft day.
@@ -9745,6 +9846,12 @@ function TradeTab({ G, setG, notify, openPlayer }) {
   const [myPicks, setMyPicks] = useState([]);
   const [theirPicks, setTheirPicks] = useState([]);
   const [retain, setRetain] = useState({});
+  /* The third club. Null until you go looking for one, so the panel stays out
+     of the way of every trade that doesn't need saving. */
+  const [bPid, setBPid] = useState(null);
+  const [bPct, setBPct] = useState(RETAIN_MAX_PCT);
+  const [bTeam, setBTeam] = useState(null);
+  const [bPicks, setBPicks] = useState([]);
   const myRoster = rosterOf(G, G.userTeam, true).sort((a, b) => b.ovr - a.ovr);
   const theirRoster = rosterOf(G, other, true).sort((a, b) => b.ovr - a.ovr);
   // Includes this year's unused picks while the draft is running, so you can
@@ -9917,6 +10024,105 @@ function TradeTab({ G, setG, notify, openPlayer }) {
           </div>
         </div>
       ) : null}
+
+      {/* The deal that dies at the cap, and the club that can save it. */}
+      {rules(G).retainedSalary && (mine.length || theirs.length) ? (() => {
+        const movers = mine.concat(theirs).map((id) => G.players[id])
+          .filter((p) => p && p.contract.amt >= BROKER_MIN_SPACE);
+        if (!movers.length) return null;
+        const pid = bPid != null && movers.some((p) => p.id === bPid) ? bPid : null;
+        const p = pid != null ? G.players[pid] : null;
+        const cands = p ? brokerCandidates(G, pid, bPct, [G.userTeam, other]).slice(0, 4) : [];
+        const help = cands.find((c) => c.teamId === bTeam) || null;
+        const fee = p ? brokerFee(G, pid, bPct) : 0;
+        const myPickList = picksOf(G.userTeam);
+        const feePicks = myPickList.filter((pk) => bPicks.includes(pkId(pk)));
+        const feeVal = feePicks.reduce((s, pk) => s + pickValue(G, pk), 0);
+        return (
+          <Section title="Bring in a third club" className="p-3"
+            right={<span className="text-xs text-slate-500">somebody else eats the money, and charges you for it</span>}>
+            <div className="space-y-2 pt-1">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-slate-400">Whose contract</span>
+                <select className={`${inputCls} text-sm`} value={pid == null ? "" : pid}
+                  onChange={(e) => { setBPid(e.target.value === "" ? null : +e.target.value); setBTeam(null); }}>
+                  <option value="">nobody — do it ourselves</option>
+                  {movers.map((m) => (
+                    <option key={m.id} value={m.id}>{shortName(m)} — ${m.contract.amt}M × {m.contract.yrs}</option>
+                  ))}
+                </select>
+                {p ? (
+                  <>
+                    <span className="text-slate-400">they take</span>
+                    <select className={`${inputCls} text-sm`} value={bPct}
+                      onChange={(e) => { setBPct(+e.target.value); setBTeam(null); }}>
+                      <option value={0.25}>25% — ${round1(p.contract.amt * 0.25)}M</option>
+                      <option value={0.5}>50% — ${round1(p.contract.amt * 0.5)}M</option>
+                    </select>
+                  </>
+                ) : null}
+              </div>
+              {p ? (
+                cands.length ? (
+                  <>
+                    <div className="flex flex-wrap gap-2">
+                      {cands.map((c) => (
+                        <button key={c.teamId}
+                          className={`px-2 py-1 rounded text-xs ${c.teamId === bTeam ? "bg-sky-600 text-white" : "bg-[#16233c] text-slate-300 hover:bg-[#1c2c4a]"}`}
+                          onClick={() => setBTeam(c.teamId)}>
+                          {G.teams[c.teamId].abbr} · wants {c.fee.toFixed(1)}
+                          <span className="text-slate-400 ml-1">(${c.space}M free)</span>
+                        </button>
+                      ))}
+                    </div>
+                    {help ? (
+                      <div className="space-y-1.5">
+                        <div className="text-xs text-slate-400">
+                          Pay {G.teams[help.teamId].name} in picks — they want about {help.fee.toFixed(1)}
+                          {" "}for eating ${help.eats}M of it.
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {myPickList.map((pk) => (
+                            <button key={pkId(pk)}
+                              className={`px-2 py-0.5 rounded text-[11px] ${bPicks.includes(pkId(pk)) ? "bg-sky-600 text-white" : "bg-[#16233c] text-slate-300"}`}
+                              onClick={() => toggle(bPicks, setBPicks, pkId(pk))}>
+                              {pickLabel(G, pk, G.userTeam).text} · {pickValue(G, pk).toFixed(1)}
+                            </button>
+                          ))}
+                        </div>
+                        <div className={`text-xs ${feeVal >= help.fee * 0.97 ? "text-emerald-400" : "text-amber-400"}`}>
+                          {feeVal >= help.fee * 0.97
+                            ? `They'll do it — ${feeVal.toFixed(1)} offered against ${help.fee.toFixed(1)}.`
+                            : `Not enough yet — ${feeVal.toFixed(1)} against ${help.fee.toFixed(1)}.`}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-slate-500">Pick who you're ringing.</div>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-xs text-amber-400">
+                    Nobody has the room and a free retention slot for that.
+                  </div>
+                )
+              ) : null}
+              {p && help ? (
+                <button className={btnPri} onClick={() => {
+                  const g2 = migrate(JSON.parse(JSON.stringify(G)));
+                  const r = brokerTrade(g2, g2.userTeam, mine, selPicks(G.userTeam, myPicks),
+                    other, theirs, selPicks(other, theirPicks),
+                    { teamId: help.teamId, pid, pct: bPct, picks: feePicks }, { retain });
+                  if (!r.ok) { notify(r.why); return; }
+                  setG(g2);
+                  setMine([]); setTheirs([]); setMyPicks([]); setTheirPicks([]); setRetain({});
+                  setBPid(null); setBTeam(null); setBPicks([]);
+                  notify(`Done — ${G.teams[help.teamId].abbr} keep $${r.broker.amt}M of it.`);
+                }}>Do it with {G.teams[help.teamId].abbr}</button>
+              ) : null}
+            </div>
+          </Section>
+        );
+      })() : null}
 
       <div className={`${card} p-3 flex flex-wrap items-center gap-3`}>
         <div className="text-sm">
