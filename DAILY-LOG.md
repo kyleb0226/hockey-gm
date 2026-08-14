@@ -155,3 +155,4 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   report naming the opposing starter and where he's soft. Harness grew from 394 to 452 assertions.
   Worth remembering: two whole React components were missing after a bad edit and all 448 checks
   still passed, because the harness never renders. The browser pass caught it.
+- 2026-08-14 · SKIPPED · reverted automatically: tools/simtest.js failed
