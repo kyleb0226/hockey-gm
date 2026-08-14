@@ -84,6 +84,7 @@ const EXPORTS = [
   "standDown", "takeBackTheJob", "draftPar",
   "AUTO_STYLES", "autoStyle", "aiRuns", "styleFor", "aiDeadlineMoves", "aiExtensionOffer",
   "strengthRank", "HONOUR_YEARS", "leagueLevel", "LEAGUE_LEVEL_BASE",
+  "ppPct", "pkPct", "DRESS_MIN",
   "DEV_BASE", "DEV_HEADROOM", "DEV_GAP_PULL",
   "clubProfit", "payDividends", "DIVIDEND_YIELD", "DIRECTIONS", "directionOf", "setDirection",
   "INVESTMENTS", "investLevel", "investCost", "investInClub", "ownsAny",
@@ -3458,7 +3459,15 @@ const CHECKS = {
         age: r.reduce((s, p) => s + p.age, 0) / Math.max(1, r.length), n: r.length };
     };
     const bal = play("balanced"), con = play("contend"), bui = play("build"), fru = play("frugal");
-    ok(con.cap > fru.cap, `contending costs more than being frugal ($${con.cap}M vs $${fru.cap}M)`);
+    /* NOT asserted: that contending outspends being frugal in dollars. It has
+       flaked twice and a twelve-season, three-league run had it the other way
+       round ($53.6M against $59.9M) — because a club keeping its veterans is
+       keeping men who are already cheap, while a frugal one sitting on the
+       floor is signing to reach it. The CEILINGS differ, which is the actual
+       config claim and is asserted above; the realised payroll does not
+       reliably follow, and a check that says otherwise is just wrong. */
+    ok(A.AUTO_STYLES.frugal.spend < A.AUTO_STYLES.contend.spend,
+      "a frugal club is allowed less of the cap than a contending one");
     ok(bui.age < con.age, `building runs younger (${bui.age.toFixed(1)} vs ${con.age.toFixed(1)})`);
     ok([bal, con, bui, fru].every((x) => x.n >= 20), "and all four still ice a legal team");
 
@@ -3485,7 +3494,11 @@ const CHECKS = {
       }
     });
     const pts = (G) => G.teams[G.userTeam].seasons.reduce((s, x) => s + x.pts, 0) / G.teams[G.userTeam].seasons.length;
-    ok(pts(run) > pts(alone) + 20,
+    /* The margin narrowed from 27 points to 17 when `DRESS_MIN` was made to add
+       up to the lineup — an abandoned club now at least ices a legal team, so
+       it loses by less. That is a fix showing up in the numbers, not a
+       regression, and the bar moves with it. */
+    ok(pts(run) > pts(alone) + 12,
       `a club left to itself collapses; one handed over doesn't (${Math.round(pts(run))} vs ${Math.round(pts(alone))} pts a year)`);
     /* A payroll that is actually paying players rather than a shell of
        minimum deals — measured against the club nobody managed, which is what
@@ -4894,8 +4907,21 @@ const CHECKS = {
     A.applyPendingRules(G);
     A.setRule(G, "autoManage", "balanced");
     A.gmState(G).stakes[G.userTeam] = 0.6;   // exercise the owner paths too
+    /* Anything measured off the live season has to be caught BEFORE the
+       rollover blanks it — special teams, ice time — so the last year's
+       numbers are kept as they stood on the final day. */
+    let live = null;
     for (let y = 0; y < YEARS; y++) {
       while (G.phase === "regular") { A.simDays(G, 25); if (G.presser) A.answerPresser(G, 0); }
+      if (y === YEARS - 1) {
+        live = {
+          pp: G.teams.map((t) => A.ppPct(t)),
+          pk: G.teams.map((t) => A.pkPct(t)),
+          toi: A.playersOf(G)
+            .filter((p) => p.pos !== "G" && p.season && p.season.gp >= 40)
+            .map((p) => p.season.toi / p.season.gp),
+        };
+      }
       while (G.phase === "playoffs") A.simPlayoffRound(G);
       A.autoDraft(G, false);
       if (G.fired) { G.fired = null; G.boardConfidence = 55; }
@@ -5024,6 +5050,59 @@ const CHECKS = {
     ok(A.playersOf(G).filter((p) => p.hof != null).length > 0, "the Hall of Fame is untouched");
     ok(G.teams.every((t) => (t.honours || []).every((h) => h.name)),
       "and every retired number can still be named");
+
+    section("Nobody is dressed twice");
+    /* Scanned across fourteen seasons, SOMEBODY averaged between thirty and
+       forty-two minutes a night in every one of them, against a real maximum
+       of twenty-six to twenty-eight. `autoLines` ended its fallback chain at
+       `|| ds[0]` and `|| r[0]`, so a club short at a position put its best man
+       in two slots at once and he collected both sets of minutes. It was also
+       propping up the top of the scoring race. */
+    G.teams.forEach((t) => { t.lines = null; });
+    let twice = 0, empty = 0, maxToi = 0;
+    G.teams.forEach((t) => {
+      const L = A.autoLines(G, t.id);
+      const seen = new Set();
+      L.F.concat(L.D).forEach((row) => row.forEach((id) => {
+        if (id == null) { empty++; return; }
+        if (seen.has(id)) twice++;
+        seen.add(id);
+      }));
+    });
+    ok(twice === 0, `no club ices the same man twice (${twice})`);
+    ok(empty === 0, `and no club ices a hole (${empty})`);
+    maxToi = Math.max(...live.toi);
+    const minToi = Math.min(...live.toi);
+    ok(maxToi < 29, `and nobody plays an impossible night (${maxToi.toFixed(1)} min)`);
+    ok(minToi > 5, `nor an invisible one (${minToi.toFixed(1)} min)`);
+
+    section("Clubs build a real roster");
+    /* `aiFreeAgency` asked about goalies and defencemen and nothing else, so
+       clubs signed the best rating on the board and stockpiled centres —
+       seventeen of the thirty-two could not fill a forward group, one carrying
+       nine centres and six wingers for twelve slots. */
+    const shapes = G.teams.map((t) => {
+      const r = A.rosterOf(G, t.id);
+      const at = (pos) => r.filter((p) => p.pos === pos).length;
+      return { abbr: t.abbr, C: at("C"), LW: at("LW"), RW: at("RW"), D: at("D"), G: at("G") };
+    });
+    const short = shapes.filter((s) => Object.keys(A.DRESS_MIN).some((k) => s[k] < A.DRESS_MIN[k]));
+    ok(!short.length, `every club can fill a lineup${short.length
+      ? ` (${short.slice(0, 3).map((s) => `${s.abbr} ${s.C}C/${s.LW + s.RW}W/${s.D}D`).join(", ")})` : ""}`);
+    ok(Object.values(A.DRESS_MIN).reduce((a, b) => a + b, 0) === A.ROSTER_MIN,
+      "and what a club must carry adds up to what it must dress");
+
+    section("Special teams exist");
+    /* `simGame` counted power plays drawn and scored on into the box from the
+       beginning and nothing ever read them — the two numbers a fan checks after
+       the score were computed for every game ever played and binned. */
+    const pp = live.pp.filter((x) => x > 0), pk = live.pk.filter((x) => x > 0);
+    ok(pp.length === 32 && pk.length === 32, `every club has a power play and a kill (${pp.length}/${pk.length})`);
+    const mPp = pp.reduce((s, x) => s + x, 0) / Math.max(1, pp.length);
+    const mPk = pk.reduce((s, x) => s + x, 0) / Math.max(1, pk.length);
+    ok(mPp > 12 && mPp < 28, `the league power play runs ${mPp.toFixed(1)}% (real 18–22)`);
+    ok(mPk > 72 && mPk < 88, `and the kill ${mPk.toFixed(1)}% (real 78–82)`);
+    ok(Math.abs(mPp + mPk - 100) < 2, "and they are the same events from both ends");
 
     section("Players stop at their ceiling");
     /* The bug that produced everything in this section: `progress` added a flat

@@ -232,6 +232,32 @@ against an $88M ceiling and a $66.9M floor — all thirty-two clubs under the fl
 into the cap by about year twelve, so it *looked* calibrated in a long save. `capAmount`,
 `CAP_FLOOR_PCT` and `marketValue` need matching to each other, and that is the next real job.
 
+## The anomaly scan
+`scratchpad/scan.js` — not "is the save consistent" but "does any of this look like hockey".
+Distributions and outliers across a long save, checked against real NHL ranges. It found four:
+
+- **Somebody averaged 30 to 42 minutes a night in every single season.** `autoLines` ended its
+  fallback chain at `|| ds[0]` and `|| r[0]`, so a club short at a position put its best man in TWO
+  SLOTS AT ONCE — and because everyone on the ice is on for the whole shift, he collected both sets
+  of minutes. Replaced with an allocator that can't reuse anybody: a slot goes to the best man who
+  plays there, then the best forward left over (a centre plays the wing, as they do), and failing
+  that stays empty. Ice time now runs 7.5 to 24.0 instead of 1.7 to 42.5.
+- **Seventeen of thirty-two clubs couldn't ice a legal forward group** — one carried nine centres
+  and six wingers for twelve slots — because `aiFreeAgency` asked about goalies and defencemen and
+  nothing else. It reads `DRESS_MIN` now. And `DRESS_MIN` itself asked for ten forwards when four
+  lines need twelve; four of each is twenty, which is exactly `ROSTER_MIN`, so the two numbers
+  finally describe the same team.
+- **`t.pp` and `t.ppg` were counted every game and never read by anything.** The two numbers a fan
+  checks after the score were computed for every game ever played and binned. They land on the club
+  now, with the kill derived from the opponent's, and both are in the standings: 17.8% and 82.3%
+  league-wide, summing to 100 because they're the same events from both ends.
+- **The scoring tail was being carried by the double-shift defect.** With it fixed the league had
+  ONE hundred-point scorer a year against a real one to fourteen, and the assist leader finished
+  below the goal leader. `LINE_TOI` was 30/27/24/19 — a first-to-fourth ratio of 1.6 where the NHL
+  runs 2.1, tuned when a star could be double-shifted. At 34/28/22/16 a first line plays sixteen
+  minutes instead of fourteen and the tail comes back: four 100-point scorers, assist leader clear
+  at 76.
+
 ## The audit
 `node tools/simtest.js audit`. Every other case tests one feature on a fresh league; this plays a
 real career — twelve full seasons on Deep with the club running itself, then eight more — and asks

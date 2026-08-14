@@ -2118,6 +2118,11 @@ function capHit(G, teamId) {
   const dead = retainedBy(G, teamId).reduce((s, r) => s + r.amt, 0);
   return round1(roster + dead);
 }
+// How the special teams are running. Zero when nothing has been played yet,
+// which the standings render as a dash rather than a misleading 0.0.
+const ppPct = (t) => (t && t.pp ? (t.ppg / t.pp) * 100 : 0);
+const pkPct = (t) => (t && t.pk ? (1 - t.pkga / t.pk) * 100 : 0);
+
 function capSpace(G, teamId) { return round1(rules(G).capAmount - capHit(G, teamId)); }
 function capFloor(G) { return round1(rules(G).capAmount * CAP_FLOOR_PCT); }
 
@@ -2144,7 +2149,16 @@ const teamOf = (G, teamId) => G.teams[teamId];
    first-line-to-fourth-line ratio was tried and made scoring WORSE, not better
    — the 20-goal count held while the top inflated, which says the overage is
    in the shape of the shooter draw, not in how minutes are split. */
-const LINE_TOI = [0.30, 0.27, 0.24, 0.19];
+/* How a coach splits the even-strength minutes between his four lines. This
+   was 30/27/24/19 — a ratio of 1.6 between the first line and the fourth,
+   where the NHL runs closer to 2.1, and a flat split is why the league had no
+   scoring tail: exactly ONE hundred-point scorer a year against a real one to
+   fourteen, and a first line playing fourteen minutes a night against a real
+   sixteen or seventeen.
+   The old numbers were tuned when a star could be double-shifted into two
+   lines at once — that defect was carrying the top of the scoring race, and
+   with it fixed the real split has to do the work instead. */
+const LINE_TOI = [0.34, 0.28, 0.22, 0.16];
 const PAIR_TOI = [0.38, 0.34, 0.28];
 // At home the top line is steered toward the soft pair. Applied as a bend and
 // re-normalised, so it works with whatever split the opposing coach has set.
@@ -2200,17 +2214,49 @@ function autoLines(G, teamId) {
   // And if every goalie in the organisation is hurt, dress the least broken.
   if (!gs.length) gs = rosterOf(G, teamId, true).filter((p) => p.pos === "G").sort((a, b) => a.inj - b.inj);
   if (!gs.length) gs = r.slice(-1);
-  // A short bench borrows from the nearest position rather than icing an empty slot.
+  /* NOBODY IS DRESSED TWICE.
+   *
+   * The old fallback chain ended `|| ds[0]` for a pair and `|| r[0]` for a
+   * line, so a club a man short at a position put its BEST player in two slots
+   * at once — and because everyone on the ice is on for the whole shift, he
+   * collected both sets of minutes. Scanned across fourteen seasons somebody
+   * averaged between thirty and FORTY-TWO minutes a night in every single one
+   * of them, against a real maximum of twenty-six to twenty-eight.
+   *
+   * A slot is filled by the best man who actually plays there, then by the best
+   * forward left over — a centre plays the wing when a club is short, which is
+   * what really happens — and if there is genuinely nobody, it stays EMPTY.
+   * An empty slot is honest and the engine already handles it; the same man
+   * twice is a club icing seven skaters. */
+  const used = new Set();
+  const grab = (pool, fallback) => {
+    const pick = pool.find((p) => !used.has(p.id))
+      || (fallback || []).find((p) => !used.has(p.id));
+    if (pick) used.add(pick.id);
+    return pick || null;
+  };
   const spare = r.filter((p) => p.pos !== "G" && p.pos !== "D");
-  const take = (arr, i) => arr[i] || spare[i + 8] || spare[spare.length - 1] || r[0];
-  const F = [0, 1, 2, 3].map((i) => [take(lws, i), take(cs, i), take(rws, i)].map((p) => (p ? p.id : null)));
-  const D = [0, 1, 2].map((i) => [ds[i * 2], ds[i * 2 + 1]].map((p) => (p ? p.id : (ds[0] ? ds[0].id : null))));
+  /* Down the lines rather than across them, so a shortage costs the FOURTH
+     line its winger rather than the first — which is also how a coach does it. */
+  const F = [[null, null, null], [null, null, null], [null, null, null], [null, null, null]];
+  [0, 1, 2, 3].forEach((i) => {
+    F[i][0] = grab(lws, spare); F[i][1] = grab(cs, spare); F[i][2] = grab(rws, spare);
+  });
+  const D = [0, 1, 2].map(() => [grab(ds), grab(ds)]);
+  const idsOf = (row) => row.map((p) => (p ? p.id : null));
+  const Fids = F.map(idsOf), Dids = D.map(idsOf);
   const Gk = [gs[0] ? gs[0].id : null, gs[1] ? gs[1].id : null];
-  const skaters = r.filter((p) => p.pos !== "G");
+  /* Special teams come out of the men who are actually in the lineup. Drawing
+     them from the whole dressed roster put a defensively-minded spare on the
+     penalty kill and on no line at all, so he finished the year averaging
+     under four minutes a night — a player who exists only when somebody takes
+     a penalty. A coach picks his kill from the eighteen he dressed. */
+  const dressed = new Set(Fids.flat().concat(Dids.flat()).filter((x) => x != null));
+  const skaters = r.filter((p) => p.pos !== "G" && dressed.has(p.id));
   const PP = [skaters.slice(0, 5).map((p) => p.id), skaters.slice(5, 10).map((p) => p.id)];
   const pkPool = skaters.slice().sort((a, b) => b.r.dfn - a.r.dfn);
   const PK = [pkPool.slice(0, 4).map((p) => p.id), pkPool.slice(4, 8).map((p) => p.id)];
-  return { F, D, G: Gk, PP, PK };
+  return { F: Fids, D: Dids, G: Gk, PP, PK };
 }
 function ensureLines(G, teamId) {
   const t = G.teams[teamId];
@@ -3313,6 +3359,17 @@ function applyGame(G, res, opts) {
     const ga = tid === res.home ? res.ag : res.hg;
     if (!opts.playoff) {
       t.gp++; t.gf += gf; t.ga += ga;
+      /* Special teams. `simGame` has been counting power plays drawn and scored
+         on into the box since the beginning and NOTHING EVER READ THEM — the
+         two numbers every hockey fan checks after the score existed for every
+         game ever played and were thrown away at the whistle. The kill is the
+         same pair seen from the other end, so it costs one more line here and
+         no new simulation at all. */
+      const mine = res.boxes[tid], theirs = res.boxes[tid === res.home ? res.away : res.home];
+      t.pp = (t.pp || 0) + (mine.pp || 0);
+      t.ppg = (t.ppg || 0) + (mine.ppg || 0);
+      t.pk = (t.pk || 0) + (theirs.pp || 0);
+      t.pkga = (t.pkga || 0) + (theirs.ppg || 0);
       const won = gf > ga;
       if (tie) { t.otl++; t.pts += 1; }
       else if (won) { t.w++; t.pts += 2; t.streak = t.streak >= 0 ? t.streak + 1 : 1; }
@@ -4756,7 +4813,12 @@ function finishSeason(G) {
    sends surplus players down and `fillRosters` calls them back up — if the two
    disagreed about the minimums they would fight each other every rollover, and
    the club would start the season a goaltender short. */
-const DRESS_MIN = { G: 2, D: 6, C: 4, LW: 3, RW: 3 };
+/* What a club has to carry, and it has to ADD UP TO THE LINEUP. This asked for
+   ten forwards when four lines need twelve, so a club at the legal minimum
+   could only ice three and a third lines and the rest was borrowed from
+   whoever was left. Four of each is twenty in total, which is exactly
+   `ROSTER_MIN` — the two numbers now describe the same team. */
+const DRESS_MIN = { G: 2, D: 6, C: 4, LW: 4, RW: 4 };
 const ROSTER_MIN = 20;   // bodies a club has to have dressed
 
 function fillRosters(G) {
@@ -5451,12 +5513,21 @@ function aiFreeAgency(G) {
         const bar = 1 + (1 - styleFor(G, tid).fa) * 4;
         if (!top || !worst || top.ovr <= worst.ovr + bar) continue;
       }
-      const needG = roster.filter((p) => p.pos === "G").length < 2;
-      const needD = roster.filter((p) => p.pos === "D").length < 6;
+      /* WHAT THE CLUB IS ACTUALLY SHORT OF. This asked about goalies and
+         defencemen and nothing else, so clubs signed the best rating on the
+         board year after year and stockpiled centres: scanned over fourteen
+         seasons, SEVENTEEN of the thirty-two could not ice a legal forward
+         group, one of them carrying nine centres and six wingers for twelve
+         forward slots. `DRESS_MIN` already says what a club needs; it just
+         wasn't being read here. */
+      const short = Object.keys(DRESS_MIN).filter(
+        (pos) => roster.filter((p) => p.pos === pos).length < DRESS_MIN[pos]);
       const cands = G.freeAgents.map((id) => G.players[id]).filter((p) => {
-        if (needG) return p.pos === "G";
-        if (needD) return p.pos === "D";
-        return true;
+        if (!short.length) return true;
+        // Goal first, then the blue line, then whatever else is missing.
+        if (short.includes("G")) return p.pos === "G";
+        if (short.includes("D")) return p.pos === "D";
+        return short.includes(p.pos);
       });
       /* Which of them. Ordinarily the best rating on the board — but a club
          shedding its own veterans and then signing everybody else's is not
@@ -7449,6 +7520,7 @@ function startNextSeason(G) {
   });
   G.teams.forEach((t) => {
     t.w = 0; t.l = 0; t.otl = 0; t.pts = 0; t.gf = 0; t.ga = 0; t.gp = 0; t.streak = 0; t.l10 = [];
+    t.pp = 0; t.ppg = 0; t.pk = 0; t.pkga = 0;
     // The season's best run is a season thing; the record book already has it.
     t.wsMax = 0;
     t.farmRec = blankFarmRec();
@@ -10329,6 +10401,11 @@ function StandingsTab({ G, openTeam }) {
     { key: "ga", label: "GA", get: (t) => t.ga },
     { key: "diff", label: "Diff", get: (t) => t.gf - t.ga,
       cell: (t) => <span className={t.gf - t.ga > 0 ? "text-emerald-400" : "text-rose-400"}>{t.gf - t.ga > 0 ? "+" : ""}{t.gf - t.ga}</span> },
+    // Special teams: the two numbers a fan checks straight after the score.
+    { key: "ppp", label: "PP%", get: (t) => ppPct(t),
+      cell: (t) => (t.pp ? ppPct(t).toFixed(1) : "—") },
+    { key: "pkp", label: "PK%", get: (t) => pkPct(t),
+      cell: (t) => (t.pk ? pkPct(t).toFixed(1) : "—") },
     { key: "l10", label: "L10", get: (t) => (t.l10 || []).filter((x) => x === "W").length,
       cell: (t) => <span className="text-xs text-slate-400">{(t.l10 || []).join("")}</span> },
   ];
