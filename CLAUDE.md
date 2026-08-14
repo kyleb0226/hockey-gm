@@ -195,6 +195,43 @@ could take away, and a twenty-season career had nothing to show for itself but a
   job back whenever he likes. That is the whole difference between owning the place and working
   there.
 
+## The development curve, and what it inflated
+Traced on a single draft class run through `progress` with **no games played at all**
+(`scratchpad/curve.js` — one second, and it settles the question):
+
+| | old | now |
+|---|---|---|
+| past his own ceiling by 25 | 64 of 96 | ~5 of 96 |
+| `pot` across the cohort | 65.4 → **72.0** | 65.4 → 66.4 |
+| cohort peak vs drafted ceiling | **+6.5** | −0.6 |
+
+The cause was a flat `+2.4` added every year to anybody under his peak whether he had anywhere left
+to go or not, and `p.pot = Math.max(p.ovr, …)` ratcheting the ceiling up behind him. Now the GAP
+does the work — `DEV_BASE` 0.35 plus `head × DEV_GAP_PULL` (0.22, well up from 0.135) — so a raw
+draftee with 27 points to travel gains six a year, **faster than the old curve ever moved him**, and
+a man who has arrived stops. Ice time is scaled by the same headroom (`DEV_HEADROOM`), which makes
+minutes the biggest single term in the function rather than a garnish on a flat number.
+
+Two related fixes: **`leagueLevel`** — both retirement tests compared a rating to a FIXED figure, so
+every point the league drifted pushed more players under an unmoving bar, and culling the weakest
+raised the average again. They read against the league now, written so year one is identical. And
+**a goalie peaks at 27, not 28** — two extra climbing years put a goalie cohort 2.2 points above the
+skaters it was drafted with, amplified by there being 64 goaltending jobs against 672, which is why
+save percentage climbed .898 → .909 while goals slid 6.08 → 5.52.
+
+**What is NOT fixed, measured rather than guessed.** The league still rises about 9–11 points over
+its first dozen seasons and then plateaus. That is not a runaway — it is a STARTING-CONDITION
+mismatch: `newGame` generates ~872 players and the simulation sustains ~1120, so the NHL is picking
+the top 736 of a pool that keeps growing until it fills. Fixing it properly means generating the
+initial league at the population and quality it actually holds, which moves every year-one
+calibrated number and needs its own measured pass.
+
+**And the cap has never bound.** Year one, before any development whatsoever: mean payroll **$35.0M
+against an $88M ceiling and a $66.9M floor — all thirty-two clubs under the floor**
+(`scratchpad/cap.js`). This is pre-existing and was masked: the old inflation carried salaries up
+into the cap by about year twelve, so it *looked* calibrated in a long save. `capAmount`,
+`CAP_FLOOR_PCT` and `marketValue` need matching to each other, and that is the next real job.
+
 ## The audit
 `node tools/simtest.js audit`. Every other case tests one feature on a fresh league; this plays a
 real career — twelve full seasons on Deep with the club running itself, then eight more — and asks

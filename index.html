@@ -551,8 +551,14 @@ const AUTO_STYLES = {
      you keep is just a budget. */
   balanced: { label: "Balanced", blurb: "Runs the club the way the other thirty-one are run: buy when you're up, sell when you're down.",
     fa: 1, extend: 1, keepVet: 1, keepKid: 1, deadline: null, kids: 0, spend: 1 },
+  /* `kids: -1` used to make sense when the development curve overshot and a
+     thirty-year-old was genuinely the better player. With the curve fixed a
+     young man of the same rating is the better bet every time, so preferring
+     the veteran was simply playing a worse team — measured, contend went from
+     the best style in the game to the worst. Its edge is what it ACQUIRES: the
+     deadline, the ceiling, and keeping the men who are already good. */
   contend:  { label: "Win now", blurb: "Buys at the deadline whatever the table says, re-signs its veterans and spends to the ceiling. The picks go.",
-    fa: 1.25, extend: 1.25, keepVet: 1.6, keepKid: 1.1, deadline: "buy", kids: -1, spend: 1 },
+    fa: 1.25, extend: 1.25, keepVet: 1.6, keepKid: 1.1, deadline: "buy", kids: -0.4, spend: 1 },
   build:    { label: "Build", blurb: "Sells every veteran worth a pick, keeps every young player it has and plays them ahead of the men.",
     fa: 0.55, extend: 0.75, keepVet: 0.3, keepKid: 1.4, deadline: "sell", kids: 1, spend: 0.85 },
   /* `spend` has to clear the FLOOR to mean anything — at 0.70 against a floor
@@ -7129,7 +7135,19 @@ function aiDeadlineMoves(G) {
    draft rework: prospects arrive raw now, so the gap is bigger and it has to
    mean more, or a fifty-overall kid with a ninety ceiling is still a fringe
    player at twenty-three. */
-const DEV_GAP_PULL = 0.135;
+/* What a year is worth to a young player who has ALREADY arrived — nearly
+   nothing, which is the point. It used to be 2.4 unconditionally and that is
+   what inflated the league. */
+const DEV_BASE = 0.35;
+/* And how hard the remaining gap pulls. Raised well past the old 0.135 because
+   the gap is now doing all of the work: a raw draftee with twenty-seven points
+   to travel gains six a year, faster than the old curve ever moved him, and it
+   tapers to nothing as he closes on it. */
+const DEV_GAP_PULL = 0.22;
+/* Over how much remaining headroom ice time counts at full value. Inside eight
+   points of his ceiling, minutes start mattering less; at the ceiling they stop
+   mattering at all, because there is nothing left to teach him. */
+const DEV_HEADROOM = 8;
 /* A farm season is worth more than it was — but it MUST stay below what a
    genuine NHL role gives (`solid` measures about 2.2), or the trade-off the
    whole development model rests on inverts and everyone is better off hidden
@@ -7260,15 +7278,31 @@ function devAgeWeight(age) { return age <= 21 ? 1 : age <= 23 ? 0.75 : age <= 25
 /* ------------------------------ the rollover ------------------------------ */
 
 function progress(G, p, po) {
-  const peak = p.pos === "G" ? 28 : 26;
+  /* A goalie matures later than a skater — that much is real hockey. But at 28
+     against 26 he got TWO extra years of climbing and started declining two
+     years later, and a cohort traced through this function peaks 2.2 points
+     higher than the skaters it was drafted alongside. There are only sixty-four
+     goaltending jobs against six hundred and seventy-two, so that edge is
+     amplified by how thin the selection is, and the league's save percentage
+     climbed .898 to .909 across twenty seasons while goals slid 6.08 to 5.52.
+     One year later, not two. */
+  const peak = p.pos === "G" ? 27 : 26;
   const keys = p.pos === "G" ? GOALIE_KEYS : SKATER_KEYS;
   let delta;
-  /* The CEILING GAP pulls harder than it did. Draftees now arrive raw with a
-     long way to travel, and at the old 0.09 a fifty-overall kid with a ninety
-     ceiling crawled — he'd still be a fringe player at 23. A wide gap is the
-     whole signal that somebody is going to be good, so it should move him
-     fast; a narrow one still moves him barely at all. */
-  if (p.age < peak) delta = gauss(G, 2.4 + (p.pot - p.ovr) * DEV_GAP_PULL, 1.7);
+  /* HOW FAR HE STILL HAS TO TRAVEL. Everything below is scaled by this, and
+     that is the whole fix for the thing twenty simulated seasons found: the
+     league inflated, the average NHL player going from 62 to 75, because the
+     old curve added a FLAT +2.4 every year to anybody under his peak whether
+     he had anywhere left to go or not.
+     Traced on a single cohort with no games played at all: sixty-four of
+     ninety-six had passed their own ceiling by twenty-five, and `pot` ratcheted
+     from 65.4 to 72.0 behind them because it follows `ovr` up. The class peaked
+     six and a half points above the ceiling it was drafted with, every year,
+     for ever.
+     Now he APPROACHES it. The gap does the work, so a raw kid with a long way
+     to go moves faster than he ever did — and a man who has arrived stops. */
+  const head = Math.max(0, p.pot - p.ovr);
+  if (p.age < peak) delta = gauss(G, DEV_BASE + head * DEV_GAP_PULL, 1.7);
   else if (p.age < peak + 4) delta = gauss(G, 0.2, 1.4);
   else delta = gauss(G, -(p.age - peak - 3) * 0.95, 1.5);
   // Where he played and how it went. `p.stats` is the season that just ended —
@@ -7277,7 +7311,13 @@ function progress(G, p, po) {
   /* `farmRoom` reads `t.farmRec` and `p.farmTitles`, both of which are still
      intact here — the table is reset in `startNextSeason` and the title was
      awarded by `runFarmPlayoffs` back at the end of the regular season. */
-  delta += devEnvironment(p, p.stats, p.farmSeason, farmRoom(G, p), po) * devAgeWeight(p.age);
+  /* Minutes are scaled by the SAME headroom. Real ice time is what makes a
+     young player come along fast, and with the flat base gone it is now the
+     biggest single thing in this function rather than a garnish on it — but it
+     accelerates the approach to his ceiling instead of carrying him past it,
+     which is what it used to do. */
+  const env = devEnvironment(p, p.stats, p.farmSeason, farmRoom(G, p), po) * devAgeWeight(p.age);
+  delta += env * (env > 0 ? clamp(head / DEV_HEADROOM, 0, 1) : 1);
   /* An owner's building, and the course he set. Both only touch a player young
      enough for his surroundings to matter, and both are exactly 1 for every
      club in the league that isn't yours — so nothing here moves unless you own
@@ -7326,13 +7366,38 @@ function progress(G, p, po) {
  * leaguer, and some of them stop. */
 const NEVER_MADE_IT_AGE = 26;
 const NEVER_MADE_IT_GAMES = 60;
+/* The league's own level, so that "is he good enough" is asked against his
+ * peers rather than against a number.
+ *
+ * This matters more than it sounds. Both retirement tests used to compare a
+ * player's rating to a FIXED figure — 55 and 58 — and the league's average
+ * drifts upward as the pool fills to capacity. Every point of drift pushed more
+ * players under an unmoving bar, and culling the weakest raises the average
+ * again: a positive feedback loop, running quietly for the whole career.
+ *
+ * `LEAGUE_LEVEL_BASE` is what a fresh league generates at, and the offsets
+ * below are written against it, so YEAR ONE BEHAVES IDENTICALLY and only a
+ * drifted league behaves differently. Cached per season because this is asked
+ * once per player at every rollover. */
+const LEAGUE_LEVEL_BASE = 62;
+function leagueLevel(G) {
+  if (G.levelYear === G.year && G.level != null) return G.level;
+  const nhl = playersOf(G).filter((p) => p.teamId != null && !p.farm && !p.retired);
+  G.level = nhl.length
+    ? Math.round(nhl.reduce((s, p) => s + p.ovr, 0) / nhl.length)
+    : LEAGUE_LEVEL_BASE;
+  G.levelYear = G.year;
+  return G.level;
+}
 function retirementChance(G, p) {
+  // How far above or below his peers he is, rather than above or below 62.
+  const rel = p.ovr - leagueLevel(G);
   if (p.age >= 32) {
-    const decline = (p.age - 32) * 0.09 + Math.max(0, (55 - p.ovr)) * 0.012;
+    const decline = (p.age - 32) * 0.09 + Math.max(0, -(rel + 7)) * 0.012;
     return clamp(decline, 0, 0.95);
   }
   // Never established, and past the age where that changes.
-  if (p.age >= NEVER_MADE_IT_AGE && nhlGames(p) < NEVER_MADE_IT_GAMES && p.ovr < 58) {
+  if (p.age >= NEVER_MADE_IT_AGE && nhlGames(p) < NEVER_MADE_IT_GAMES && rel < -4) {
     return clamp(0.1 + (p.age - NEVER_MADE_IT_AGE) * 0.09, 0, 0.6);
   }
   return 0;
