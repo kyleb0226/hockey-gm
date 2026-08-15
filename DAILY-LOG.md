@@ -156,3 +156,4 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   Worth remembering: two whole React components were missing after a bad edit and all 448 checks
   still passed, because the harness never renders. The browser pass caught it.
 - 2026-08-14 · SKIPPED · reverted automatically: tools/simtest.js failed
+- 2026-08-15 · SKIPPED · reverted automatically: tools/simtest.js failed
