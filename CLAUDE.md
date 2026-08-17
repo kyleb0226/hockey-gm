@@ -232,6 +232,34 @@ against an $88M ceiling and a $66.9M floor — all thirty-two clubs under the fl
 into the cap by about year twelve, so it *looked* calibrated in a long save. `capAmount`,
 `CAP_FLOOR_PCT` and `marketValue` need matching to each other, and that is the next real job.
 
+## Names, numbers, and the papercut scan
+`scratchpad/papercuts.js` — things that aren't broken, just irritating. After ten seasons it found
+duplicate names inside one dressing room, two clubs employing a coach with the same name, and no way
+to tell apart the two "O. Côté" on a roster screen.
+
+- **`NAMES` is per-nation.** One pool of 54 first names and 60 surnames gave 3,240 combinations for a
+  league that churns fifteen hundred players. Players already had a nationality (`nationOf`, derived
+  from the id for the tournament), so the name comes from the same place: **16,000 combinations**,
+  and a Finn who sounds Finnish instead of a Russian called Cole Mackey. `genPlayer` still makes
+  exactly two draws, so no seed shifts. Coaches went 320 → 2,500.
+- **`sweaterOf` / `sweaterMap`.** A number derived from the id, never stored, so every player in an
+  existing save has one for free. Weighted toward the numbers players actually wear. Collisions and
+  retired numbers are resolved per club at read time — lower id keeps it — so nothing is persisted
+  and it stays stable. It also settles the duplicate-name papercut: two men with the same surname
+  are now visibly different on the roster screen.
+
+## Relocation and the building
+`MARKETS` / `relocationOptions` / `relocate`, needing a controlling interest — a minority holder does
+not get to move a club out of its city, and neither does a manager. A bigger market pays for ever
+(`t.mkt` drives the gate and the club's value), and the cost is the point: you leave **the arena you
+paid for** (`t.invest.arena` resets), **the city's goodwill** (`fanMood` drops to 35 — a new town has
+to be won over), and **the rivalry**, because a rivalry is two places and not two badges. `t.movedFrom`
+remembers the abandoned city so it never gets another club.
+
+The arena investment now goes to five levels rather than three and does two things: the gate, and
+`homeEdge` — a building an owner has poured money into is a louder one, worth a fifth of the base
+home advantage at the top level, and only ever yours.
+
 ## The anomaly scan
 `scratchpad/scan.js` — not "is the save consistent" but "does any of this look like hockey".
 Distributions and outliers across a long save, checked against real NHL ranges. It found four:

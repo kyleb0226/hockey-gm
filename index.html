@@ -99,17 +99,111 @@ const CONFS = ["East", "West"];
 const DIVS  = ["Atlantic", "Metro", "Central", "Pacific"];
 const DIV_CONF = [0, 0, 1, 1];
 
-const FIRST = ["Alex","Mikko","Nathan","Elias","Cole","Tomas","Jakob","Rasmus","Liam","Dylan",
-  "Anton","Nikita","Marcus","Owen","Brady","Sebastian","Viktor","Emil","Connor","Trevor",
-  "Hugo","Patrik","Lucas","Mason","Kirill","Joel","Adam","Simon","Ryan","Felix","Otto",
-  "Dawson","Casey","Jonas","Andrei","Tage","Wyatt","Lars","Miles","Quinn","Rory","Beau",
-  "Matias","Teddy","Zach","Nolan","Isak","Gustav","Sam","Denis","Brock","Kaden","Petr","Levi"];
-const LAST = ["Hedman","Barlow","Voss","Lindqvist","Bergeron","Novak","Kessel","Rahkonen","Mackey",
-  "Turcotte","Strand","Petrov","Halloran","Sundin","Kane","Duchesne","Rask","Nilsson","O'Hara",
-  "Belanger","Larkin","Sokolov","Beaumont","Vasko","Hagen","Trudeau","Kaplan","Forsberg","Delisle",
-  "Kovac","Ahlberg","Marchand","Riis","Denault","Volkov","Steen","Bouchard","Lehto","Grimaldi",
-  "Ackerman","Poulin","Wallin","Cormier","Radulov","Fennell","Sorenson","Dubois","Malkov","Tanev",
-  "Aho","Brodeur","Vlasic","Kubina","Renaud","Salo","Whitaker","Zima","Gagne","Holt","Sandberg"];
+/* ---------------------------------- names ----------------------------------
+ * One pool of 54 first names and 60 surnames gave 3,240 combinations for a
+ * league that churns fifteen hundred players — so every save filled up with
+ * brothers who weren't related, and a Russian was as likely to be called Cole
+ * Mackey as Nikita Sokolov.
+ *
+ * Players already HAVE a nationality (`nationOf`, derived from the id for the
+ * world tournament), so the names come from it. That fixes both problems at
+ * once: roughly forty thousand combinations instead of three thousand, and a
+ * Finn who sounds Finnish. Nothing in the engine reads a name, so this is free.
+ * ------------------------------------------------------------------------- */
+const NAMES = {
+  CAN: {
+    first: ["Connor","Nathan","Dylan","Owen","Brady","Mason","Cole","Ryan","Liam","Carter",
+      "Logan","Tyler","Brayden","Nolan","Quinn","Riley","Dawson","Cody","Travis","Shea",
+      "Jean-Luc","Mathieu","Pierre","Alexandre","Olivier","Samuel","Félix","Vincent","Étienne","Guillaume",
+      "Wyatt","Reid","Tanner","Colton","Brock","Landon","Keegan","Rory","Beau","Miles"],
+    last: ["Tremblay","Gagnon","Bouchard","Roy","Côté","Bergeron","Pelletier","Lavoie","Fortin","Gauthier",
+      "Beaulieu","Poulin","Cormier","Duchesne","Belanger","Trudeau","Marchand","Dubois","Gagne","Renaud",
+      "Mackey","Halloran","O'Hara","Whitaker","Barlow","Steen","Hagen","Ackerman","Fennell","Delisle",
+      "Brodeur","Turcotte","Denault","Grimaldi","Vachon","Leclair","Doucet","Thibault","Charron","Rousseau",
+      "Kilbride","Sutherland","MacLellan","Cavanagh","Prendergast","Donnelly","Rafferty","Kinsella","Boyle","Hennessy"],
+  },
+  USA: {
+    first: ["Jack","Luke","Matthew","Zach","Trevor","Casey","Blake","Chase","Hunter","Drew",
+      "Cameron","Jake","Bryce","Garrett","Tucker","Grant","Shane","Wesley","Parker","Bennett",
+      "Sam","Levi","Teddy","Miles","Cooper","Reed","Spencer","Griffin","Preston","Barrett",
+      "Kaden","Easton","Cade","Colin","Brendan","Devin","Marcus","Elliot","Rowan","Sawyer"],
+    last: ["Kessel","Larkin","Kane","Voss","Ackerman","Whitaker","Barlow","Sandberg","Holt","Hagen",
+      "Merrill","Buckley","Vaughn","Kearney","Doyle","Shanahan","Rowe","Dempsey","Callahan","Whelan",
+      "Hollister","Ashford","Braddock","Kingsley","Prescott","Lindstrom","Wagner","Schaefer","Meyers","Zimmer",
+      "Novotny","Malkov","Kaplan","Beaumont","Sorenson","Grimaldi","Delaney","Farrow","Winslow","Chandler",
+      "Redmond","Sheridan","Tolliver","Marsden","Ellery","Vandermeer","Kirkland","Bannister","Colby","Ridley"],
+  },
+  SWE: {
+    first: ["Elias","Rasmus","Viktor","Emil","Hugo","Lucas","Gustav","Isak","Filip","Oskar",
+      "Anton","Axel","Jonas","Marcus","Simon","Adam","Melker","Linus","Ludvig","Nils",
+      "Erik","Albin","Sebastian","Theo","Alfred","Måns","Vilgot","Elton","Sixten","Love",
+      "Lars","Tage","Joel","Felix","Olle","Hampus","Arvid","Wilmer","Ture","Sigge"],
+    last: ["Lindqvist","Nilsson","Forsberg","Sundin","Ahlberg","Wallin","Hedman","Sorenson","Strand","Sandberg",
+      "Bergström","Lundqvist","Eriksson","Karlsson","Andersson","Johansson","Nyström","Öberg","Söderberg","Hallgren",
+      "Ekholm","Dahlén","Sjöberg","Lindgren","Norling","Blomqvist","Rundqvist","Kjellberg","Falk","Holmberg",
+      "Wikström","Åkesson","Engström","Fredriksson","Palmgren","Rehnberg","Sjöström","Tornberg","Vikander","Yngve",
+      "Brandt","Cederholm","Dellborg","Grahn","Hultman","Krantz","Malmberg","Ramström","Selin","Wennberg"],
+  },
+  FIN: {
+    first: ["Mikko","Patrik","Otto","Matias","Aleksi","Eetu","Joonas","Kasperi","Miro","Rasmus",
+      "Sakari","Teemu","Ville","Jesse","Juuso","Niko","Onni","Veeti","Elias","Leevi",
+      "Arttu","Lauri","Roope","Santeri","Valtteri","Waltteri","Eemil","Konsta","Topias","Aatu",
+      "Janne","Kalle","Perttu","Saku","Tuukka","Urho","Verneri","Aku","Iiro","Rikhard"],
+    last: ["Rahkonen","Rask","Lehto","Aho","Salo","Koivunen","Heiskanen","Virtanen","Mäkinen","Nieminen",
+      "Hakala","Järvinen","Kinnunen","Laaksonen","Manninen","Peltola","Rantanen","Saarinen","Toivonen","Väisänen",
+      "Ahonen","Halonen","Karppinen","Lehtinen","Mustonen","Niskanen","Pulkkinen","Rautio","Seppälä","Tuominen",
+      "Hämäläinen","Kettunen","Lindroos","Määttä","Ojala","Partanen","Riikonen","Suominen","Turunen","Vainio",
+      "Havula","Ikonen","Jokinen","Kurkinen","Lampinen","Määttänen","Pentikäinen","Räsänen","Sipilä","Ylönen"],
+  },
+  RUS: {
+    first: ["Nikita","Kirill","Andrei","Denis","Artemi","Ilya","Vladimir","Yegor","Maxim","Pavel",
+      "Sergei","Dmitri","Alexei","Vadim","Grigori","Anton","Danil","Klim","Matvei","Rodion",
+      "Timur","Yaroslav","Zakhar","Arseni","Bogdan","Fyodor","Gleb","Lev","Miron","Nikolai",
+      "Oleg","Rostislav","Semyon","Trofim","Valeri","Vsevolod","Yuri","Zinovy","Egor","Roman"],
+    last: ["Petrov","Sokolov","Volkov","Radulov","Malkov","Zima","Vasko","Kovalenko","Morozov","Orlov",
+      "Belov","Fedorov","Gusev","Kuznetsov","Lebedev","Nikitin","Panarin","Romanov","Sergachev","Tarasenko",
+      "Antipov","Barabanov","Chernyshev","Dorofeyev","Emelin","Golyshev","Ivanov","Kolesnikov","Larionov","Mironov",
+      "Naumov","Ovechkin","Pastukhov","Rybakov","Samsonov","Tikhonov","Ulanov","Vorobyov","Yakovlev","Zubarev",
+      "Denisenko","Filatov","Gorbunov","Kharlamov","Lazarev","Maslov","Nesterov","Poluektov","Savchenko","Titov"],
+  },
+  CZE: {
+    first: ["Tomas","Jakob","Petr","Jan","Martin","Ondrej","David","Filip","Lukas","Radek",
+      "Vaclav","Zdenek","Michal","Josef","Karel","Milan","Pavel","Roman","Stanislav","Vojtech",
+      "Adam","Daniel","Dominik","Jaroslav","Ladislav","Marek","Matej","Miroslav","Patrik","Radim",
+      "Rostislav","Simon","Tobias","Vilem","Vratislav","Bohumil","Cenek","Dalibor","Erik","Havel"],
+    last: ["Novak","Kovac","Kubina","Novotny","Svoboda","Dvorak","Cerny","Prochazka","Kucera","Vesely",
+      "Horak","Marek","Pospisil","Hajek","Jelinek","Kral","Ruzicka","Sykora","Urban","Vlcek",
+      "Benes","Blazek","Dolezal","Fiala","Havlik","Kadlec","Machacek","Nemec","Pokorny","Riha",
+      "Sedlak","Stastny","Tichy","Vanek","Zeman","Bartos","Cermak","Duda","Hruby","Kolar",
+      "Liska","Mares","Nedved","Ondracek","Palat","Rezac","Simek","Turek","Vondra","Zabka"],
+  },
+  SVK: {
+    first: ["Marian","Zdeno","Juraj","Tomas","Peter","Milos","Andrej","Michal","Samuel","Adam",
+      "Matus","Simon","Filip","Martin","Lukas","Patrik","Rastislav","Vladimir","Jozef","Marek",
+      "Dalibor","Erik","Ivan","Kristian","Ladislav","Miroslav","Norbert","Oliver","Pavol","Radoslav",
+      "Stanislav","Tibor","Viliam","Zoltan","Branislav","Denis","Gabriel","Igor","Jan","Kamil"],
+    last: ["Hossa","Chara","Slafkovsky","Tatar","Cernak","Fehervary","Regenda","Pospisil","Kmec","Hrivik",
+      "Bondra","Gaborik","Halak","Sekera","Zednik","Handzus","Visnovsky","Demitra","Palffy","Stumpel",
+      "Baca","Chromiak","Dlugos","Fabian","Gernat","Holly","Ihnacak","Jendek","Kelemen","Lantosi",
+      "Marcinko","Nagy","Okuliar","Petrovsky","Ruzicka","Sykora","Takac","Uram","Valach","Zigo",
+      "Bartanus","Cingel","Daloga","Fominykh","Gachulinec","Hudacek","Knazko","Liska","Mudrak","Nemec"],
+  },
+  SUI: {
+    first: ["Nino","Kevin","Timo","Roman","Denis","Sven","Gaetan","Jonas","Damien","Christoph",
+      "Andres","Fabrice","Gregory","Julien","Loic","Marco","Nicolas","Philipp","Reto","Silvan",
+      "Tanner","Yannick","Alessio","Beat","Cedric","Dario","Enzo","Flavio","Gian","Hakan",
+      "Ivo","Janis","Killian","Lino","Mirco","Noah","Oscar","Patrick","Raphael","Simon"],
+    last: ["Hischier","Josi","Meier","Fiala","Niederreiter","Suter","Siegenthaler","Ambuhl","Bertschy","Corvi",
+      "Diaz","Egli","Frei","Geering","Herzog","Jaquet","Kurashev","Loeffel","Malgin","Moser",
+      "Untersander","Vermin","Wick","Zangger","Andrighetto","Baertschi","Cadonau","Diem","Eggenberger","Furrer",
+      "Genoni","Haas","Kessler","Lehmann","Marti","Nussbaumer","Praplan","Rod","Scherwey","Thurkauf",
+      "Vouillamoz","Weber","Zehnder","Berni","Kukan","Riat","Simion","Tschantre","Wenger","Zwerger"],
+  },
+};
+/* Kept so anything that still reaches for a name without a nation gets one, and
+   so a save written before this existed can be read. */
+const FIRST = NAMES.CAN.first.concat(NAMES.USA.first, NAMES.SWE.first, NAMES.RUS.first);
+const LAST = NAMES.CAN.last.concat(NAMES.USA.last, NAMES.SWE.last, NAMES.RUS.last);
 
 /* skater positions and how many of each a roster carries */
 const POS = ["C", "LW", "RW", "D", "G"];
@@ -693,8 +787,8 @@ function setDirection(G, key) {
  * career earnings turn into hockey rather than into a bigger number.
  * ------------------------------------------------------------------------- */
 const INVESTMENTS = {
-  arena: { label: "The building", cost: 12, max: 3,
-    blurb: "Seats, boards, a roof that doesn't leak. Every home date is worth more, for ever." },
+  arena: { label: "The building", cost: 12, max: 5,
+    blurb: "More seats and better ones. Every home date is worth more, for ever — and a full house is the loudest home ice in the league." },
   facility: { label: "Training facility", cost: 15, max: 3,
     blurb: "Where your young players actually get better. Compounds over a decade in a way nothing else does." },
   scouting: { label: "Scouting department", cost: 9, max: 3,
@@ -726,6 +820,74 @@ function investInClub(G, teamId, k) {
   t.invest[k] = lvl + 1;
   news(G, `You have put $${cost}M of your own money into the ${def.label.toLowerCase()}.`, "good");
   return { ok: true, level: lvl + 1, cost };
+}
+
+/* -------------------------------- relocation -------------------------------
+ * The one thing only an owner can do, and the one every fan dreads. A club is
+ * a building in a city; a man who owns it outright can put it on a truck.
+ *
+ * The markets are real places with sizes attached, and moving to a bigger one
+ * is worth money for ever — the gate scales off `t.mkt` and so does the club's
+ * value. It costs a fortune up front, it takes the SUPPORT WITH IT (a moved
+ * club starts with an empty building and has to earn a city back), and it
+ * erases the rivalry, because a rivalry is geography.
+ *
+ * Needs a controlling interest. A minority holder does not get to move a club
+ * out of its city, and neither does a manager.
+ * ------------------------------------------------------------------------- */
+const MARKETS = [
+  { city: "Las Vegas",    name: "Aces",       mkt: 5 },
+  { city: "Houston",      name: "Outlaws",    mkt: 5 },
+  { city: "Atlanta",      name: "Firebirds",  mkt: 5 },
+  { city: "Seattle",      name: "Kraken",     mkt: 4 },
+  { city: "Salt Lake",    name: "Yeti",       mkt: 4 },
+  { city: "Kansas City",  name: "Scouts",     mkt: 3 },
+  { city: "Hamilton",     name: "Steelers",   mkt: 4 },
+  { city: "Quebec City",  name: "Nordiques",  mkt: 3 },
+  { city: "Saskatoon",    name: "Blades",     mkt: 2 },
+  { city: "Hershey",      name: "Bears",      mkt: 2 },
+];
+const RELOCATE_BASE = 40;        // $M before the market premium
+const RELOCATE_PER_MKT = 14;     // and what each step up costs on top
+/* What's available: anywhere no club already plays. `t.movedFrom` remembers
+   where a club came from, so a city that has been abandoned stays abandoned. */
+function relocationOptions(G) {
+  if (!depthOn(G, "ownership")) return [];
+  const used = new Set();
+  G.teams.forEach((t) => { used.add(t.city); if (t.movedFrom) t.movedFrom.forEach((c) => used.add(c)); });
+  const here = G.teams[G.userTeam];
+  return MARKETS.filter((m) => !used.has(m.city)).map((m) => ({
+    ...m,
+    cost: round1(RELOCATE_BASE + Math.max(0, m.mkt - (here ? here.mkt : 3)) * RELOCATE_PER_MKT),
+    bigger: m.mkt > (here ? here.mkt : 3),
+  })).sort((a, b) => b.mkt - a.mkt || a.cost - b.cost);
+}
+function relocate(G, city, keepName) {
+  if (!depthOn(G, "ownership")) return { ok: false, why: "ownership is switched off" };
+  const t = G.teams[G.userTeam];
+  if (!isMajorityOwner(G, G.userTeam))
+    return { ok: false, why: "only a controlling owner can move a club" };
+  const opt = relocationOptions(G).find((m) => m.city === city);
+  if (!opt) return { ok: false, why: "nobody is waiting for a club there" };
+  const gm = gmState(G);
+  if (opt.cost > gm.cash) return { ok: false, why: `moving costs $${opt.cost}M and you have $${gm.cash}M` };
+  gm.cash = round1(gm.cash - opt.cost);
+  const from = t.city;
+  t.movedFrom = (t.movedFrom || []).concat([from]);
+  t.city = opt.city;
+  if (!keepName) t.name = opt.name;
+  t.mkt = opt.mkt;
+  /* The building is new and empty. Whatever an owner spent on the old one does
+     not come with him, the city has to be won over from scratch, and the
+     rivalry is gone because a rivalry is two places, not two badges. */
+  t.invest = { ...(t.invest || {}), arena: 0 };
+  t.revenue = 0;
+  if (t.rivalId != null && G.teams[t.rivalId]) G.teams[t.rivalId].rivalId = null;
+  t.rivalId = null;
+  moveFans(G, -(fanMood(G) - 35));
+  G.relocations = (G.relocations || []).concat([{ year: G.year, from, to: t.city, name: t.name }]);
+  news(G, `The franchise is moving. ${from} loses its club; ${t.city} has one.`, "bad");
+  return { ok: true, cost: opt.cost, from, to: t.city };
 }
 
 /* ------------------------------- the vote ----------------------------------
@@ -1385,10 +1547,21 @@ const SYSTEMS = {
   trap:       { label: "Neutral-zone trap", off: 0.935, def: 0.925,
     blurb: "Strangles the game. Wins you low-scoring nights, wastes a scoring line." },
 };
+/* Twenty first names against sixteen surnames is 320 coaches for a league that
+   employs thirty-two and turns them over — so two clubs regularly ran out the
+   same man on the same night. Roughly two and a half thousand now. */
 const COACH_FIRST = ["Dale", "Barry", "Ken", "Mike", "Claude", "Rod", "Jon", "Bruce", "Pete", "Gerard",
-  "Lindy", "Craig", "Sheldon", "Todd", "Andre", "Marc", "Randy", "Bob", "Rick", "Guy"];
+  "Lindy", "Craig", "Sheldon", "Todd", "Andre", "Marc", "Randy", "Bob", "Rick", "Guy",
+  "Doug", "Wayne", "Terry", "Gord", "Bill", "Al", "Jacques", "Michel", "Réjean", "Yvan",
+  "Curtis", "Darryl", "Dean", "Gary", "Glen", "Harry", "Jim", "Joel", "Larry", "Murray",
+  "Neil", "Paul", "Ralph", "Scotty", "Stan", "Vern", "Wally", "Norm", "Roger", "Frank"];
 const COACH_LAST = ["Hitchens", "Trotman", "Boudreault", "Quennel", "Julienne", "Tortora", "Maurer",
-  "Cassidy", "Laviolette", "Gallantry", "Ruffe", "Berube", "Keefer", "McLellan", "Tocchetti", "Vigneau"];
+  "Cassidy", "Laviolette", "Gallantry", "Ruffe", "Berube", "Keefer", "McLellan", "Tocchetti", "Vigneau",
+  "Arbourne", "Blakely", "Crawshaw", "Demers", "Ferraro", "Gainsford", "Halliwell", "Ironside",
+  "Jarvis", "Kilrea", "Lemieux", "Mowbray", "Nolan-Reid", "Osgood", "Perron", "Quenneau",
+  "Renney", "Sutherland", "Therrien", "Ulmer", "Vandenberg", "Wakefield", "Yeoman", "Zetter",
+  "Boucherville", "Charest", "Dineen", "Fournier", "Gauvreau", "Hartsburg", "Lachance", "Marchbank",
+  "Prentice", "Sabourin"];
 
 function genCoach(G, tier) {
   const sysKeys = Object.keys(SYSTEMS);
@@ -1704,9 +1877,14 @@ function ovrOf(p) {
 
 function genPlayer(G, pos, tier, age) {
   const base = clamp(gauss(G, tier, 7), 24, 96);
+  /* Named for where he's from. `nationOf` only needs the id, which is assigned
+     on the line above, and this is still exactly TWO draws — so no seed shifts
+     and nothing downstream moves. */
+  const id = G.nextPid++;
+  const np = NAMES[nationOf({ id }).k] || NAMES.CAN;
   const p = {
-    id: G.nextPid++,
-    fn: pick(G, FIRST), ln: pick(G, LAST),
+    id,
+    fn: pick(G, np.first), ln: pick(G, np.last),
     pos,
     age: age != null ? age : ri(G, 19, 35),
     teamId: null, farm: false,
@@ -1852,6 +2030,43 @@ const gaa = (s) => (s.toi ? (s.ga * 60) / s.toi : 0);
 
 const fullName = (p) => `${p.fn} ${p.ln}`;
 const shortName = (p) => `${p.fn[0]}. ${p.ln}`;
+/* ------------------------------ sweater number -----------------------------
+ * Derived from the id, never stored — so every player in an existing save has
+ * one for free and it costs nothing to carry. It also settles a papercut: a
+ * club now and then dresses two men with the same surname and initial, and the
+ * roster screen showed "O. Côté" twice with no way to tell them apart.
+ *
+ * 1–98, skipping 0 and 99 the way the league does, and weighted toward the
+ * numbers players actually wear rather than flat across a hundred. */
+const NUMBER_POOL = (() => {
+  const out = [];
+  // The common range gets three entries each, the high numbers one.
+  for (let n = 1; n <= 39; n++) out.push(n, n, n);
+  for (let n = 40; n <= 69; n++) out.push(n, n);
+  for (let n = 70; n <= 98; n++) out.push(n);
+  return out;
+})();
+function sweaterOf(p) {
+  if (!p) return 0;
+  if (p.num) return p.num;                       // an explicit one always wins
+  return NUMBER_POOL[Math.floor(hashUnit(p.id * 41 + 7) * NUMBER_POOL.length)];
+}
+/* Two men on the same club can land on the same number, and a retired number
+   is out of circulation. Resolved per CLUB at read time — the lower id keeps
+   it, everybody else shuffles up — so nothing is stored and it stays stable. */
+function sweaterMap(G, teamId) {
+  const t = G.teams[teamId];
+  if (!t) return {};
+  const taken = new Set((t.honours || []).map((h) => h.num).filter((n) => n));
+  const out = {};
+  rosterOf(G, teamId, true).slice().sort((a, b) => a.id - b.id).forEach((p) => {
+    let n = sweaterOf(p), guard = 0;
+    while (taken.has(n) && guard++ < 120) n = (n % 98) + 1;
+    taken.add(n);
+    out[p.id] = n;
+  });
+  return out;
+}
 
 /* ------------------------------ point shares -------------------------------
  * Hockey's answer to Win Shares, and the closest thing the sport has to WAR
@@ -2179,9 +2394,14 @@ const HOME_TOP_LINE_BEND = [0.78, 1.05, 1.28];
  * full seasons and pins the resulting home win rate inside the real band.
  * ------------------------------------------------------------------------- */
 const HOME_EDGE = 1.045;
-function homeEdge(G, isHome) {
+function homeEdge(G, isHome, teamId) {
   if (ruleValue(G, "homeIce") !== "realistic") return 1;
-  return isHome ? HOME_EDGE : 1 / HOME_EDGE;
+  /* A building an owner has poured his own money into is a louder one. Small —
+     a fifth of the base advantage at the top level — and only ever yours,
+     because nobody else's arena has been rebuilt. */
+  const built = isHome && teamId != null
+    ? 1 + investLevel(G, teamId, "arena") * (HOME_EDGE - 1) * 0.2 : 1;
+  return (isHome ? HOME_EDGE : 1 / HOME_EDGE) * built;
 }
 
 /* Who gets the minutes, and who gets sent down — the same question, so the same
@@ -3135,7 +3355,7 @@ function simGame(G, homeId, awayId, opts) {
         const sys = systemOf(myT), oppSys = systemOf(oppT);
         // Our system pushes our own volume; theirs decides how much they allow.
         const rate = (30.5 / 60) * (off / def) * momentum[side.box.teamId] * legs[side.box.teamId]
-          * sys.off * oppSys.def * rivalHeat * homeEdge(G, side.isHome);
+          * sys.off * oppSys.def * rivalHeat * homeEdge(G, side.isHome, side.box.teamId);
         const shots = Math.max(0, Math.round(gauss(G, rate * m, Math.sqrt(Math.max(0.4, rate * m)) * 0.9)));
         resolveShots(G,
           { off, ppOff: off, sBox: side.box, gBox: side.opp, oppBox: side.opp, events: ev, shots: shotLog },
@@ -4682,7 +4902,9 @@ function finishSeason(G) {
       if (home != null && byClub[home] >= 4 && (ppg >= 0.65 || p.trophies.length >= 1)) {
         const t = G.teams[+home];
         t.honours = t.honours || [];
-        t.honours.push({ pid: p.id, name: fullName(p), pos: p.pos, seasons: byClub[home], pts: careerPts, year: G.year });
+        // The number goes up to the rafters with him, and comes out of circulation.
+    t.honours.push({ pid: p.id, name: fullName(p), pos: p.pos, num: sweaterOf(p),
+      seasons: byClub[home], pts: careerPts, year: G.year });
         news(G, `The ${G.teams[+home].name} will raise ${fullName(p)}\u2019s number to the rafters — ${byClub[home]} seasons, ${careerPts} points.`, "good");
       }
       p.teamId = null; p.retired = true; p.retiredYear = G.year;
@@ -8714,7 +8936,11 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
   return (
     <Modal wide title={
       <span className="flex items-center gap-2">
-        <PosBadge pos={p.pos} /> {fullName(p)}
+        <PosBadge pos={p.pos} />
+        <span className="text-slate-500 tnum text-base">
+          #{p.teamId != null ? (sweaterMap(G, p.teamId)[p.id] || sweaterOf(p)) : sweaterOf(p)}
+        </span>
+        {fullName(p)}
         {depthOn(G, "worldCup") ? (
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#16233c] text-slate-300"
             title={nationOf(p).name}>{nationOf(p).k}</span>
@@ -9863,7 +10089,11 @@ function RosterTab({ G, setG, openPlayer, notify }) {
   const expiring = rosterOf(G, G.userTeam, true).filter((p) => canExtend(G, p))
     .sort((a, b) => b.ovr - a.ovr);
 
+  // Resolved once for the whole club rather than per row.
+  const nums = sweaterMap(G, G.userTeam);
   const cols = [
+    { key: "num", label: "#", get: (p) => nums[p.id] || 0,
+      cell: (p) => <span className="text-slate-500 tnum">{nums[p.id] || "—"}</span> },
     { key: "name", label: "Player", get: (p) => p.ln, min: 1,
       cell: (p) => (
         <span className="whitespace-nowrap">
@@ -12261,6 +12491,51 @@ function CareerAndOwnership({ G, setG, notify, openTeam }) {
               <div className="text-xs text-sky-300">
                 An owner isn't judged by his own board — the course you set IS the expectation.
               </div>
+            ) : null}
+          </div>
+        </Section>
+      ) : null}
+
+      {/* The one thing only an owner can do, and the one every fan dreads. */}
+      {here > 0.5 ? (
+        <Section title="Moving the franchise" className="p-3"
+          right={<span className="text-xs text-slate-500">a club is a building in a city</span>}>
+          <div className="pt-1 space-y-2">
+            <div className="text-xs text-slate-500">
+              A bigger market is worth more at the gate for ever. You leave the building you paid
+              for, the city you won over, and the rivalry — a rivalry is two places, not two badges.
+            </div>
+            {relocationOptions(G).length ? (
+              <div className="space-y-1">
+                {relocationOptions(G).slice(0, 6).map((m) => {
+                  const afford = m.cost <= (gm.cash || 0);
+                  return (
+                    <div key={m.city} className="flex flex-wrap items-center gap-2 text-sm">
+                      <span className="font-medium">{m.city}</span>
+                      <span className="text-slate-500 text-xs">{m.name}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${m.bigger
+                        ? "bg-emerald-900/40 text-emerald-300" : "bg-[#16233c] text-slate-400"}`}>
+                        market {m.mkt}{m.bigger ? " — bigger than here" : ""}
+                      </span>
+                      <span className="flex-1" />
+                      <span className={`tnum text-xs ${afford ? "text-emerald-300" : "text-slate-600"}`}>${m.cost}M</span>
+                      <button className={`${btnGhost} text-xs px-2 py-1`} disabled={!afford}
+                        onClick={() => {
+                          if (!window.confirm(
+                            `Move the ${G.teams[G.userTeam].name} from ${G.teams[G.userTeam].city} to ${m.city}?\n\n`
+                            + `It costs $${m.cost}M. You lose the arena you have built, the city's goodwill `
+                            + `and your rivalry, and ${G.teams[G.userTeam].city} never gets another club.\n\n`
+                            + `This cannot be undone.`)) return;
+                          const r = upd((g) => relocate(g, m.city));
+                          notify(r.ok ? `The club is now the ${G.teams[G.userTeam].name === m.name ? "" : ""}${m.city} side.` : r.why);
+                        }}>Move</button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : <div className="text-sm text-slate-500">Every market with an appetite already has a club.</div>}
+            {(gm.cash || 0) < 40 ? (
+              <div className="text-[11px] text-slate-600">You'd need a great deal more money than this.</div>
             ) : null}
           </div>
         </Section>

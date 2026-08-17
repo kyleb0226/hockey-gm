@@ -88,6 +88,8 @@ const EXPORTS = [
   "DEV_BASE", "DEV_HEADROOM", "DEV_GAP_PULL",
   "clubProfit", "payDividends", "DIVIDEND_YIELD", "DIRECTIONS", "directionOf", "setDirection",
   "INVESTMENTS", "investLevel", "investCost", "investInClub", "ownsAny",
+  "MARKETS", "relocationOptions", "relocate", "sweaterOf", "sweaterMap", "NAMES", "fullName",
+  "COACH_FIRST", "COACH_LAST",
   "brokerFee", "brokerCandidates", "brokerTrade", "BROKER_FEE_RATE",
   "PULL_TIMINGS", "pullTiming",
   "PRESSERS", "pickPresser", "answerPresser", "fanMood", "moveFans", "PRESSER_COOLDOWN",
@@ -3404,6 +3406,49 @@ const CHECKS = {
     ok(W.userTeam === away.id, "and you take the chair yourself");
   },
 
+  /* Papercuts: not broken, just irritating. Two men with the same name in one
+     room, two clubs running out a coach with the same name, no way to tell
+     apart the two O. Côtés on the roster screen. */
+  flavourNames(A) {
+    section("Enough names to go round");
+    const G = A.newGame(0, { seed: 777, rules: { seasonLen: 82 } });
+    const combos = Object.values(A.NAMES).reduce((s, n) => s + n.first.length * n.last.length, 0);
+    ok(combos > 12000, `${combos.toLocaleString()} name combinations (was 3,240)`);
+    ok(Object.keys(A.NAMES).length === A.NATIONS.length, "one pool per nation");
+    ok(Object.values(A.NAMES).every((n) => n.first.length >= 30 && n.last.length >= 40),
+      "and none of them is thin");
+    const all = A.playersOf(G).map((p) => A.fullName(p));
+    ok(new Set(all).size / all.length > 0.9,
+      `${new Set(all).size} distinct names among ${all.length} players`);
+    ok(A.COACH_FIRST.length * A.COACH_LAST.length > 1500,
+      `and ${(A.COACH_FIRST.length * A.COACH_LAST.length).toLocaleString()} coaches (was 320)`);
+
+    section("Named for where he's from");
+    /* A Russian called Cole Mackey was the giveaway. Nationality is derived
+       from the id, so the name comes from the same place. */
+    const bad = A.playersOf(G).filter((p) => {
+      const pool = A.NAMES[A.nationOf(p).k];
+      return !pool || !pool.first.includes(p.fn) || !pool.last.includes(p.ln);
+    });
+    ok(!bad.length, `every player is named for his country${bad.length
+      ? ` (${A.fullName(bad[0])} is ${A.nationOf(bad[0]).k})` : ""}`);
+
+    section("And a number on his back");
+    const nums = A.sweaterMap(G, 0);
+    const roster = A.rosterOf(G, 0, true);
+    ok(roster.every((p) => nums[p.id] >= 1 && nums[p.id] <= 98), "everybody wears 1 to 98");
+    ok(new Set(Object.values(nums)).size === Object.keys(nums).length,
+      "and nobody on a club wears the same one as anybody else");
+    ok(A.sweaterOf(roster[0]) === A.sweaterOf(roster[0]), "a number is stable, not drawn");
+    ok(roster[0].num === undefined, "and nothing is stored for it");
+    // A retired number is out of circulation.
+    const R = A.newGame(0, { seed: 777, rules: { seasonLen: 82 } });
+    const first = A.rosterOf(R, 0, true).slice().sort((a, b) => a.id - b.id)[0];
+    R.teams[0].honours = [{ pid: -1, name: "Somebody", num: A.sweaterOf(first) }];
+    const after = A.sweaterMap(R, 0);
+    ok(after[first.id] !== A.sweaterOf(first), "a retired number is not handed out again");
+  },
+
   /* A club left to run itself. It used to reach exactly two routines and went
      888-1327-245 over thirty seasons — not a club managing itself badly, a club
      with most of its hands tied. */
@@ -3567,6 +3612,35 @@ const CHECKS = {
     A.setDirection(R, "rebuild");
     ok(A.askingPrice(R, fa.id, R.userTeam, 3) > flat, "and have to be paid to come and lose");
 
+    section("Moving the franchise");
+    const M2 = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
+    const home = M2.teams[M2.userTeam].city;
+    ok(A.relocationOptions(M2).length > 0, "there are cities without a club");
+    ok(A.relocationOptions(M2).every((m) => !M2.teams.some((t) => t.city === m.city)),
+      "and none of them already has one");
+    ok(!A.relocate(M2, A.relocationOptions(M2)[0].city).ok, "a manager can't move a club");
+    A.gmState(M2).stakes[M2.userTeam] = 0.3;
+    ok(!A.relocate(M2, A.relocationOptions(M2)[0].city).ok, "nor can a minority owner");
+    A.gmState(M2).stakes[M2.userTeam] = 0.7;
+    A.gmState(M2).cash = 5;
+    const dest = A.relocationOptions(M2)[0];
+    ok(!A.relocate(M2, dest.city).ok, "and nobody moves a club on five million dollars");
+
+    A.gmState(M2).cash = 400;
+    A.investInClub(M2, M2.userTeam, "arena");
+    const rival = M2.teams[M2.userTeam].rivalId;
+    const mv = A.relocate(M2, dest.city);
+    ok(mv.ok, `a controlling owner can move it (${mv.from} → ${mv.to})`);
+    ok(M2.teams[M2.userTeam].city === dest.city, "the club is in the new city");
+    ok(M2.teams[M2.userTeam].mkt === dest.mkt, "and takes the new market with it");
+    ok(A.investLevel(M2, M2.userTeam, "arena") === 0, "the building you paid for does not come along");
+    ok(M2.teams[M2.userTeam].rivalId == null, "and the rivalry is gone — a rivalry is two places");
+    ok(rival == null || M2.teams[rival].rivalId == null, "for the other club too");
+    ok((M2.teams[M2.userTeam].movedFrom || []).includes(home), `${home} is remembered as abandoned`);
+    ok(!A.relocationOptions(M2).some((m) => m.city === home), "and never gets another club");
+    ok((M2.relocations || []).length === 1, "the move goes into the record");
+    ok(A.fanMood(M2) < 45, `and the new city has to be won over (${Math.round(A.fanMood(M2))})`);
+
     section("Putting your own money in");
     const I = A.newGame(0, { seed: 6060, rules: { seasonLen: 41, ownership: true } });
     ok(!A.investInClub(I, I.userTeam, "arena").ok, "you can't build on a club you don't own");
@@ -3577,6 +3651,13 @@ const CHECKS = {
     ok(inv.ok && A.investLevel(I, I.userTeam, "arena") === 1, "a minority owner can still build");
     ok(A.gmState(I).cash === 200 - inv.cost, "out of his own pocket");
     ok(A.gateFor(I, I.userTeam) > gate0, `and every home date is worth more ($${A.gateFor(I, I.userTeam)}M vs $${gate0}M)`);
+    /* And it's a louder building, which is the other half of what the blurb
+       promises. Only ever yours, because nobody else's arena was rebuilt. */
+    A.setRule(I, "homeIce", "realistic");
+    ok(A.homeEdge(I, true, I.userTeam) > A.homeEdge(I, true, I.userTeam === 0 ? 1 : 0),
+      "and a harder place to visit than anyone else's");
+    ok(A.homeEdge(I, true, I.userTeam === 0 ? 1 : 0) === A.HOME_EDGE,
+      "while every other rink is exactly what it always was");
     ok(A.investCost(I, I.userTeam, "arena") > inv.cost, "the next one costs more");
     let g2 = 0;
     while (A.investInClub(I, I.userTeam, "arena").ok && g2++ < 10);
