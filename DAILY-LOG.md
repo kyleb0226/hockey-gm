@@ -158,3 +158,4 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
 - 2026-08-14 · SKIPPED · reverted automatically: tools/simtest.js failed
 - 2026-08-15 · SKIPPED · reverted automatically: tools/simtest.js failed
 - 2026-08-16 · SKIPPED · reverted automatically: tools/simtest.js failed
+- 2026-08-18 · SKIPPED · reverted automatically: tools/simtest.js failed
