@@ -8085,7 +8085,7 @@ function SortTable({ cols, rows, initial, asc, rowKey, rowCls, onRow, min, empty
   );
 }
 
-function Modal({ title, onClose, children, wide }) {
+function Modal({ title, onClose, children, wide, actions }) {
   useEffect(() => {
     const k = (e) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", k);
@@ -8098,7 +8098,10 @@ function Modal({ title, onClose, children, wide }) {
         onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between gap-3 mb-3">
           <div className="font-semibold">{title}</div>
-          <button className={btnGhost} onClick={onClose}>Close</button>
+          <div className="flex items-center gap-2">
+            {actions}
+            <button className={btnGhost} onClick={onClose}>Close</button>
+          </div>
         </div>
         {children}
       </div>
@@ -8814,6 +8817,167 @@ function RatingBar({ label, v }) {
   );
 }
 
+/* Two thin bars per rating instead of one — sky for the first player, emerald
+   for the second, the same pairing the point-shares split already uses. */
+function RatingCompareBar({ label, a, b }) {
+  return (
+    <div className="flex items-center gap-2">
+      <div className="w-10 text-[11px] uppercase text-slate-400">{label}</div>
+      <div className="flex-1 space-y-0.5">
+        <div className="flex items-center gap-1.5">
+          <div className="flex-1 h-1.5 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
+            <div className="h-full bg-sky-500" style={{ width: `${clamp(a, 0, 99)}%` }} />
+          </div>
+          <div className="w-6 text-right tnum text-[11px] text-sky-300">{a}</div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="flex-1 h-1.5 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
+            <div className="h-full bg-emerald-500" style={{ width: `${clamp(b, 0, 99)}%` }} />
+          </div>
+          <div className="w-6 text-right tnum text-[11px] text-emerald-300">{b}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* A search box that resolves to one player. Mirrors CommandPalette's player
+   search rather than a giant <select> — the league runs well past a thousand
+   names. */
+function PlayerPicker({ G, label, value, onChange, otherId }) {
+  const [q, setQ] = useState("");
+  const p = value != null ? G.players[value] : null;
+  const hits = useMemo(() => {
+    const ql = q.trim().toLowerCase();
+    if (ql.length < 2) return [];
+    const out = [];
+    playersOf(G).forEach((pl) => {
+      if (out.length >= 8 || pl.retired || pl.id === otherId) return;
+      if (fullName(pl).toLowerCase().includes(ql)) out.push(pl);
+    });
+    return out;
+  }, [q, G, otherId]);
+  return (
+    <div className="space-y-1">
+      <div className="text-[11px] uppercase text-slate-400">{label}</div>
+      {p ? (
+        <div className="flex items-center justify-between gap-2 px-2 py-1.5 rounded bg-[#101a2e] border border-[#1e2b45]">
+          <span className="text-sm">{fullName(p)}
+            <span className="text-slate-500 text-xs"> · {p.pos} · {p.teamId != null ? G.teams[p.teamId].abbr : "FA"}</span>
+          </span>
+          <button className="text-xs text-slate-400 hover:text-slate-200" onClick={() => onChange(null)}>Change</button>
+        </div>
+      ) : (
+        <div className="relative">
+          <input className="w-full bg-[#0d1728] border border-[#1e2b45] rounded px-2 py-1.5 text-sm outline-none focus:border-sky-600"
+            placeholder="Search a player…" value={q} onChange={(e) => setQ(e.target.value)} />
+          {hits.length ? (
+            <div className="absolute z-10 mt-1 w-full max-h-56 overflow-y-auto rounded border border-[#1e2b45] bg-[#0e1729] shadow-lg">
+              {hits.map((pl) => (
+                <button key={pl.id} className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-left text-sm hover:bg-[#16223a]"
+                  onClick={() => { onChange(pl.id); setQ(""); }}>
+                  <span>{fullName(pl)}</span>
+                  <span className="text-xs text-slate-500">{pl.pos} · {pl.ovr} ovr · {pl.teamId != null ? G.teams[pl.teamId].abbr : "FA"}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompareSeasonLine({ G, a, b }) {
+  const isG = a.pos === "G";
+  const rows = isG ? [
+    ["GP", (p) => p.season.gp],
+    ["W-L-OTL", (p) => `${p.season.w}-${p.season.l}-${p.season.otl}`],
+    ["SV%", (p) => (svPct(p.season) * 100).toFixed(1)],
+    ["GAA", (p) => gaa(p.season).toFixed(2)],
+    ["SO", (p) => p.season.so],
+    ["Point shares", (p) => pointShares(G, p).ps.toFixed(1)],
+  ] : [
+    ["GP", (p) => p.season.gp],
+    ["G", (p) => p.season.g],
+    ["A", (p) => p.season.a],
+    ["P", (p) => pts(p.season)],
+    ["+/-", (p) => (p.season.pm > 0 ? "+" : "") + p.season.pm],
+    ["SOG", (p) => p.season.sog],
+    ["Point shares", (p) => pointShares(G, p).ps.toFixed(1)],
+  ];
+  return (
+    <div className="grid grid-cols-3 gap-y-1.5 text-sm pt-1">
+      <div />
+      <div className="text-sky-300 text-xs text-right pr-1">A</div>
+      <div className="text-emerald-300 text-xs text-right pr-1">B</div>
+      {rows.map(([label, get]) => (
+        <React.Fragment key={label}>
+          <div className="text-slate-400">{label}</div>
+          <div className="tnum text-right pr-1">{get(a)}</div>
+          <div className="tnum text-right pr-1">{get(b)}</div>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+/* Two players, side by side. Only ratings and stats that mean the same thing
+   for both are overlaid — a skater against a goalie has nothing in common on
+   a rating bar, so that pairing gets a plain heads-up instead of a chart that
+   would compare hnd to rfx as if they were the same scale. */
+function CompareModal({ G, initial, onClose }) {
+  const [a, setA] = useState(initial ? initial.a : null);
+  const [b, setB] = useState(initial ? initial.b : null);
+  const pa = a != null ? G.players[a] : null;
+  const pb = b != null ? G.players[b] : null;
+  const sameType = pa && pb && (pa.pos === "G") === (pb.pos === "G");
+  return (
+    <Modal wide title="Compare players" onClose={onClose}>
+      <div className="grid sm:grid-cols-2 gap-3 mb-3">
+        <PlayerPicker G={G} label="Player A" value={a} onChange={setA} otherId={b} />
+        <PlayerPicker G={G} label="Player B" value={b} onChange={setB} otherId={a} />
+      </div>
+      {!pa || !pb ? (
+        <div className="text-sm text-slate-500 py-6 text-center">Pick two players to compare them.</div>
+      ) : !sameType ? (
+        <div className="text-sm text-amber-300 py-2">
+          Pick two players of the same kind — a skater against a skater, or a goalie against a goalie.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            {[pa, pb].map((p, i) => (
+              <div key={p.id} className={`text-sm font-semibold ${i === 0 ? "text-sky-300" : "text-emerald-300"}`}>
+                {fullName(p)}
+                <span className="block text-xs font-normal text-slate-400">
+                  {p.teamId != null ? `${G.teams[p.teamId].city} ${G.teams[p.teamId].name}` : "Free agent"}
+                  {" "}· Age {p.age} · {p.ovr} ovr (ceiling {p.pot})
+                </span>
+              </div>
+            ))}
+          </div>
+          <Section title="Ratings" className="p-3 space-y-1.5">
+            {(pa.pos === "G" ? GOALIE_KEYS : SKATER_KEYS).map((k) => (
+              <RatingCompareBar key={k} label={k} a={pa.r[k]} b={pb.r[k]} />
+            ))}
+          </Section>
+          <Section title="This season" className="p-3">
+            <CompareSeasonLine G={G} a={pa} b={pb} />
+          </Section>
+          <div className="grid sm:grid-cols-2 gap-3">
+            {[pa, pb].map((p) => (
+              <Section key={p.id} title={fullName(p)} className="p-3">
+                <ShotRink z={(p.season && p.season.z) || blankZones(p.pos === "G" ? "G" : "S")} mode={p.pos === "G" ? "G" : "S"} />
+              </Section>
+            ))}
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 /* Point shares as a number AND a bar, because the number alone doesn't say
    whether 6.8 was a good year. `split` draws the offensive and defensive halves
    in the same two colours the OPS and DPS columns use, so one glance says both
@@ -8915,7 +9079,7 @@ function DevelopmentNote({ G, p }) {
   );
 }
 
-function PlayerModal({ G, setG, pid, onClose, onGo }) {
+function PlayerModal({ G, setG, pid, onClose, onGo, onCompare }) {
   const [netView, setNetView] = useState("dots");
   const p = G.players[pid];
   if (!p) return null;
@@ -8949,7 +9113,8 @@ function PlayerModal({ G, setG, pid, onClose, onGo }) {
         {hasNtc(p) ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900 text-amber-200">NTC</span> : null}
         {p.inj > 0 ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-900 text-rose-200">INJ {p.inj}</span> : null}
       </span>
-    } onClose={onClose}>
+    } onClose={onClose}
+    actions={onCompare ? <button className={btnGhost} onClick={() => onCompare(p.id)}>Compare</button> : null}>
       <div className="grid sm:grid-cols-2 gap-3">
         <div className="space-y-3">
           <div className="grid grid-cols-2 gap-2">
@@ -13736,6 +13901,7 @@ function App() {
   const [palette, setPalette] = useState(false);
   const [player, setPlayer] = useState(null);
   const [club, setClub] = useState(null);
+  const [compare, setCompare] = useState(null);
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -13938,7 +14104,9 @@ function App() {
 
       {showRules ? <RulesModal G={G} setG={setG} onClose={() => setShowRules(false)} /> : null}
       {palette ? <CommandPalette G={G} go={go} openPlayer={setPlayer} openTeam={setClub} onClose={() => setPalette(false)} /> : null}
-      {player != null ? <PlayerModal G={G} setG={setG} pid={player} onClose={() => setPlayer(null)} /> : null}
+      {player != null ? <PlayerModal G={G} setG={setG} pid={player} onClose={() => setPlayer(null)}
+        onCompare={(id) => { setPlayer(null); setCompare({ a: id }); }} /> : null}
+      {compare ? <CompareModal G={G} initial={compare} onClose={() => setCompare(null)} /> : null}
       {club != null ? <ClubModal G={G} teamId={club} onClose={() => setClub(null)} openPlayer={(id) => { setClub(null); setPlayer(id); }} /> : null}
       {showSlots ? (
         <Modal title="Save slots" onClose={() => setShowSlots(false)}>
