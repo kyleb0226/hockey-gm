@@ -162,3 +162,11 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
 - 2026-08-25 · SKIPPED · reverted automatically: tools/simtest.js failed
 - 2026-08-31 · SKIPPED · reverted automatically: tools/simtest.js failed
 - 2026-09-01 · SKIPPED · reverted automatically: tools/simtest.js failed
+- 2026-09-04 · S · Chemistry-aware auto lines. `autoLines` used to rebuild all four forward lines
+  and all three defence pairs from the depth chart on every call, so a single injury or call-up
+  anywhere on the roster reset every line's streak, not just the one it actually touched. `t.lastLines`
+  now survives the ~20 places that null `t.lines`, and any line or pair whose players are all still
+  active gets copied straight back into the same slots — reserved in its own pass before the
+  rebuilt lines are filled, so a rebuild can't poach a player an untouched line was about to keep.
+  The manual line editor writes `t.lastLines` too, so a hand-built pairing survives an unrelated
+  roster change the same way an automatic one does. Harness grew from 1529 to 1532 assertions.

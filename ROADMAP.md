@@ -15,10 +15,13 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
 
 ## Coaching and tactics
 
-- **S** — Chemistry-aware auto lines. `autoLines` rebuilds a lineup from scratch by depth chart
-  every time it's called (after an injury, a trade, a recall), which throws away whatever streak
-  `lineChemistry`/`pairChemistry` had going even when the roster change doesn't touch that line or
-  pair. Have it keep any line/pair untouched by the change instead of always sorting from zero.
+- **S** — Chemistry note on the injury/call-up log. Now that `autoLines` preserves lines and pairs
+  the roster change didn't touch (`t.lastLines`), the news feed that reports a call-up or an
+  injury never says which line actually got reshuffled versus which ones kept their streak — worth
+  a line of text pulled straight from comparing `t.lastLines.F/D` before and after `ensureLines`.
+- **S** — Let a user reorder whole lines, not just swap two players. `LinesTab`'s `swap` only
+  exchanges the occupants of two slots; there's no "move winger up to line 1, bump the rest down"
+  affordance, which is the more common real adjustment a coach makes.
 
 ## GM depth
 

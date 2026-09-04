@@ -2417,6 +2417,7 @@ function dressRank(G, teamId) {
   return (p) => p.ovr + kids * clamp(24 - p.age, -4, 5) * 0.8;
 }
 function autoLines(G, teamId) {
+  const t = G.teams[teamId];
   const rank = dressRank(G, teamId);
   const r = activeRoster(G, teamId).slice().sort((a, b) => rank(b) - rank(a));
   const byPos = (pos) => r.filter((p) => p.pos === pos);
@@ -2456,16 +2457,37 @@ function autoLines(G, teamId) {
     return pick || null;
   };
   const spare = r.filter((p) => p.pos !== "G" && p.pos !== "D");
+  /* A line or pair the roster change didn't touch keeps the men it had, so
+     lineChemistry/pairChemistry see the same signature and the streak
+     survives — without this, ANY invalidation (one call-up, one injury
+     anywhere on the roster) rebuilt all four lines and all three pairs from
+     the depth chart, so a settled shutdown pair lost its whole streak over
+     an unrelated forward getting hurt. */
+  const byId = new Map(r.map((p) => [p.id, p]));
+  const prevF = (t.lastLines && t.lastLines.F) || [];
+  const prevD = (t.lastLines && t.lastLines.D) || [];
+  const keepRow = (prev) => prev && prev.length && prev.every((id) => id != null && byId.has(id) && !used.has(id))
+    ? prev.map((id) => byId.get(id)) : null;
+  /* Reserve every kept row BEFORE filling any of the unpreserved ones — done
+     in one pass, filling line 0 first could hand a rebuilt line the exact
+     player line 2 was about to keep, since he'd still be sitting unclaimed
+     in the position pool. */
+  const keptF = [0, 1, 2, 3].map((i) => keepRow(prevF[i]));
+  keptF.forEach((kept) => kept && kept.forEach((p) => used.add(p.id)));
+  const keptD = [0, 1, 2].map((i) => keepRow(prevD[i]));
+  keptD.forEach((kept) => kept && kept.forEach((p) => used.add(p.id)));
   /* Down the lines rather than across them, so a shortage costs the FOURTH
      line its winger rather than the first — which is also how a coach does it. */
   const F = [[null, null, null], [null, null, null], [null, null, null], [null, null, null]];
   [0, 1, 2, 3].forEach((i) => {
+    if (keptF[i]) { F[i] = keptF[i]; return; }
     F[i][0] = grab(lws, spare); F[i][1] = grab(cs, spare); F[i][2] = grab(rws, spare);
   });
-  const D = [0, 1, 2].map(() => [grab(ds), grab(ds)]);
+  const D = [0, 1, 2].map((i) => keptD[i] || [grab(ds), grab(ds)]);
   const idsOf = (row) => row.map((p) => (p ? p.id : null));
   const Fids = F.map(idsOf), Dids = D.map(idsOf);
   const Gk = [gs[0] ? gs[0].id : null, gs[1] ? gs[1].id : null];
+  t.lastLines = { F: Fids, D: Dids };
   /* Special teams come out of the men who are actually in the lineup. Drawing
      them from the whole dressed roster put a defensively-minded spare on the
      penalty kill and on no line at all, so he finished the year averaging
@@ -10485,6 +10507,9 @@ function LinesTab({ G, setG }) {
     }
     if (kind === "F") L.F[li][si] = newId; else if (kind === "D") L.D[li][si] = newId; else L.G[si] = newId;
     t.lines = L;
+    // Keeps a manual edit from evaporating the next time something unrelated
+    // invalidates the lineup — autoLines preserves any row it still matches.
+    t.lastLines = { F: L.F, D: L.D };
     g2.teams[G.userTeam] = t;
     setG(g2);
   }

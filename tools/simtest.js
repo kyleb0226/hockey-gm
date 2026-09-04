@@ -588,6 +588,17 @@ const CHECKS = {
     const L2 = A.ensureLines(G, 0);
     const stillIn = L2.F.flat().includes(victim.id);
     ok(!stillIn, "an injured player is pulled out of the lineup");
+
+    // A line or pair the injury didn't touch keeps the men it had, so its
+    // chemistry streak survives an unrelated call-up or trade instead of
+    // resetting to zero every time anything on the roster changes.
+    ok(JSON.stringify(L2.F[2]) === JSON.stringify(L.F[2]),
+      "a forward line nowhere near the injury is untouched by the rebuild");
+    ok(JSON.stringify(L2.D[2]) === JSON.stringify(L.D[2]),
+      "same for a defence pair — the injury was up front");
+    ok(JSON.stringify(L2.F[0]) !== JSON.stringify(L.F[0]),
+      "but the line that actually lost a man is rebuilt");
+
     A.simDays(G, 3);
     ok(true, "the club keeps playing a man down");
   },
