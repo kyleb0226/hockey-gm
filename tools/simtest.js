@@ -28,7 +28,7 @@ const EXPORTS = [
   "rules", "setRule", "ruleValue", "applyPendingRules", "RULES_DEFAULT", "STRUCTURAL_RULES",
   "standings", "divStandings", "confStandings", "playoffField",
   "capHit", "capSpace", "capFloor", "marketValue", "teamStrength",
-  "rosterOf", "activeRoster", "playersOf", "autoLines", "ensureLines",
+  "rosterOf", "activeRoster", "playersOf", "autoLines", "ensureLines", "lineupChangeNote",
   "evalTrade", "doTrade", "signPlayer", "aiFreeAgency", "computeAwards",
   "pts", "svPct", "gaa", "ovrOf", "TEAMS", "DIVS", "CONFS", "ROSTER_MAX", "POS",
   "DIFFICULTIES", "LINE_TOI",
@@ -598,6 +598,32 @@ const CHECKS = {
       "same for a defence pair — the injury was up front");
     ok(JSON.stringify(L2.F[0]) !== JSON.stringify(L.F[0]),
       "but the line that actually lost a man is rebuilt");
+
+    // The note in the news feed names the line that actually moved, not just
+    // that something did — a plain diff of t.lastLines before and after.
+    const note = A.lineupChangeNote(G, 0, { F: L.F, D: L.D });
+    ok(note.includes("Line 1"), `the note names the line that changed (${note})`);
+    ok(!note.includes("Line 3") && !note.includes("Pair"),
+      `and nothing untouched, since only line 1 lost a man (${note})`);
+    ok(A.lineupChangeNote(G, 0, null) === "", "no note when there's nothing to compare against");
+
+    // A call-up now reaches the persisted news feed, not just a UI toast, and
+    // carries the same reshuffle note.
+    const farmhand = A.rosterOf(G, 0, true).find((p) => p.farm);
+    if (farmhand) {
+      G.news = [];
+      const before = G.teams[0].lines ? JSON.parse(JSON.stringify(G.teams[0].lastLines)) : null;
+      const r = A.recall(G, farmhand.id);
+      if (r.ok) {
+        ok(G.news[0] && G.news[0].text.includes("called up"), "the call-up is in the news feed");
+        if (before) {
+          const stillTogether = JSON.stringify(before.F.concat(before.D)) ===
+            JSON.stringify(G.teams[0].lastLines.F.concat(G.teams[0].lastLines.D));
+          ok(stillTogether || /Line|Pair/.test(G.news[0].text),
+            "and says so when the call-up actually bumped somebody out of the lineup");
+        }
+      }
+    }
 
     A.simDays(G, 3);
     ok(true, "the club keeps playing a man down");

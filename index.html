@@ -2510,6 +2510,25 @@ function ensureLines(G, teamId) {
   return t.lines;
 }
 
+/* autoLines keeps what it doesn't have to change (see above), but the news
+   feed for an injury or a call-up never said so — the reader had to compare
+   `t.lastLines` before and after by eye to see whether the whole forward
+   corps got shuffled or just one line lost a man. Snapshot the assignment
+   before the roster change, force the rebuild, and diff the two: no rnd(G)
+   calls happen in that rebuild, so forcing it early changes nothing else. */
+function lineupChangeNote(G, teamId, prevLines) {
+  if (!prevLines) return "";
+  const t = G.teams[teamId];
+  ensureLines(G, teamId);
+  const now = t.lastLines || { F: [], D: [] };
+  const rowEq = (a, b) => !!a && !!b && a.length === b.length && a.every((id, i) => id === b[i]);
+  const diffRows = (rows, prows, label) => (rows || [])
+    .map((row, i) => (rowEq(row, (prows || [])[i]) ? null : `${label} ${i + 1}`))
+    .filter(Boolean);
+  const changed = diffRows(now.F, prevLines.F, "Line").concat(diffRows(now.D, prevLines.D, "Pair"));
+  return changed.length ? ` ${changed.join(", ")} reshuffled.` : "";
+}
+
 const LINE_CHEM_MAX_GAMES = 10;    // games together before the chemistry bonus caps out
 const LINE_CHEM_PER_GAME = 0.006;  // lineOff multiplier per game of continuity
 const PAIR_CHEM_MAX_GAMES = 10;    // games together before a D pair's chemistry bonus caps out
@@ -3806,8 +3825,12 @@ function rollInjuries(G, res) {
         p.rustKey = hurts;
         p.injGames = p.inj;
         p.rust = 0; p.rustFrom = 0;
-        if (tid === G.userTeam) news(G, `${fullName(p)} is out ~${p.inj} games (${desc}).`, "bad");
+        const prevLines = G.teams[tid].lastLines;
         G.teams[tid].lines = null;
+        if (tid === G.userTeam) {
+          const note = lineupChangeNote(G, tid, prevLines);
+          news(G, `${fullName(p)} is out ~${p.inj} games (${desc}).${note}`, "bad");
+        }
       }
     });
   });
@@ -6943,8 +6966,13 @@ function recall(G, pid) {
   const p = G.players[pid];
   if (!p || !p.farm) return { ok: false, why: "not on the farm" };
   if (rosterOf(G, p.teamId).length >= ROSTER_MAX) return { ok: false, why: "NHL roster is full" };
+  const prevLines = G.teams[p.teamId].lastLines;
   p.farm = false;
   G.teams[p.teamId].lines = null;
+  if (p.teamId === G.userTeam) {
+    const note = lineupChangeNote(G, p.teamId, prevLines);
+    news(G, `${fullName(p)} called up from the farm.${note}`, "good");
+  }
   return { ok: true };
 }
 // Anyone placed before today gets picked over, worst club first.
