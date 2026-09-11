@@ -10222,7 +10222,7 @@ function FarmLeaguePanel({ G, openPlayer }) {
   );
 }
 
-function RosterTab({ G, setG, openPlayer, notify }) {
+function RosterTab({ G, setG, openPlayer, notify, onCompare }) {
   const [showFarm, setShowFarm] = useState(false);
   // The signing bonus offered on every extension below, until you change it.
   const [exSb, setExSb] = useState(0);
@@ -10230,6 +10230,20 @@ function RosterTab({ G, setG, openPlayer, notify }) {
   const roster = rosterOf(G, G.userTeam, true).filter((p) => (showFarm ? p.farm : !p.farm));
   const hit = capHit(G, G.userTeam), space = capSpace(G, G.userTeam);
   const dead = retainedBy(G, G.userTeam);
+
+  /* Getting to a comparison always cost a full profile open first — this queues
+     two rows straight from the table without leaving it. Picking a third player
+     drops the first rather than doing nothing, so the affordance never gets
+     "stuck" holding a stale first pick. */
+  const [cmpSel, setCmpSel] = useState([]);
+  const toggleCompare = (p) => {
+    setCmpSel((sel) => {
+      if (sel.includes(p.id)) return sel.filter((id) => id !== p.id);
+      const next = sel.length >= 2 ? [sel[1], p.id] : [...sel, p.id];
+      if (next.length === 2) { onCompare(next[0], next[1]); return []; }
+      return next;
+    });
+  };
 
   const move = (p) => {
     if (p.farm) {
@@ -10345,6 +10359,11 @@ function RosterTab({ G, setG, openPlayer, notify }) {
     { key: "yrs", label: "Yrs", get: (p) => p.contract.yrs },
     { key: "act", label: "", get: () => 0, cell: (p) => (
       <span className="flex gap-2 justify-end whitespace-nowrap">
+        <button className={`text-xs hover:underline ${cmpSel.includes(p.id) ? "text-emerald-300" : "text-slate-500"}`}
+          title={cmpSel.includes(p.id) ? "Selected for comparison — click to remove" : "Queue for comparison"}
+          onClick={(e) => { e.stopPropagation(); toggleCompare(p); }}>
+          {cmpSel.includes(p.id) ? "✓ Cmp" : "Cmp"}
+        </button>
         {/* A stint is a demotion with a counter on it — offered only to a man
             who is fit but not yet sharp, which is the whole case for it. */}
         {canCondition(G, p) ? (
@@ -10496,6 +10515,14 @@ function RosterTab({ G, setG, openPlayer, notify }) {
         <div className={`${card} p-3 text-sm`}>
           <span className="text-slate-400">Money owed to players elsewhere: </span>
           {dead.map((r) => `${G.players[r.pid] ? shortName(G.players[r.pid]) : "?"} $${r.amt}M (${r.yrs}y${r.dead ? ", released" : " retained"})`).join(" · ")}
+        </div>
+      ) : null}
+      {cmpSel.length ? (
+        <div className={`${card} p-3 text-sm flex items-center gap-2`}>
+          <span className="text-slate-400">
+            {shortName(G.players[cmpSel[0]])} queued — click "Cmp" on another player to compare them.
+          </span>
+          <button className={`${btnGhost} text-xs px-2 py-1`} onClick={() => setCmpSel([])}>Cancel</button>
         </div>
       ) : null}
       <Section>
@@ -13897,7 +13924,7 @@ const TABS = [
 ];
 const GROUPS = ["Club", "League", "Market", "History"];
 
-function CommandPalette({ G, onClose, go, openPlayer, openTeam }) {
+function CommandPalette({ G, onClose, go, openPlayer, openTeam, openCompare }) {
   const [q, setQ] = useState("");
   const ref = useRef(null);
   useEffect(() => { if (ref.current && ref.current.focus) ref.current.focus(); }, []);
@@ -13907,6 +13934,8 @@ function CommandPalette({ G, onClose, go, openPlayer, openTeam }) {
     TABS.forEach((t) => {
       if (!ql || t.label.toLowerCase().includes(ql)) out.push({ kind: "tab", label: t.label, sub: t.group, go: () => go(t.key) });
     });
+    // Getting to a comparison used to cost a full profile open first.
+    if (!ql || "compare players".includes(ql)) out.push({ kind: "action", label: "Compare players", sub: "action", go: () => openCompare() });
     if (ql.length >= 2) {
       G.teams.forEach((t) => {
         if (`${t.city} ${t.name} ${t.abbr}`.toLowerCase().includes(ql))
@@ -14130,7 +14159,7 @@ function App() {
 
       <div className="max-w-6xl mx-auto p-3">
         {tab === "home" && <HomeTab G={G} setG={setG} go={go} openPlayer={setPlayer} />}
-        {tab === "roster" && <RosterTab G={G} setG={setG} openPlayer={setPlayer} notify={notify} />}
+        {tab === "roster" && <RosterTab G={G} setG={setG} openPlayer={setPlayer} notify={notify} onCompare={(a, b) => setCompare({ a, b })} />}
         {tab === "lines" && <LinesTab G={G} setG={setG} />}
         {tab === "room" && <RoomTab G={G} setG={setG} openPlayer={setPlayer} notify={notify} />}
         {tab === "game" && <GameTab G={G} openPlayer={setPlayer} />}
@@ -14156,7 +14185,7 @@ function App() {
       ) : null}
 
       {showRules ? <RulesModal G={G} setG={setG} onClose={() => setShowRules(false)} /> : null}
-      {palette ? <CommandPalette G={G} go={go} openPlayer={setPlayer} openTeam={setClub} onClose={() => setPalette(false)} /> : null}
+      {palette ? <CommandPalette G={G} go={go} openPlayer={setPlayer} openTeam={setClub} openCompare={() => setCompare({})} onClose={() => setPalette(false)} /> : null}
       {player != null ? <PlayerModal G={G} setG={setG} pid={player} onClose={() => setPlayer(null)}
         onCompare={(id) => { setPlayer(null); setCompare({ a: id }); }} /> : null}
       {compare ? <CompareModal G={G} initial={compare} onClose={() => setCompare(null)} /> : null}

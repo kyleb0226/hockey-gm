@@ -15,10 +15,10 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
 
 ## Coaching and tactics
 
-- **S** — Chemistry note on the injury/call-up log. Now that `autoLines` preserves lines and pairs
-  the roster change didn't touch (`t.lastLines`), the news feed that reports a call-up or an
-  injury never says which line actually got reshuffled versus which ones kept their streak — worth
-  a line of text pulled straight from comparing `t.lastLines.F/D` before and after `ensureLines`.
+- **S** — `doTrade` (index.html, `news(G, \`Trade with ...\`)`) nulls both clubs' lines but never
+  calls `lineupChangeNote` the way `rollInjuries` and `recall` do, so a trade that breaks up a
+  jelled line or pair says nothing about it — the one roster event most likely to force a real
+  reshuffle is also the one the news feed stays silent on.
 - **S** — Let a user reorder whole lines, not just swap two players. `LinesTab`'s `swap` only
   exchanges the occupants of two slots; there's no "move winger up to line 1, bump the rest down"
   affordance, which is the more common real adjustment a coach makes.
@@ -47,11 +47,9 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   or D pairs were fully jelled (`t.lineChem[i] >= LINE_CHEM_MAX_GAMES`, and now `t.pairChem[i] >=
   PAIR_CHEM_MAX_GAMES`) going into that game; a small note next to the line score would make the
   chemistry bonus visible, not just felt.
-- **S** — Surface player comparison from more places. `CompareModal` (shipped 2026-09-03) only
-  opens from a `Compare` button inside `PlayerModal`, so getting to it always costs a full profile
-  open first. Add it to the command palette as a direct "Compare players" action, and to
-  `RosterTab` as a per-row affordance so two names on the same roster can be queued straight from
-  the table.
+- **S** — Extend the roster "Cmp" queue (shipped 2026-09-11 in `RosterTab`) to `StatsTab`. That's
+  the screen where you're actually looking at a rival's rate stats next to your own player and
+  wondering how they stack up — the same two-click queue-and-compare would fit it directly.
 
 ## Housekeeping
 
