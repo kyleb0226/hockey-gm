@@ -451,6 +451,20 @@ const CHECKS = {
     const ids = new Set(A.activeRoster(G, 0).map((p) => p.id));
     const dangling = lines.F.flat().concat(lines.D.flat(), lines.G).filter((id) => id != null && !ids.has(id));
     ok(dangling.length === 0, "no line slot points at a player who left");
+
+    // Trading away a linemate breaks up a jelled line the same way an injury
+    // or a call-up does, and the news feed has to say so — it used to stay
+    // silent about the one roster event most likely to force a reshuffle.
+    const winger = G.players[lines.F[0][0]];
+    const spare = A.rosterOf(G, 2).sort((x, y) => x.ovr - y.ovr)[0];
+    G.news = [];
+    const tr = A.doTrade(G, 0, [winger.id], [], 2, [spare.id], []);
+    if (tr.ok) {
+      ok(G.news[0] && /Line|Pair/.test(G.news[0].text),
+        `the trade news names the line it broke up (${G.news[0] && G.news[0].text})`);
+    } else {
+      ok(true, `the AI declined this trade too, which is allowed (${tr.why})`);
+    }
   },
 
   // The rollover: ageing, contracts, the draft, and a league that can play again.

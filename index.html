@@ -6026,8 +6026,14 @@ function doTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, opts) {
   bPlayers.forEach((id) => { bank(G.players[id], bId); G.players[id].teamId = aId; G.players[id].farm = false; });
   aPicks.forEach((pk) => { const r = G.picks.find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig); if (r) r.owner = bId; });
   bPicks.forEach((pk) => { const r = G.picks.find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig); if (r) r.owner = aId; });
+  /* Both sides can lose a jelled line or pair in a trade, but only the user's
+     own club is worth telling — an AI club's reshuffle is invisible to him
+     either way, same as an injury or a call-up. */
+  const prevA = G.teams[aId].lastLines, prevB = G.teams[bId].lastLines;
   G.teams[aId].lines = null; G.teams[bId].lines = null;
-  news(G, `Trade with ${G.teams[bId].name}: out ${aPlayers.length} / in ${bPlayers.length}.`, "info");
+  const note = (aId === G.userTeam ? lineupChangeNote(G, aId, prevA) : "")
+    + (bId === G.userTeam ? lineupChangeNote(G, bId, prevB) : "");
+  news(G, `Trade with ${G.teams[bId].name}: out ${aPlayers.length} / in ${bPlayers.length}.${note}`, "info");
   return ev;
 }
 
