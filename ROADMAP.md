@@ -15,10 +15,6 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
 
 ## Coaching and tactics
 
-- **S** — `doTrade` (index.html, `news(G, \`Trade with ...\`)`) nulls both clubs' lines but never
-  calls `lineupChangeNote` the way `rollInjuries` and `recall` do, so a trade that breaks up a
-  jelled line or pair says nothing about it — the one roster event most likely to force a real
-  reshuffle is also the one the news feed stays silent on.
 - **S** — Let a user reorder whole lines, not just swap two players. `LinesTab`'s `swap` only
   exchanges the occupants of two slots; there's no "move winger up to line 1, bump the rest down"
   affordance, which is the more common real adjustment a coach makes.
@@ -47,9 +43,15 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   or D pairs were fully jelled (`t.lineChem[i] >= LINE_CHEM_MAX_GAMES`, and now `t.pairChem[i] >=
   PAIR_CHEM_MAX_GAMES`) going into that game; a small note next to the line score would make the
   chemistry bonus visible, not just felt.
-- **S** — Extend the roster "Cmp" queue (shipped 2026-09-11 in `RosterTab`) to `StatsTab`. That's
-  the screen where you're actually looking at a rival's rate stats next to your own player and
-  wondering how they stack up — the same two-click queue-and-compare would fit it directly.
+- **S** — The "Cmp" queue (`RosterTab`, and now `StatsTab`) clears `cmpSel` back to `[]` the
+  instant a second player is picked and `onCompare` fires, so checking one player against three
+  or four rivals in a row means re-clicking "Cmp" on him every single time. Keeping `cmpSel[0]`
+  pinned after the modal opens — only clearing on "Cancel" or a fresh player-A pick from inside
+  `CompareModal` — would make that the one-click flow it's clearly meant to be.
+- **S** — `PlayerPicker` (used by `CompareModal`) lets you pick any two players and only tells you
+  they don't match — "Pick two players of the same kind" — after both are chosen. Filtering the
+  second picker's search results by the first pick's `pos === "G"` would catch it before the
+  wasted click instead of after.
 
 ## Housekeeping
 

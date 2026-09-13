@@ -10951,12 +10951,35 @@ function StandingsTab({ G, openTeam }) {
 
 /* ---------------------------------- stats --------------------------------- */
 
-function StatsTab({ G, openPlayer }) {
+function StatsTab({ G, openPlayer, onCompare }) {
   const [mode, setMode] = useState("skaters");
   const [scope, setScope] = useState("league");
   const pool = (p) => (scope === "mine" ? p.teamId === G.userTeam : true);
   const skaters = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 0 && pool(p));
   const goalies = playersOf(G).filter((p) => p.pos === "G" && p.season.gp >= 3 && pool(p));
+
+  /* Same queue-and-compare affordance as the roster table: this is the screen
+     where you're actually looking at a rival's rate stats and wondering how
+     they stack up against your own player, so it belongs here as directly as
+     it does on the roster. */
+  const [cmpSel, setCmpSel] = useState([]);
+  const toggleCompare = (p) => {
+    setCmpSel((sel) => {
+      if (sel.includes(p.id)) return sel.filter((id) => id !== p.id);
+      const next = sel.length >= 2 ? [sel[1], p.id] : [...sel, p.id];
+      if (next.length === 2) { onCompare(next[0], next[1]); return []; }
+      return next;
+    });
+  };
+  const cmpCol = { key: "cmp", label: "", get: () => 0, cell: (p) => (
+    <span className="flex justify-end">
+      <button className={`text-xs hover:underline ${cmpSel.includes(p.id) ? "text-emerald-300" : "text-slate-500"}`}
+        title={cmpSel.includes(p.id) ? "Selected for comparison — click to remove" : "Queue for comparison"}
+        onClick={(e) => { e.stopPropagation(); toggleCompare(p); }}>
+        {cmpSel.includes(p.id) ? "✓ Cmp" : "Cmp"}
+      </button>
+    </span>
+  ) };
   // A traded player shows where he is now, with the full path on hover.
   const teamCell = (p) => {
     const spells = (p.stints || []).filter((st) => st.s.gp);
@@ -11008,6 +11031,7 @@ function StatsTab({ G, openPlayer }) {
       cell: (p) => sh(p).dps.toFixed(1) },
     { key: "ps", label: "PS", get: (p) => sh(p).ps, cls: "font-semibold",
       cell: (p) => <ShareBar v={sh(p).ps} max={psPeak} split={[sh(p).ops, sh(p).dps]} /> },
+    cmpCol,
   ];
   const goalieCols = [
     { key: "name", label: "Goalie", get: (p) => p.ln, cell: nameCell },
@@ -11025,6 +11049,7 @@ function StatsTab({ G, openPlayer }) {
       cell: (p) => (p.season.sosa ? `${p.season.sosv}/${p.season.sosa}` : "—") },
     { key: "ps", label: "PS", get: (p) => sh(p).ps, cls: "font-semibold",
       cell: (p) => <ShareBar v={sh(p).ps} max={psPeak} /> },
+    cmpCol,
   ];
   return (
     <div className="space-y-3">
@@ -11035,6 +11060,14 @@ function StatsTab({ G, openPlayer }) {
         <button className={scope === "league" ? btnPri : btnGhost} onClick={() => setScope("league")}>League</button>
         <button className={scope === "mine" ? btnPri : btnGhost} onClick={() => setScope("mine")}>My club</button>
       </div>
+      {cmpSel.length ? (
+        <div className={`${card} p-3 text-sm flex items-center gap-2`}>
+          <span className="text-slate-400">
+            {shortName(G.players[cmpSel[0]])} queued — click "Cmp" on another player to compare them.
+          </span>
+          <button className={`${btnGhost} text-xs px-2 py-1`} onClick={() => setCmpSel([])}>Cancel</button>
+        </div>
+      ) : null}
       <Section>
         <SortTable min={mode === "skaters" ? 1040 : 900} rowKey={(p) => p.id} onRow={(p) => openPlayer(p.id)}
           rowCls={(p) => (p.teamId === G.userTeam ? "bg-sky-950/30" : "")}
@@ -14171,7 +14204,7 @@ function App() {
         {tab === "game" && <GameTab G={G} openPlayer={setPlayer} />}
         {tab === "schedule" && <ScheduleTab G={G} openTeam={setClub} />}
         {tab === "standings" && <StandingsTab G={G} openTeam={setClub} />}
-        {tab === "stats" && <StatsTab G={G} openPlayer={setPlayer} />}
+        {tab === "stats" && <StatsTab G={G} openPlayer={setPlayer} onCompare={(a, b) => setCompare({ a, b })} />}
         {tab === "analytics" && <AnalyticsTab G={G} openTeam={setClub} />}
         {tab === "playoffs" && <PlayoffsTab G={G} setG={setG} openPlayer={setPlayer} />}
         {tab === "allstar" && <AllStarTab G={G} openPlayer={setPlayer} />}
