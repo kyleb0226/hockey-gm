@@ -15,9 +15,12 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
 
 ## Coaching and tactics
 
-- **S** — Let a user reorder whole lines, not just swap two players. `LinesTab`'s `swap` only
-  exchanges the occupants of two slots; there's no "move winger up to line 1, bump the rest down"
-  affordance, which is the more common real adjustment a coach makes.
+- **M** — Chemistry survives a whole-line reorder in name only. `lineChemistry`/`pairChemistry`
+  key the streak off the slot index (`t.lineSig[li]`), not the trio, so bumping line 2 up to line
+  1 with the new `moveLine` button (`LinesTab`) carries the same three players into a slot whose
+  signature doesn't match and resets their streak to zero — exactly as if they'd been broken up.
+  Comparing the incoming trio against every stored signature, not just its own slot's, would let a
+  promoted line keep the games it already had.
 
 ## GM depth
 

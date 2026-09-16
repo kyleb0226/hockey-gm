@@ -10544,6 +10544,15 @@ function RosterTab({ G, setG, openPlayer, notify, onCompare }) {
 
 /* --------------------------------- lines ---------------------------------- */
 
+const MoveButtons = ({ onUp, onDown, canUp, canDown }) => (
+  <span className="flex flex-col leading-none">
+    <button className="text-slate-500 hover:text-sky-300 disabled:opacity-20 disabled:hover:text-slate-500"
+      disabled={!canUp} onClick={onUp} title="Move this line up">▲</button>
+    <button className="text-slate-500 hover:text-sky-300 disabled:opacity-20 disabled:hover:text-slate-500"
+      disabled={!canDown} onClick={onDown} title="Move this line down">▼</button>
+  </span>
+);
+
 function LinesTab({ G, setG }) {
   const lines = ensureLines(G, G.userTeam);
   const bench = activeRoster(G, G.userTeam);
@@ -10570,6 +10579,22 @@ function LinesTab({ G, setG }) {
     t.lines = L;
     // Keeps a manual edit from evaporating the next time something unrelated
     // invalidates the lineup — autoLines preserves any row it still matches.
+    t.lastLines = { F: L.F, D: L.D };
+    g2.teams[G.userTeam] = t;
+    setG(g2);
+  }
+
+  // Moves a whole line/pair up or down as a unit — the adjustment a coach
+  // actually makes ("bump the checking line up") rather than one slot at a time.
+  function moveLine(kind, li, dir) {
+    const g2 = { ...G, teams: G.teams.slice() };
+    const t = { ...g2.teams[G.userTeam] };
+    const L = JSON.parse(JSON.stringify(t.lines || lines));
+    const rows = kind === "F" ? L.F : L.D;
+    const j = li + dir;
+    if (j < 0 || j >= rows.length) return;
+    [rows[li], rows[j]] = [rows[j], rows[li]];
+    t.lines = L;
     t.lastLines = { F: L.F, D: L.D };
     g2.teams[G.userTeam] = t;
     setG(g2);
@@ -10707,9 +10732,10 @@ function LinesTab({ G, setG }) {
           {lines.F.map((ln, i) => {
             const games = (G.teams[G.userTeam].lineChem || [])[i] || 0;
             return (
-              <div key={i} className="grid grid-cols-[2rem_1fr_1fr_1fr] gap-1.5 sm:gap-2 items-center">
-                <div className="text-xs text-slate-500" title={games > 0 ? `Together ${games} game${games === 1 ? "" : "s"} running — a small chemistry bonus` : "Just set — no chemistry yet"}>
-                  L{i + 1}{games >= LINE_CHEM_MAX_GAMES ? <span className="text-emerald-400"> ●</span> : null}
+              <div key={i} className="grid grid-cols-[3.25rem_1fr_1fr_1fr] gap-1.5 sm:gap-2 items-center">
+                <div className="flex items-center gap-1 text-xs text-slate-500" title={games > 0 ? `Together ${games} game${games === 1 ? "" : "s"} running — a small chemistry bonus` : "Just set — no chemistry yet"}>
+                  <span>L{i + 1}{games >= LINE_CHEM_MAX_GAMES ? <span className="text-emerald-400"> ●</span> : null}</span>
+                  <MoveButtons onUp={() => moveLine("F", i, -1)} onDown={() => moveLine("F", i, 1)} canUp={i > 0} canDown={i < lines.F.length - 1} />
                 </div>
                 {[0, 1, 2].map((si) => (
                   <Slot key={si} kind="F" li={i} si={si} id={ln[si]} filter={(p) => p.pos !== "G" && p.pos !== "D"} />
@@ -10725,9 +10751,10 @@ function LinesTab({ G, setG }) {
           {lines.D.map((pr, i) => {
             const games = (G.teams[G.userTeam].pairChem || [])[i] || 0;
             return (
-              <div key={i} className="grid grid-cols-[2rem_1fr_1fr] gap-1.5 sm:gap-2 items-center">
-                <div className="text-xs text-slate-500" title={games > 0 ? `Together ${games} game${games === 1 ? "" : "s"} running — a small chemistry bonus` : "Just set — no chemistry yet"}>
-                  D{i + 1}{games >= PAIR_CHEM_MAX_GAMES ? <span className="text-emerald-400"> ●</span> : null}
+              <div key={i} className="grid grid-cols-[3.25rem_1fr_1fr] gap-1.5 sm:gap-2 items-center">
+                <div className="flex items-center gap-1 text-xs text-slate-500" title={games > 0 ? `Together ${games} game${games === 1 ? "" : "s"} running — a small chemistry bonus` : "Just set — no chemistry yet"}>
+                  <span>D{i + 1}{games >= PAIR_CHEM_MAX_GAMES ? <span className="text-emerald-400"> ●</span> : null}</span>
+                  <MoveButtons onUp={() => moveLine("D", i, -1)} onDown={() => moveLine("D", i, 1)} canUp={i > 0} canDown={i < lines.D.length - 1} />
                 </div>
                 {[0, 1].map((si) => <Slot key={si} kind="D" li={i} si={si} id={pr[si]} filter={(p) => p.pos === "D"} />)}
               </div>

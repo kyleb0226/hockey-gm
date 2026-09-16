@@ -91,8 +91,11 @@ which is what makes line construction and last change matter.
   therefore its streak survive. **Reservation runs as its own pass before any rebuilt line is
   filled** — doing it in one pass let the rebuild for line 1 poach a player line 3 was about to
   keep, since he was still sitting unclaimed in the position pool when line 1 went first. The manual
-  line editor (`LinesTab`'s `swap`) writes `t.lastLines` too, so a hand-built pairing survives the
-  same way an automatic one does.
+  line editor (`LinesTab`'s `swap`, and `moveLine` for bumping a whole line or pair up or down as
+  a unit) writes `t.lastLines` too, so a hand-built pairing survives the same way an automatic one
+  does. `moveLine` swaps two slots wholesale rather than one player at a time, but chemistry is
+  still keyed by slot index, so the trio it carries into the new slot starts its streak over —
+  same trade-off as `swap` already makes.
 - **Shot zones (`SHOT_ZONES`, `pickZone`):** every shot picks a zone first — rush, cycle or point
   — and the zone decides both *who* shoots (`dBias` makes the point a defenceman's shot) and *how
   stoppable* it is (`save` offsets the goalie's percentage). Conversion must stay ordered
