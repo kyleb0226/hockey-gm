@@ -2537,13 +2537,20 @@ const PAIR_CHEM_PER_GAME = 0.006;  // unitDef multiplier per game of continuity
 /* Rewards keeping a forward line intact from game to game: each consecutive
    game together nudges its offence up, capped at LINE_CHEM_MAX_GAMES, so
    shuffling the lines every week has a real cost. Called once per side per
-   game, which both reads the current streak and advances it for next time. */
+   game, which both reads the current streak and advances it for next time.
+   A trio is matched against EVERY stored signature, not just its own slot's
+   — `moveLine` (LinesTab) swaps two whole rows wholesale, so the same three
+   players can land in a different slot with a streak that belongs to them,
+   not to the slot. Matching by slot only would reset it to zero, exactly as
+   if the line had been broken up. */
 function lineChemistry(t, lines) {
   if (!t.lineChem) t.lineChem = [0, 0, 0, 0];
   if (!t.lineSig) t.lineSig = [null, null, null, null];
+  const prevSig = t.lineSig.slice(), prevChem = t.lineChem.slice();
   return lines.F.map((ln, li) => {
     const sig = ln.join(",");
-    const games = t.lineSig[li] === sig ? Math.min(LINE_CHEM_MAX_GAMES, t.lineChem[li] + 1) : 0;
+    const from = prevSig.indexOf(sig);
+    const games = from === -1 ? 0 : Math.min(LINE_CHEM_MAX_GAMES, prevChem[from] + 1);
     t.lineChem[li] = games;
     t.lineSig[li] = sig;
     return games;
@@ -2552,13 +2559,16 @@ function lineChemistry(t, lines) {
 
 /* Same idea as lineChemistry but for defence pairs: unitDef weights a settled
    pair the same way lineOff weights a settled forward line. Called once per
-   side per game alongside lineChemistry. */
+   side per game alongside lineChemistry. Matches against every stored
+   signature for the same reason lineChemistry does. */
 function pairChemistry(t, lines) {
   if (!t.pairChem) t.pairChem = [0, 0, 0];
   if (!t.pairSig) t.pairSig = [null, null, null];
+  const prevSig = t.pairSig.slice(), prevChem = t.pairChem.slice();
   return lines.D.map((pr, pi) => {
     const sig = pr.join(",");
-    const games = t.pairSig[pi] === sig ? Math.min(PAIR_CHEM_MAX_GAMES, t.pairChem[pi] + 1) : 0;
+    const from = prevSig.indexOf(sig);
+    const games = from === -1 ? 0 : Math.min(PAIR_CHEM_MAX_GAMES, prevChem[from] + 1);
     t.pairChem[pi] = games;
     t.pairSig[pi] = sig;
     return games;

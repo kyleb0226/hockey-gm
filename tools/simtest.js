@@ -578,6 +578,20 @@ const CHECKS = {
     A.lineChemistry(t0, swapped);
     ok(t0.lineChem[0] === 1, "and it starts building again from there");
 
+    // A whole-line reorder (LinesTab's moveLine, which swaps two full rows
+    // rather than one player) leaves the trio itself unchanged, so its streak
+    // must travel with it into the new slot instead of resetting the way a
+    // per-player swap does.
+    t0.lineChem = null; t0.lineSig = null;
+    for (let i = 0; i < A.LINE_CHEM_MAX_GAMES + 5; i++) A.lineChemistry(t0, fresh);
+    const reordered = JSON.parse(JSON.stringify(fresh));
+    [reordered.F[0], reordered.F[1]] = [reordered.F[1], reordered.F[0]];
+    A.lineChemistry(t0, reordered);
+    ok(t0.lineChem[0] === A.LINE_CHEM_MAX_GAMES,
+      `the line promoted into slot 1 keeps its capped streak (${t0.lineChem[0]})`);
+    ok(t0.lineChem[1] === A.LINE_CHEM_MAX_GAMES,
+      `and the line bumped down to slot 2 keeps its streak too (${t0.lineChem[1]})`);
+
     // Defence pairs build the same continuity bonus as forward lines. Driven
     // directly for the same reason the forward version is: simming sixty days
     // and expecting the cap really asks "did anybody get hurt".
@@ -594,6 +608,17 @@ const CHECKS = {
     ok(t0.pairChem[0] === 0, `breaking up a pair resets its streak (${t0.pairChem[0]})`);
     A.pairChemistry(t0, swappedD);
     ok(t0.pairChem[0] === 1, "and it starts building again");
+
+    // Same whole-row reorder, for defence pairs.
+    t0.pairChem = null; t0.pairSig = null;
+    for (let i = 0; i < A.PAIR_CHEM_MAX_GAMES + 5; i++) A.pairChemistry(t0, fresh);
+    const reorderedD = JSON.parse(JSON.stringify(fresh));
+    [reorderedD.D[0], reorderedD.D[1]] = [reorderedD.D[1], reorderedD.D[0]];
+    A.pairChemistry(t0, reorderedD);
+    ok(t0.pairChem[0] === A.PAIR_CHEM_MAX_GAMES,
+      `the pair promoted into slot 1 keeps its capped streak (${t0.pairChem[0]})`);
+    ok(t0.pairChem[1] === A.PAIR_CHEM_MAX_GAMES,
+      `and the pair bumped down to slot 2 keeps its streak too (${t0.pairChem[1]})`);
 
     // An injury must not leave a hole in the lineup.
     const victim = G.players[L.F[0][1]];
