@@ -2575,6 +2575,17 @@ function pairChemistry(t, lines) {
   });
 }
 
+/* Turns a game's `res.chem` entry (the F/D streaks simGame read for that
+   game) into the box-score note naming which units carried a full bonus —
+   the same "Line N"/"Pair N" labels lineupChangeNote uses. */
+function jelledNote(chem) {
+  if (!chem) return "";
+  const names = (chem.F || []).map((g, i) => (g >= LINE_CHEM_MAX_GAMES ? `Line ${i + 1}` : null))
+    .concat((chem.D || []).map((g, i) => (g >= PAIR_CHEM_MAX_GAMES ? `Pair ${i + 1}` : null)))
+    .filter(Boolean);
+  return names.length ? `${names.join(", ")} fully jelled` : "";
+}
+
 /* Offensive and defensive strength of a unit, on a ~0.7–1.4 scale. */
 function lineOff(G, ids) {
   const ps = ids.map((id) => G.players[id]).filter(Boolean);
@@ -3598,6 +3609,12 @@ function simGame(G, homeId, awayId, opts) {
     boxes: { [homeId]: home, [awayId]: away },
     events: ev ? ev.sort((a, b) => a.t - b.t) : null,
     shots: shotLog,
+    // Chemistry as it stood for this game, so a box score can say which lines
+    // were fully jelled rather than only the current Lines tab.
+    chem: {
+      [homeId]: { F: teamChemF[homeId], D: teamChemD[homeId] },
+      [awayId]: { F: teamChemF[awayId], D: teamChemD[awayId] },
+    },
   };
   return res;
 }
@@ -3871,7 +3888,7 @@ function simDay(G) {
     // Only the latest of the user's games is kept — a full season of play-by-play
     // would dwarf everything else in the save.
     if (mine) G.lastGame = { day: G.day, home: fx.home, away: fx.away, hg: res.hg, ag: res.ag,
-      ot: res.ot, so: res.so, events: res.events || [], boxes: res.boxes };
+      ot: res.ot, so: res.so, events: res.events || [], boxes: res.boxes, chem: res.chem };
   });
   playedToday.forEach((tid) => { G.lastPlayed[tid] = G.day; });
   // The gate. Only the home side takes one, which is what makes a home date
@@ -4129,7 +4146,7 @@ function simSeriesGame(G, s) {
   applyGame(G, res, { playoff: true });
   if (mine) {
     G.lastGame = { day: G.day, home, away, hg: res.hg, ag: res.ag,
-      ot: res.ot, so: res.so, playoff: true, events: res.events || [], boxes: res.boxes };
+      ot: res.ot, so: res.so, playoff: true, events: res.events || [], boxes: res.boxes, chem: res.chem };
   }
   const hiWon = (res.hg > res.ag) === homeIsHi;
   s.w[hiWon ? 0 : 1]++;
@@ -11281,6 +11298,13 @@ function GameTab({ G, openPlayer }) {
           </div>
         </div>
         <div className="text-xs text-slate-500 mt-1">{lg.so ? "Decided in a shootout" : lg.ot ? "Overtime" : "Regulation"}</div>
+        {lg.chem ? (() => {
+          const parts = [lg.away, lg.home].map((tid) => {
+            const note = jelledNote(lg.chem[tid]);
+            return note ? `${G.teams[tid].abbr} ${note}` : null;
+          }).filter(Boolean);
+          return parts.length ? <div className="text-xs text-emerald-400 mt-1">{parts.join("  ·  ")}</div> : null;
+        })() : null}
       </div>
 
       <div className="flex gap-2 flex-wrap">

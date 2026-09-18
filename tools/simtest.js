@@ -60,7 +60,7 @@ const EXPORTS = [
   "DRAFT_ROUNDS", "draftPicksTotal", "closeDraft", "scoutProspect", "scoutedOvr", "scoutedPot",
   "scoutBand", "scoutLabel", "draftValue", "SCOUT_POINTS",
   "pruneSave", "ZONE_KEYS", "NET_CELLS", "NET_KEYS", "goalieHole", "shooterSpot", "pickCell", "blankNet", "saveGame", "loadGame", "slotMeta", "unwrap", "deleteSlot", "localStorage",
-  "lineChemistry", "LINE_CHEM_MAX_GAMES", "pairChemistry", "PAIR_CHEM_MAX_GAMES",
+  "lineChemistry", "LINE_CHEM_MAX_GAMES", "pairChemistry", "PAIR_CHEM_MAX_GAMES", "jelledNote",
   "seasonBallots", "honoursOf", "HONOUR_MIN_GP",
   "draftOrigin", "farmRoom", "farmRoomBonus", "DEV_WIN_SWING", "DEV_WIN_TITLE",
   "seasonLeaders", "ROSTER_MIN",
@@ -619,6 +619,22 @@ const CHECKS = {
       `the pair promoted into slot 1 keeps its capped streak (${t0.pairChem[0]})`);
     ok(t0.pairChem[1] === A.PAIR_CHEM_MAX_GAMES,
       `and the pair bumped down to slot 2 keeps its streak too (${t0.pairChem[1]})`);
+
+    // The box score's chem snapshot (`res.chem`, what GameTab's note reads)
+    // has to reconcile with the streaks the game itself just advanced — every
+    // line and pair here is capped from the reorder tests above.
+    const chemBox = A.simGame(G, 0, 1, {}).chem;
+    ok(chemBox[0].F.length === 4 && chemBox[0].D.length === 3,
+      "a game's chem snapshot carries all four lines and all three pairs");
+    ok(JSON.stringify(chemBox[0].F) === JSON.stringify(t0.lineChem),
+      "the home side's snapshot matches what the game just did to t.lineChem");
+    ok(JSON.stringify(chemBox[0].D) === JSON.stringify(t0.pairChem),
+      "same for the pairs");
+    const jelled = A.jelledNote(chemBox[0]);
+    ok(jelled.includes("Line 1") && jelled.includes("Pair 1"),
+      `every line and pair here is capped, so the note names them all (${jelled})`);
+    ok(A.jelledNote({ F: [0, 0, 0, 0], D: [0, 0, 0] }) === "", "a brand-new lineup gets no note at all");
+    ok(A.jelledNote(null) === "", "no snapshot, no note");
 
     // An injury must not leave a hole in the lineup.
     const victim = G.players[L.F[0][1]];
