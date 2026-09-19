@@ -10265,15 +10265,16 @@ function RosterTab({ G, setG, openPlayer, notify, onCompare }) {
   const dead = retainedBy(G, G.userTeam);
 
   /* Getting to a comparison always cost a full profile open first — this queues
-     two rows straight from the table without leaving it. Picking a third player
-     drops the first rather than doing nothing, so the affordance never gets
-     "stuck" holding a stale first pick. */
+     two rows straight from the table without leaving it. The first pick stays
+     queued after the modal opens, so checking one player against three or four
+     rivals in a row is one click each instead of re-queuing him every time;
+     "Cancel" (below) or clicking his own row again is what actually drops him. */
   const [cmpSel, setCmpSel] = useState([]);
   const toggleCompare = (p) => {
     setCmpSel((sel) => {
       if (sel.includes(p.id)) return sel.filter((id) => id !== p.id);
       const next = sel.length >= 2 ? [sel[1], p.id] : [...sel, p.id];
-      if (next.length === 2) { onCompare(next[0], next[1]); return []; }
+      if (next.length === 2) { onCompare(next[0], next[1]); return [next[0]]; }
       return next;
     });
   };
@@ -11012,16 +11013,15 @@ function StatsTab({ G, openPlayer, onCompare }) {
   const skaters = playersOf(G).filter((p) => p.pos !== "G" && p.season.gp > 0 && pool(p));
   const goalies = playersOf(G).filter((p) => p.pos === "G" && p.season.gp >= 3 && pool(p));
 
-  /* Same queue-and-compare affordance as the roster table: this is the screen
-     where you're actually looking at a rival's rate stats and wondering how
-     they stack up against your own player, so it belongs here as directly as
-     it does on the roster. */
+  /* Same queue-and-compare affordance as the roster table, including the same
+     fix: the first pick stays queued after the modal opens, so checking one
+     player against three or four rivals in a row is one click each. */
   const [cmpSel, setCmpSel] = useState([]);
   const toggleCompare = (p) => {
     setCmpSel((sel) => {
       if (sel.includes(p.id)) return sel.filter((id) => id !== p.id);
       const next = sel.length >= 2 ? [sel[1], p.id] : [...sel, p.id];
-      if (next.length === 2) { onCompare(next[0], next[1]); return []; }
+      if (next.length === 2) { onCompare(next[0], next[1]); return [next[0]]; }
       return next;
     });
   };
@@ -14288,7 +14288,7 @@ function App() {
       {palette ? <CommandPalette G={G} go={go} openPlayer={setPlayer} openTeam={setClub} openCompare={() => setCompare({})} onClose={() => setPalette(false)} /> : null}
       {player != null ? <PlayerModal G={G} setG={setG} pid={player} onClose={() => setPlayer(null)}
         onCompare={(id) => { setPlayer(null); setCompare({ a: id }); }} /> : null}
-      {compare ? <CompareModal G={G} initial={compare} onClose={() => setCompare(null)} /> : null}
+      {compare ? <CompareModal key={`${compare.a}-${compare.b}`} G={G} initial={compare} onClose={() => setCompare(null)} /> : null}
       {club != null ? <ClubModal G={G} teamId={club} onClose={() => setClub(null)} openPlayer={(id) => { setClub(null); setPlayer(id); }} /> : null}
       {showSlots ? (
         <Modal title="Save slots" onClose={() => setShowSlots(false)}>
