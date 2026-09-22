@@ -8927,19 +8927,23 @@ function RatingCompareBar({ label, a, b }) {
 /* A search box that resolves to one player. Mirrors CommandPalette's player
    search rather than a giant <select> — the league runs well past a thousand
    names. */
-function PlayerPicker({ G, label, value, onChange, otherId }) {
+function PlayerPicker({ G, label, value, onChange, otherId, matchKind }) {
   const [q, setQ] = useState("");
   const p = value != null ? G.players[value] : null;
+  /* matchKind is the OTHER picker's already-chosen pos==="G" — filtering the
+     results to that kind here means a skater/goalie mismatch is impossible
+     to create, rather than something CompareModal has to reject afterward. */
   const hits = useMemo(() => {
     const ql = q.trim().toLowerCase();
     if (ql.length < 2) return [];
     const out = [];
     playersOf(G).forEach((pl) => {
       if (out.length >= 8 || pl.retired || pl.id === otherId) return;
+      if (matchKind != null && (pl.pos === "G") !== matchKind) return;
       if (fullName(pl).toLowerCase().includes(ql)) out.push(pl);
     });
     return out;
-  }, [q, G, otherId]);
+  }, [q, G, otherId, matchKind]);
   return (
     <div className="space-y-1">
       <div className="text-[11px] uppercase text-slate-400">{label}</div>
@@ -9018,8 +9022,10 @@ function CompareModal({ G, initial, onClose }) {
   return (
     <Modal wide title="Compare players" onClose={onClose}>
       <div className="grid sm:grid-cols-2 gap-3 mb-3">
-        <PlayerPicker G={G} label="Player A" value={a} onChange={setA} otherId={b} />
-        <PlayerPicker G={G} label="Player B" value={b} onChange={setB} otherId={a} />
+        <PlayerPicker G={G} label="Player A" value={a} onChange={setA} otherId={b}
+          matchKind={pb ? pb.pos === "G" : null} />
+        <PlayerPicker G={G} label="Player B" value={b} onChange={setB} otherId={a}
+          matchKind={pa ? pa.pos === "G" : null} />
       </div>
       {!pa || !pb ? (
         <div className="text-sm text-slate-500 py-6 text-center">Pick two players to compare them.</div>

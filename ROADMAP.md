@@ -13,15 +13,6 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
 
 ---
 
-## Coaching and tactics
-
-- **M** — Chemistry survives a whole-line reorder in name only. `lineChemistry`/`pairChemistry`
-  key the streak off the slot index (`t.lineSig[li]`), not the trio, so bumping line 2 up to line
-  1 with the new `moveLine` button (`LinesTab`) carries the same three players into a slot whose
-  signature doesn't match and resets their streak to zero — exactly as if they'd been broken up.
-  Comparing the incoming trio against every stored signature, not just its own slot's, would let a
-  promoted line keep the games it already had.
-
 ## GM depth
 
 - **M** — Three-way trades. `evalTrade` is written for two clubs; a third seat is where the
@@ -42,19 +33,11 @@ never run dry. If it drifts somewhere you don't like, prune it — that's the st
   the Cup run, printable and copy-pasteable.
 - **M** — A dedicated goalie page in the player modal: workload chart by month, and rest-versus-
   save-percentage, now that both are tracked.
-- **S** — Chemistry in the box score. `GameTab` replays `G.lastGame` but never shows which lines
-  or D pairs were fully jelled (`t.lineChem[i] >= LINE_CHEM_MAX_GAMES`, and now `t.pairChem[i] >=
-  PAIR_CHEM_MAX_GAMES`) going into that game; a small note next to the line score would make the
-  chemistry bonus visible, not just felt.
-- **S** — The "Cmp" queue (`RosterTab`, and now `StatsTab`) clears `cmpSel` back to `[]` the
-  instant a second player is picked and `onCompare` fires, so checking one player against three
-  or four rivals in a row means re-clicking "Cmp" on him every single time. Keeping `cmpSel[0]`
-  pinned after the modal opens — only clearing on "Cancel" or a fresh player-A pick from inside
-  `CompareModal` — would make that the one-click flow it's clearly meant to be.
-- **S** — `PlayerPicker` (used by `CompareModal`) lets you pick any two players and only tells you
-  they don't match — "Pick two players of the same kind" — after both are chosen. Filtering the
-  second picker's search results by the first pick's `pos === "G"` would catch it before the
-  wasted click instead of after.
+- **S** — `CompareModal` still shows the "Pick two players of the same kind" warning as dead
+  code for the picker-driven path now that `PlayerPicker` filters by `matchKind` — it only
+  remains reachable via `RosterTab`/`StatsTab`'s "Cmp" queue, which can still queue a skater and
+  a goalie back to back. Worth a comment noting that's the only path left, or filtering the Cmp
+  queue too so the warning becomes unreachable everywhere.
 
 ## Housekeeping
 
