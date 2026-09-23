@@ -1909,9 +1909,10 @@ function genPlayer(G, pos, tier, age) {
 }
 
 /* Where a player's shots come from, and how many of them go in. Skaters record
-   shots/goals per zone, goalies record shots faced/saved — the same three
-   buckets from both sides of the puck. */
-const ZONE_KEYS = ["rush", "cycle", "point"];
+   shots/goals per zone, goalies record shots faced/saved — the same four
+   buckets from both sides of the puck (the cycle's two walls count separately,
+   see SHOT_ZONES). */
+const ZONE_KEYS = ["rush", "cycleL", "cycleR", "point"];
 function blankZones(pos) {
   const z = {};
   ZONE_KEYS.forEach((k) => { z[k] = pos === "G" ? { sa: 0, sv: 0 } : { s: 0, g: 0 }; });
@@ -2936,6 +2937,16 @@ function migrate(G) {
     [p.season].forEach((s) => {
       if (!s) return;
       if (!s.z) s.z = blankZones(kind);
+      else if (s.z.cycle && !s.z.cycleL) {
+        // The cycle zone split into two walls; an in-progress save keeps its
+        // totals exactly by dividing the old bucket's counts between them.
+        const c = s.z.cycle, half = {};
+        Object.keys(c).forEach((f) => { half[f] = Math.floor(c[f] / 2); });
+        s.z.cycleL = half;
+        s.z.cycleR = {};
+        Object.keys(c).forEach((f) => { s.z.cycleR[f] = c[f] - half[f]; });
+        delete s.z.cycle;
+      }
       if (!s.net) s.net = blankNet(kind);
       if (kind === "S") {
         // Older saves predate attempt tracking; seed it from shots on goal so
@@ -3071,10 +3082,15 @@ function emptyBox(G, teamId) {
 /* Not every shot is the same shot. A point blast from a defenceman and a rush
    chance off the wing arrive at the goalie with very different odds, so the zone
    is picked first and it decides both who shoots and how stoppable it is. */
+/* The cycle used to be one bucket split down the middle for display only, so
+   the two walls always showed the same number — a small lie. They're two real
+   zones now, each half the old share, with identical odds: which wall a cycle
+   chance comes from isn't a skill, it's just which corner the puck ends up in. */
 const SHOT_ZONES = [
-  { key: "rush",  p: 0.22, save: -0.034, dBias: 0.22 },
-  { key: "cycle", p: 0.52, save:  0.000, dBias: 0.50 },
-  { key: "point", p: 0.26, save:  0.055, dBias: 3.40 },
+  { key: "rush",   p: 0.22, save: -0.034, dBias: 0.22 },
+  { key: "cycleL", p: 0.26, save:  0.000, dBias: 0.50 },
+  { key: "cycleR", p: 0.26, save:  0.000, dBias: 0.50 },
+  { key: "point",  p: 0.26, save:  0.055, dBias: 3.40 },
 ];
 /* Which zone a chance comes from is NOT a league constant — it's an argument
    between the two units on the ice, and it's the reason one club's shot map
@@ -3104,9 +3120,12 @@ function pickZone(G, offIds, defIds) {
       // cycle: hanging onto it down low. NOT a leftover — if this isn't
       // modulated it pins the middle of every club's chart to ~50% and the
       // three zones never change rank, which is what made every map look alike.
-      w[1] *= clamp(1 + (hands - 55) * 0.008 - (oppPhy - 55) * 0.006, 0.55, 1.6);
+      // Both walls get the same multiplier — which wall isn't a skill — so the
+      // combined cycle share moves exactly as it always did.
+      const cycleMult = clamp(1 + (hands - 55) * 0.008 - (oppPhy - 55) * 0.006, 0.55, 1.6);
+      w[1] *= cycleMult; w[2] *= cycleMult;
       // point: our defencemen's shot, and a defence that forces us outside
-      w[2] *= clamp(1 + (dShot - 45) * 0.024 + (oppDfn - 55) * 0.019, 0.35, 2.4);
+      w[3] *= clamp(1 + (dShot - 45) * 0.024 + (oppDfn - 55) * 0.019, 0.35, 2.4);
     }
   }
   const tot = w.reduce((a, b) => a + b, 0);
@@ -8200,57 +8219,63 @@ function Modal({ title, onClose, children, wide, actions }) {
  * ------------------------------------------------------------------------- */
 
 function ShotRink({ z, mode }) {
-  const keys = ZONE_KEYS;
-  const vol = keys.map((k) => (mode === "G" ? z[k].sa : z[k].s));
-  const total = vol.reduce((a, b) => a + b, 0);
-  const pct = keys.map((k, i) => {
-    if (mode === "G") return z[k].sa ? z[k].sv / z[k].sa : 0;
-    return z[k].s ? z[k].g / z[k].s : 0;
-  });
-  const share = vol.map((v) => (total ? v / total : 0));
-  // Heat runs on volume; the number in the middle is the rate.
-  const fill = (i, hue) => `hsla(${hue}, 78%, 55%, ${0.12 + share[i] * 0.72})`;
   const hue = mode === "G" ? 150 : 205;
-  const label = (i) => (mode === "G"
-    ? `${(pct[i] * 100).toFixed(1)}%`
-    : `${(pct[i] * 100).toFixed(1)}%`);
+  const vol = (k) => (mode === "G" ? z[k].sa : z[k].s);
+  const pct = (k) => (mode === "G"
+    ? (z[k].sa ? z[k].sv / z[k].sa : 0)
+    : (z[k].s ? z[k].g / z[k].s : 0));
+  const total = ZONE_KEYS.reduce((s, k) => s + vol(k), 0);
+  // Heat runs on volume; the number in the middle is the rate.
+  const share = (k) => (total ? vol(k) / total : 0);
+  const fill = (k) => `hsla(${hue}, 78%, 55%, ${0.12 + share(k) * 0.72})`;
+  const label = (k) => `${(pct(k) * 100).toFixed(1)}%`;
 
   if (!total) return <div className="text-sm text-slate-500 px-1 py-3">No shots recorded yet.</div>;
+  // The rink shows each wall's own number — they're independent draws, not a
+  // mirrored copy of each other. The list below combines them back into one
+  // "cycle" row, since that's still the one stat a reader wants to compare
+  // against rush and point.
+  const rows = [
+    { label: "rush", s: z.rush.s, g: z.rush.g, sa: z.rush.sa, sv: z.rush.sv, share: share("rush") },
+    { label: "cycle", s: z.cycleL.s + z.cycleR.s, g: z.cycleL.g + z.cycleR.g,
+      sa: z.cycleL.sa + z.cycleR.sa, sv: z.cycleL.sv + z.cycleR.sv,
+      share: share("cycleL") + share("cycleR") },
+    { label: "point", s: z.point.s, g: z.point.g, sa: z.point.sa, sv: z.point.sv, share: share("point") },
+  ];
   return (
     <div className="space-y-2">
       <svg viewBox="0 0 200 170" className="w-full max-w-xs mx-auto block">
         {/* rink outline: offensive zone, net at the bottom */}
         <rect x="6" y="6" width="188" height="158" rx="26" fill="#0d1728" stroke="#243250" strokeWidth="2" />
         {/* point — the strip inside the blue line */}
-        <path d="M8 34 H192 V64 H8 Z" fill={fill(2, hue)} stroke="#243250" />
-        {/* cycle — the walls and corners */}
-        <path d="M8 64 H62 V150 H8 Z M138 64 H192 V150 H138 Z" fill={fill(1, hue)} stroke="#243250" />
+        <path d="M8 34 H192 V64 H8 Z" fill={fill("point")} stroke="#243250" />
+        {/* cycle — the walls and corners, each its own real count */}
+        <path d="M8 64 H62 V150 H8 Z" fill={fill("cycleL")} stroke="#243250" />
+        <path d="M138 64 H192 V150 H138 Z" fill={fill("cycleR")} stroke="#243250" />
         {/* rush — the slot, straight at the net */}
-        <path d="M62 64 H138 V150 H62 Z" fill={fill(0, hue)} stroke="#243250" />
+        <path d="M62 64 H138 V150 H62 Z" fill={fill("rush")} stroke="#243250" />
         <line x1="8" y1="34" x2="192" y2="34" stroke="#3b82f6" strokeWidth="3" opacity="0.7" />
         <line x1="8" y1="150" x2="192" y2="150" stroke="#ef4444" strokeWidth="2" opacity="0.6" />
         <rect x="84" y="150" width="32" height="9" fill="#1e2b45" stroke="#64748b" />
         <circle cx="100" cy="105" r="21" fill="none" stroke="#243250" />
-        <text x="100" y="52" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label(2)}</text>
-        <text x="100" y="62" textAnchor="middle" className="fill-slate-400" fontSize="7">POINT · {vol[2]}</text>
-        <text x="35" y="105" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label(1)}</text>
-        <text x="35" y="115" textAnchor="middle" className="fill-slate-400" fontSize="7">CYCLE · {vol[1]}</text>
-        <text x="165" y="105" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label(1)}</text>
-        <text x="165" y="115" textAnchor="middle" className="fill-slate-400" fontSize="7">CYCLE</text>
-        <text x="100" y="104" textAnchor="middle" className="fill-slate-100" fontSize="12" fontWeight="700">{label(0)}</text>
-        <text x="100" y="114" textAnchor="middle" className="fill-slate-300" fontSize="7">RUSH · {vol[0]}</text>
+        <text x="100" y="52" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label("point")}</text>
+        <text x="100" y="62" textAnchor="middle" className="fill-slate-400" fontSize="7">POINT · {vol("point")}</text>
+        <text x="35" y="105" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label("cycleL")}</text>
+        <text x="35" y="115" textAnchor="middle" className="fill-slate-400" fontSize="7">CYCLE · {vol("cycleL")}</text>
+        <text x="165" y="105" textAnchor="middle" className="fill-slate-200" fontSize="11" fontWeight="600">{label("cycleR")}</text>
+        <text x="165" y="115" textAnchor="middle" className="fill-slate-400" fontSize="7">CYCLE · {vol("cycleR")}</text>
+        <text x="100" y="104" textAnchor="middle" className="fill-slate-100" fontSize="12" fontWeight="700">{label("rush")}</text>
+        <text x="100" y="114" textAnchor="middle" className="fill-slate-300" fontSize="7">RUSH · {vol("rush")}</text>
       </svg>
       <div className="space-y-1">
-        {keys.map((k, i) => (
-          <div key={k} className="flex items-center gap-2 text-xs">
-            <div className="w-12 text-slate-400 capitalize">{k}</div>
+        {rows.map((r) => (
+          <div key={r.label} className="flex items-center gap-2 text-xs">
+            <div className="w-12 text-slate-400 capitalize">{r.label}</div>
             <div className="flex-1 h-2.5 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
-              <div className="h-full" style={{ width: `${share[i] * 100}%`, background: `hsl(${hue}, 70%, 52%)` }} />
+              <div className="h-full" style={{ width: `${r.share * 100}%`, background: `hsl(${hue}, 70%, 52%)` }} />
             </div>
             <div className="w-28 text-right tnum text-slate-300">
-              {mode === "G"
-                ? `${z[k].sv}/${z[k].sa} saved`
-                : `${z[k].g}G on ${z[k].s}`}
+              {mode === "G" ? `${r.sv}/${r.sa} saved` : `${r.g}G on ${r.s}`}
             </div>
           </div>
         ))}

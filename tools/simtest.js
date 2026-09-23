@@ -778,7 +778,7 @@ const CHECKS = {
     section("Shot breakdown by zone");
     const G = A.newGame(0, { seed: 161, rules: { seasonLen: 41 } });
     simSeason(A, G);
-    const Z = ["rush", "cycle", "point"];
+    const Z = A.ZONE_KEYS; // rush, cycleL, cycleR, point
     const skaters = A.playersOf(G).filter((p) => p.pos !== "G" && p.season.sog > 0);
     const badS = skaters.filter((p) => {
       const zs = Z.reduce((s, k) => s + p.season.z[k].s, 0);
@@ -802,14 +802,24 @@ const CHECKS = {
       `shooters and goalies agree zone by zone (${sSum.join("/")})`);
     const total = sSum.reduce((a, b) => a + b, 0);
     ok(sSum.every((n) => n / total > 0.1), `every zone gets real volume (${sSum.map((n) => (n / total * 100).toFixed(0) + "%").join(" ")})`);
-    // And the danger ordering has to hold: rush beats cycle beats point.
-    const pct = Z.map((k) => {
-      const s = skaters.reduce((a, p) => a + p.season.z[k].s, 0);
-      const g = skaters.reduce((a, p) => a + p.season.z[k].g, 0);
+    // And the danger ordering has to hold: rush beats cycle beats point, with
+    // the two cycle walls combined back into one figure for the comparison.
+    const rateOf = (keys) => {
+      const s = skaters.reduce((a, p) => a + keys.reduce((x, k) => x + p.season.z[k].s, 0), 0);
+      const g = skaters.reduce((a, p) => a + keys.reduce((x, k) => x + p.season.z[k].g, 0), 0);
       return g / s;
-    });
+    };
+    const pct = [rateOf(["rush"]), rateOf(["cycleL", "cycleR"]), rateOf(["point"])];
     ok(pct[0] > pct[1] && pct[1] > pct[2],
       `rush > cycle > point on conversion (${pct.map((x) => (x * 100).toFixed(1)).join(" / ")}%)`);
+
+    // The cycle used to be one number mirrored into two identical boxes on
+    // screen; the walls are independent draws now, so over a full season
+    // they should both carry real volume and not land on the same count.
+    const cycL = skaters.reduce((s, p) => s + p.season.z.cycleL.s, 0);
+    const cycR = skaters.reduce((s, p) => s + p.season.z.cycleR.s, 0);
+    ok(cycL > 0 && cycR > 0, `both cycle walls carry real volume (${cycL} left / ${cycR} right)`);
+    ok(cycL !== cycR, `the two walls are independent draws, not a mirrored copy (${cycL} vs ${cycR})`);
   },
 
   // Where the puck ended up: on goal, wide, or blocked — and whereabouts in the
@@ -1220,7 +1230,8 @@ const CHECKS = {
     simSeason(A, G);
     const Z = A.ZONE_KEYS;
     const prof = G.teams.map((t) => {
-      const f = { rush: 0, cycle: 0, point: 0 }, a = { rush: 0, cycle: 0, point: 0 };
+      const f = {}, a = {};
+      Z.forEach((k) => { f[k] = 0; a[k] = 0; });
       A.rosterOf(G, t.id, true).forEach((p) => {
         if (!p.season.z) return;
         if (p.pos === "G") Z.forEach((k) => { a[k] += p.season.z[k].sa; });
