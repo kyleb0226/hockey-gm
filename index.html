@@ -9043,6 +9043,10 @@ function CompareModal({ G, initial, onClose }) {
   const [b, setB] = useState(initial ? initial.b : null);
   const pa = a != null ? G.players[a] : null;
   const pb = b != null ? G.players[b] : null;
+  // Both ways in here now refuse a mismatch before it arrives — PlayerPicker's
+  // matchKind once inside, RosterTab/StatsTab's Cmp queue before that — so
+  // this is a guard against a future entry point, not a path either of the
+  // current ones can reach.
   const sameType = pa && pb && (pa.pos === "G") === (pb.pos === "G");
   return (
     <Modal wide title="Compare players" onClose={onClose}>
@@ -10304,6 +10308,11 @@ function RosterTab({ G, setG, openPlayer, notify, onCompare }) {
   const toggleCompare = (p) => {
     setCmpSel((sel) => {
       if (sel.includes(p.id)) return sel.filter((id) => id !== p.id);
+      // Same rule PlayerPicker's matchKind enforces inside the modal: a
+      // skater/goalie pairing is never valid, so a mismatched second pick
+      // restarts the queue with just him rather than opening the modal onto
+      // its "pick two of the same kind" dead end.
+      if (sel.length === 1 && (G.players[sel[0]].pos === "G") !== (p.pos === "G")) return [p.id];
       const next = sel.length >= 2 ? [sel[1], p.id] : [...sel, p.id];
       if (next.length === 2) { onCompare(next[0], next[1]); return [next[0]]; }
       return next;
@@ -11051,6 +11060,10 @@ function StatsTab({ G, openPlayer, onCompare }) {
   const toggleCompare = (p) => {
     setCmpSel((sel) => {
       if (sel.includes(p.id)) return sel.filter((id) => id !== p.id);
+      // Switching mode (skaters <-> goalies) between the two clicks was the
+      // one way this table could still queue a mismatched pair — same fix as
+      // RosterTab: a mismatched second pick restarts the queue with just him.
+      if (sel.length === 1 && (G.players[sel[0]].pos === "G") !== (p.pos === "G")) return [p.id];
       const next = sel.length >= 2 ? [sel[1], p.id] : [...sel, p.id];
       if (next.length === 2) { onCompare(next[0], next[1]); return [next[0]]; }
       return next;
