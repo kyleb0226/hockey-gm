@@ -5094,7 +5094,11 @@ function finishSeason(G) {
       && G.boardConfidence <= FIRING_LINE && !votedOut) {
     news(G, `Your partners considered a vote and let it lie. Your stake spoke for you.`, "info");
   }
-  if (!shielded && champ !== G.userTeam && G.boardConfidence <= FIRING_LINE && !G.fired
+  /* A multi-year sim runs the club on autopilot. The board judges the autopilot, not you,
+     so it can't sack you while you're away (confidence still moves, so you come back to
+     whatever mood the room is in, and the next season you manage yourself counts). */
+  const away = !!G._simAway;
+  if (!shielded && !away && champ !== G.userTeam && G.boardConfidence <= FIRING_LINE && !G.fired
       && (myShare(G, G.userTeam) <= 0 || votedOut)) {
     G.tenure = (G.tenure || []).concat([{
       teamId: G.userTeam,
@@ -5993,6 +5997,55 @@ function offseasonAction(G) {
     default: return null;
   }
 }
+/* ----------------------------- years at a time -----------------------------
+ * `simOneYear` is the engine half of the header's "Sim year": the rest of the
+ * schedule, the postseason, and every offseason step (the draft still honours your
+ * shortlist) into next October. `simYears` repeats it and, if you haven't told the
+ * club to run itself, lends it the balanced style for the duration — the documented
+ * "sim and walk away" baseline without it is seven straight seasons last. It hands
+ * back one report row per season: your club's line plus every trophy your players won.
+ * Bounded by a step budget, like simFullYear, so a stage that stops advancing stops it.
+ * ------------------------------------------------------------------------- */
+function simOneYear(G) {
+  let guard = 0;
+  if (G.phase === "regular") simDays(G, G.schedule.length);
+  while (G.phase === "playoffs" && guard++ < 40) simPlayoffRound(G);
+  while (G.phase === "offseason" && guard++ < 400) doOffseasonStep(G);
+  return G;
+}
+function simYearReport(G, year) {
+  const row = (G.gmSeasons || []).find((s) => s.year === year);
+  if (!row) return null;
+  const honours = [];
+  playersOf(G).forEach((p) => {
+    (p.trophies || []).forEach((t) => {
+      if (t.year === year && (p.teamId === row.teamId)) honours.push(`${AWARD_LABEL[t.award] || t.award}: ${fullName(p)}`);
+    });
+  });
+  const h = (G.history || []).find((x) => x.year === year);
+  const champ = h && h.champion != null && G.teams[h.champion] ? G.teams[h.champion].abbr : null;
+  return { ...row, honours, champ };
+}
+function simYears(G, n) {
+  const lent = !autoStyle(G);
+  if (lent) setRule(G, "autoManage", "balanced");
+  G._simAway = true;
+  const rows = [];
+  try {
+    for (let i = 0; i < n; i++) {
+      const year = G.year;
+      simOneYear(G);
+      const r = simYearReport(G, year);
+      if (r) rows.push(r);
+      if (G.fired || G.phase !== "regular") break;
+    }
+  } finally {
+    G._simAway = false;
+    if (lent) setRule(G, "autoManage", false);
+  }
+  return rows;
+}
+
 function doOffseasonStep(G) {
   const st = offseasonStage(G);
   if (st === "review") { G.offseasonStep = "draft"; return G; }
@@ -10142,6 +10195,44 @@ function MonthStars({ G, openPlayer }) {
   );
 }
 
+/* After a multi-year sim: one row per season for the club you ran. */
+function SimReportCard({ G, setG }) {
+  const rows = G.simReport || [];
+  if (!rows.length) return null;
+  const w = rows.reduce((a, r) => a + r.w, 0), l = rows.reduce((a, r) => a + r.l, 0), otl = rows.reduce((a, r) => a + (r.otl || 0), 0);
+  const cups = rows.filter((r) => r.cup).length, po = rows.filter((r) => r.playoffs).length;
+  return (
+    <Section title={`While you were away — ${rows[0].year}–${rows[rows.length - 1].year}`} className="p-3"
+      right={<button className="text-xs text-slate-400 hover:text-slate-200" onClick={() => { const g2 = { ...G, simReport: [] }; setG(g2); }}>Dismiss</button>}>
+      <div className="text-sm text-slate-300 pt-1 pb-2">
+        <b className="tnum">{w}-{l}-{otl}</b> · {po} playoff trip{po === 1 ? "" : "s"}{cups ? <span className="text-amber-300 font-semibold"> · 🏆 ×{cups}</span> : null}
+        {G.fired ? <span className="text-rose-300"> · the board let you go</span> : null}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm tnum">
+          <thead><tr className="text-slate-500 text-xs border-b border-[#1d2940]">
+            <th className="text-left py-1">Year</th><th>Club</th><th>Record</th><th>Pts</th><th>Playoffs</th><th className="text-left">Honours</th><th>Board</th><th>Cup</th>
+          </tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.year} className={`border-b border-[#16223a] ${r.cup ? "bg-amber-500/10" : ""}`}>
+                <td className="py-1">{r.year}</td>
+                <td className="text-center">{r.abbr}</td>
+                <td className="text-center">{r.w}-{r.l}-{r.otl}</td>
+                <td className="text-center">{r.pts}</td>
+                <td className="text-center">{r.cup ? "🏆 Cup" : r.playoffs ? `out in round ${(r.rounds || 0) + 1}` : "—"}</td>
+                <td className="text-left text-xs text-slate-300">{r.honours.join(" · ") || "—"}</td>
+                <td className={`text-center ${r.met ? "text-emerald-300" : "text-slate-400"}`}>{r.met ? "met" : "missed"}</td>
+                <td className="text-center text-xs text-slate-400">{r.champ || "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Section>
+  );
+}
+
 function HomeTab({ G, setG, go, openPlayer }) {
   const t = G.teams[G.userTeam];
   const today = G.schedule[G.day] || [];
@@ -10158,6 +10249,7 @@ function HomeTab({ G, setG, go, openPlayer }) {
   const recent = G.results.slice(-8).reverse();
   return (
     <div className="space-y-3">
+      <SimReportCard G={G} setG={setG} />
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         <Stat label="Record" value={`${t.w}-${t.l}-${t.otl}`} sub={`${t.pts} pts`} />
         <Stat label="Goals" value={`${t.gf}–${t.ga}`} sub={`${t.gf - t.ga > 0 ? "+" : ""}${t.gf - t.ga} diff`} />
@@ -14486,13 +14578,34 @@ function App() {
     if (!G || busy) return;
     setBusy(true);
     const g2 = migrate(JSON.parse(JSON.stringify(G)));
-    let guard = 0;
-    if (g2.phase === "regular") simDays(g2, g2.schedule.length);
-    while (g2.phase === "playoffs" && guard++ < 40) simPlayoffRound(g2);
-    while (g2.phase === "offseason" && guard++ < 400) doOffseasonStep(g2);
+    simOneYear(g2);
     setG(g2);
     setBusy(false);
     go("home");
+  }, [G, busy, go]);
+
+  /* Several years, one at a time so the header can show progress. The club runs
+     itself for the duration (simYears lends it the balanced style if you haven't
+     picked one) and the board can't sack you while you're away. The rows land on
+     G.simReport, which Home renders as "While you were away". */
+  const [simProg, setSimProg] = useState(null);
+  const simManyYears = useCallback((n) => {
+    if (!G || busy) return;
+    if (typeof window !== "undefined" && window.confirm &&
+        !window.confirm(`Sim ${n} years? The club runs itself until October ${G.year + n}.`)) return;
+    setBusy(true);
+    let g2 = migrate(JSON.parse(JSON.stringify(G)));
+    g2.simReport = [];
+    const step = (i) => {
+      const rows = simYears(g2, 1);
+      g2.simReport = g2.simReport.concat(rows);
+      const done = i + 1 >= n || g2.fired || !rows.length;
+      if (done) { setSimProg(null); setBusy(false); setG(g2); go("home"); return; }
+      setSimProg({ done: i + 1, total: n });
+      setTimeout(() => step(i + 1), 20);
+    };
+    setSimProg({ done: 0, total: n });
+    setTimeout(() => step(0), 20);
   }, [G, busy, go]);
 
   // Keyboard: d for a day, w for a week, ⌘K or ? for the palette.
@@ -14589,6 +14702,11 @@ function App() {
                 expiring players walk while you're not looking. */}
             <button className={btnGhost} disabled={busy} title="Play the rest of this year and roll into the next"
               onClick={() => simFullYear()}>Sim year ⏭</button>
+            <button className={btnGhost} disabled={busy} title="Five seasons with the club running itself"
+              onClick={() => simManyYears(5)}>5 yrs</button>
+            <button className={btnGhost} disabled={busy} title="Ten seasons with the club running itself"
+              onClick={() => simManyYears(10)}>10 yrs</button>
+            {simProg ? <span className="text-xs text-slate-400 tnum">Year {simProg.done + 1}/{simProg.total}…</span> : null}
             <button className={btnGhost} onClick={() => setPalette(true)} title="⌘K">⌘K</button>
             <button className={btnGhost} onClick={() => setShowSlots(true)}>💾</button>
             <button className={btnGhost} onClick={() => setShowRules(true)}>📋</button>

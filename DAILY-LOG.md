@@ -186,3 +186,8 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   an `ErrorBoundary` at the mount, and a "To deadline" header button. New `monthly` and `shocks`
   checks. Browser-verified in Chromium (Home stars card, Deadline rumour card, button) with no
   console errors.
+- 2026-09-28 · M · (Manual session.) Years at a time: `simOneYear`/`simYears` engine functions behind
+  the header's "Sim year" plus new "5 yrs"/"10 yrs" buttons; the club borrows the balanced auto-manage
+  style when none is set, the board can't sack you while you're away (`G._simAway`), and a
+  "While you were away" report (`G.simReport`, `SimReportCard`) lands on Home. New `simYears` check.
+  Browser-verified (5 years in ~16s, no console errors).

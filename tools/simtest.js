@@ -22,7 +22,7 @@ const ROOT = path.join(__dirname, "..");
 
 // Top-level const/let don't become vm globals, so the epilogue publishes these.
 const EXPORTS = [
-  "rollShocks", "MONTHS", "monthOf", "tickMonth", "finishMonth", "monthlyStars", "tickRumours", "RUMOUR_WINDOW",
+  "simOneYear", "simYears", "rollShocks", "MONTHS", "monthOf", "tickMonth", "finishMonth", "monthlyStars", "tickRumours", "RUMOUR_WINDOW",
   "newGame", "migrate", "simDay", "simDays", "simGame", "applyGame",
   "buildSchedule", "endRegularSeason", "buildBracket", "simPlayoffRound", "finishSeason",
   "startNextSeason", "buildDraftClass", "autoDraft", "draftPlayer", "pickOwner", "inPlayoffs",
@@ -5445,6 +5445,26 @@ const CHECKS = {
     ok(gone.length > 0 && gone.every((p) => p.retired && p.teamId == null && !G.freeAgents.includes(p.id)),
       `a career-ending injury really ends the career (${gone.length})`);
     ok(G.teams.every((t) => A.rosterOf(G, t.id).length >= A.ROSTER_MIN), "and every club can still dress a side");
+  },
+
+  // Years at a time: the club runs itself (lent the balanced style), the board can't
+  // sack you while you're away, and every season comes back as a report row.
+  simYears(A) {
+    section("Sim years");
+    const G = A.newGame(0, { seed: 919, rules: { seasonLen: 41 } });
+    const y0 = G.year;
+    const rows = A.simYears(G, 3);
+    ok(rows.length === 3 && G.year === y0 + 3 && G.phase === "regular", `three seasons simmed (${y0} → ${G.year})`);
+    ok(rows.every((r) => r.w + r.l + r.otl === 41), "each row is a complete season");
+    ok(rows.every((r) => r.champ), `every season crowned a champion (${rows.map((r) => r.champ).join(", ")})`);
+    ok(A.ruleValue(G, "autoManage") === false, "the lent auto-manage style is handed back");
+    ok(!G._simAway && !G.fired, "and the board didn't sack you while you were away");
+    ok(G.teams.every((t) => A.rosterOf(G, t.id).length >= A.ROSTER_MIN), "every club can dress a side afterwards");
+    const mine = A.rosterOf(G, G.userTeam).length;
+    ok(mine >= A.ROSTER_MIN, `including yours (${mine})`);
+    A.setRule(G, "autoManage", "build");
+    A.simYears(G, 1);
+    ok(A.ruleValue(G, "autoManage") === "build", "a style you chose yourself is left alone");
   },
 
   determinism(A) {

@@ -47,7 +47,9 @@ for that sport, not translated knob-for-knob.
 | Individual streaks | hit streaks | scoring runs (`p.gStreak`) | point streaks |
 | Player compare | Players tab | Players tab (`CompareCard`) | `CompareModal` |
 | Sim to the deadline | Hub "Sim to Deadline" | Hub "Skip 7 weeks" | header "To deadline" |
-| One-press full-year / multi-season sim | — (offseason lives in `OffseasonHub`) | ✓ (auto-manage) | `simFullYear` (`autoManage`) |
+| Multi-season sim (club runs itself) | `simToNextSeason` — Hub "Sim ahead" 1/5/10 | `SimYears` "Auto-sim seasons" (1–100) | `simYears` — header "Sim year" / 5 / 10 |
+| "While you were away" report | `SimReport` (`G.simReport`) | `SimReportCard` (`G.simReport`) | `SimReportCard` (`G.simReport`) |
+| Job safe during long sims | ✓ (Settings → "Job risk in long sims") | ✓ (sacking muted) | ✓ (`G._simAway`) |
 | HoF with voting ballot | ✓ | inducted on retirement | inducted after `HOF_WAIT` |
 | Draft | ✓ (+ college, HS, IFA) | — (youth academy) | ✓ |
 
@@ -630,6 +632,12 @@ times in one unbroken spell and `G.tenure` grew an entry each time. `!G.fired` i
 **A mandate reads recent seasons, not just team strength.** A roster of 21-year-olds on entry deals
 still rates as competitive on paper, which is how a club that finished last four years running kept
 being told to win a round. Two seasons under 60 points and out of the playoffs earns a rebuild.
+
+**`simOneYear` / `simYears`** are the engine half of the header's "Sim year" and the new "5 yrs" / "10 yrs"
+buttons. `simYears` lends the club the `balanced` auto-manage style when you haven't chosen one (and hands it
+back), sets `G._simAway` so the board can't sack you for the autopilot's seasons, and returns one row per year
+(`simYearReport`: your `gmSeasons` line + your players' trophies + the champion) that lands on `G.simReport`
+and renders as "While you were away" on Home. The `simYears` check pins all of it.
 
 `simFullYear` plays the rest of the schedule, the postseason, the draft and the market in one press.
 Each stage calls the same function the buttons do — the draft still runs through `doOffseasonStep`,
