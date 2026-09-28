@@ -22,6 +22,7 @@ const ROOT = path.join(__dirname, "..");
 
 // Top-level const/let don't become vm globals, so the epilogue publishes these.
 const EXPORTS = [
+  "rollShocks", "MONTHS", "monthOf", "tickMonth", "finishMonth", "monthlyStars", "tickRumours", "RUMOUR_WINDOW",
   "newGame", "migrate", "simDay", "simDays", "simGame", "applyGame",
   "buildSchedule", "endRegularSeason", "buildBracket", "simPlayoffRound", "finishSeason",
   "startNextSeason", "buildDraftClass", "autoDraft", "draftPlayer", "pickOwner", "inPlayoffs",
@@ -5384,6 +5385,66 @@ const CHECKS = {
     simSeason(A, R); simPlayoffs(A, R);
     ok(R.teams.every((t) => t.gp === 82), "and it plays another full season");
     ok(!R.teams.some((t) => A.capHit(R, t.id) > A.rules(R).capAmount), "still under the cap at the end of it");
+  },
+
+  // Three stars of the month and the deadline rumour mill: real reads of the
+  // season, and neither may draw from the seeded RNG.
+  monthly(A) {
+    section("Stars of the month");
+    const G = A.newGame(0, { seed: 77 });
+    simSeason(A, G);
+    const ms = G.monthStars || [];
+    ok(ms.length === A.MONTHS.length, `every month is awarded (${ms.length} of ${A.MONTHS.length})`);
+    ok(ms.every((m) => m.stars.length === 3), "each month names three stars");
+    ok(ms.every((m) => new Set(m.stars.map((x) => x.id)).size === 3), "three different players");
+    const goalies = ms.reduce((n, m) => n + m.stars.filter((x) => x.pos === "G").length, 0);
+    ok(goalies >= 1 && goalies <= 10, `goalies can win it without owning it (${goalies} of ${ms.length * 3})`);
+    const firsts = A.playersOf(G).reduce((n, p) => n + (p.potm || 0), 0);
+    ok(firsts === ms.length, `first-star counts land on the players (${firsts})`);
+    const top = ms.map((m) => m.stars[0].line).join(" | ");
+    ok(ms.every((m) => m.stars[0].pos === "G" || /(\d+) P$/.test(m.stars[0].line) && +m.stars[0].line.match(/(\d+) P$/)[1] >= 8),
+      `a first star had a real month (${top})`);
+    ok(G._month == null && G._gSnap == null, "the month tracker is closed at season's end");
+
+    section("Rumour mill");
+    const H = A.newGame(0, { seed: 78 });
+    const dl = A.deadlineDay(H);
+    while (H.day < dl - A.RUMOUR_WINDOW - 1) A.simDay(H);
+    const seed = H.seed;
+    for (let i = 0; i < 40; i++) A.tickRumours(H);
+    ok(H.seed === seed, "rumours draw nothing from the seeded RNG");
+    A.finishMonth(H, 99);
+    ok(H.seed === seed, "nor does the monthly award");
+    while (H.day < dl) A.simDay(H);
+    const talk = H.news.filter((n) => n.kind === "rumour");
+    ok(talk.length >= 2 && talk.length <= 20, `the wire carries talk before the deadline (${talk.length})`);
+    ok(new Set(talk.map((n) => n.text)).size === talk.length, "and doesn't repeat itself");
+    A.simDay(H); A.simDay(H);
+    const after = H.news.filter((n) => n.kind === "rumour" && n.day >= dl).length;
+    ok(after === 0, "and goes quiet once the deadline passes");
+  },
+
+  // League shocks: off draws nothing; on, they happen and leave the save coherent.
+  shocks(A) {
+    section("League shocks");
+    const G = A.newGame(0, { seed: 606, rules: { seasonLen: 41 } });
+    const s0 = G.seed;
+    A.rollShocks(G);
+    ok(G.seed === s0 && !(G.shocks || []).length, "switched off, a summer draws nothing");
+    A.setRule(G, "shocks", true);
+    let seen = [];
+    for (let y = 0; y < 4; y++) {
+      simSeason(A, G); simPlayoffs(A, G);
+      seen = (G.shocks || []).slice();
+      A.autoDraft(G, false); A.startNextSeason(G);
+    }
+    ok(seen.length >= 1, `shocks happen over four summers (${seen.map((x) => x.kind).join(", ")})`);
+    // Roll summers on the spot until the rarest one turns up, so the next line can't pass vacuously.
+    for (let i = 0; i < 60 && !A.playersOf(G).some((p) => p.careerEnding); i++) A.rollShocks(G);
+    const gone = A.playersOf(G).filter((p) => p.careerEnding);
+    ok(gone.length > 0 && gone.every((p) => p.retired && p.teamId == null && !G.freeAgents.includes(p.id)),
+      `a career-ending injury really ends the career (${gone.length})`);
+    ok(G.teams.every((t) => A.rosterOf(G, t.id).length >= A.ROSTER_MIN), "and every club can still dress a side");
   },
 
   determinism(A) {

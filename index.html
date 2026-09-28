@@ -261,6 +261,7 @@ const RULES_DEFAULT = {
   pressers: false,         // the media ask, and what you say costs you something
   pickProtection: false,   // traded picks can carry protections
   ownership: false,        // you are paid, and you can buy in
+  shocks: false,           // rare offseason bolts from the blue
 };
 
 /* The depth toggles, described once. `group` buckets them on the settings
@@ -319,6 +320,9 @@ const DEPTH_RULES = [
     opts: [[false, "Off"], [true, "On"]] },
   { k: "worldCup", deep: true, group: "The game", label: "World tournament",
     blurb: "Every fourth winter the break belongs to the countries instead. Your best man comes back with a medal, or doesn't.",
+    opts: [[false, "Off"], [true, "On"]] },
+  { k: "shocks", deep: true, group: "The game", label: "League shocks",
+    blurb: "Once in a while the summer brings something nobody planned for: a career ended by injury, a room that falls apart, a generational kid in the draft.",
     opts: [[false, "Off"], [true, "On"]] },
   { k: "contractBonuses", deep: true, group: "The game", label: "Bonuses",
     blurb: "Pay a man up front and he'll take less — but you can never buy that part back. Kids and old men can also play for bonuses.",
@@ -3887,12 +3891,195 @@ function news(G, text, kind) {
   if (G.news.length > 120) G.news.pop();
 }
 
+/* ---------------------------- the month's stars ----------------------------
+ * The league names three stars every month. Brought over from baseball-gm's
+ * Player of the Month, written for hockey: one ranking across skaters AND
+ * goalies, plus the month's best rookie.
+ *
+ * It draws NOTHING — it is pure accounting over games already played — so it
+ * cannot move a calibrated seed. Skater lines are read from `G.results`
+ * scorers (which already exist for every game) rather than snapshotted, so the
+ * only stored state is a five-number line per NHL GOALIE at the month's start
+ * and the handful of names that actually win. The season is split into
+ * `MONTHS.length` equal slices of the calendar, so a short season still gets
+ * six awards.
+ * ------------------------------------------------------------------------- */
+const MONTHS = ["October", "November", "December", "January", "February", "March"];
+function monthOf(G) {
+  const len = Math.max(1, G.schedule.length);
+  return Math.min(MONTHS.length - 1, Math.floor(G.day / (len / MONTHS.length)));
+}
+function snapshotGoalies(G) {
+  const snap = {};
+  playersOf(G).forEach((p) => {
+    if (p.pos !== "G" || p.teamId == null || p.farm || p.retired) return;
+    const s = p.season;
+    snap[p.id] = [s.gp || 0, s.w || 0, s.sa || 0, s.sv || 0, s.so || 0];
+  });
+  G._gSnap = snap;
+  G._monthStart = G.day;
+}
+/* Minimum starts for a goalie to be ranked — a backup's two hot nights are not
+   a month. Scaled so a 41-game season still has a sensible bar. */
+const MONTH_MIN_STARTS = 5;
+function monthlyStars(G, fromDay, toDay) {
+  const lines = {};
+  const line = (id) => (lines[id] = lines[id] || { g: 0, a: 0 });
+  (G.results || []).forEach((r) => {
+    if (r.playoff || r.day < fromDay || r.day >= toDay) return;
+    (r.scorers || []).forEach((s) => {
+      line(s.id).g++;
+      (s.a || []).forEach((aid) => { line(aid).a++; });
+    });
+  });
+  const cands = [];
+  Object.entries(lines).forEach(([id, l]) => {
+    const p = G.players[id];
+    if (!p || p.pos === "G" || p.teamId == null) return;
+    cands.push({ p, kind: "S", g: l.g, a: l.a, score: l.g * 1.25 + l.a });
+  });
+  // Goalies: saves above what an average goalie would have made on the same shots.
+  const snap = G._gSnap || {};
+  const gl = [];
+  playersOf(G).forEach((p) => {
+    if (p.pos !== "G" || p.teamId == null || p.farm || p.retired) return;
+    const s = p.season, o = snap[p.id] || [0, 0, 0, 0, 0];
+    const d = { gp: (s.gp || 0) - o[0], w: (s.w || 0) - o[1], sa: (s.sa || 0) - o[2], sv: (s.sv || 0) - o[3], so: (s.so || 0) - o[4] };
+    if (d.sa > 0) gl.push({ p, d });
+  });
+  const lgSa = gl.reduce((x, y) => x + y.d.sa, 0), lgSv = gl.reduce((x, y) => x + y.d.sv, 0);
+  const avgSv = lgSa ? lgSv / lgSa : 0.9;
+  const minStarts = Math.max(3, Math.round(MONTH_MIN_STARTS * ruleValue(G, "seasonLen") / 82));
+  gl.forEach(({ p, d }) => {
+    if (d.gp < minStarts) return;
+    const gsaa = d.sv - d.sa * avgSv;
+    cands.push({ p, kind: "G", ...d, score: gsaa * 1.3 + d.w * 0.7 + d.so });
+  });
+  cands.sort((a, b) => b.score - a.score || a.p.id - b.p.id);
+  const rookie = cands.filter((c) => c.kind === "S" && c.p.rookie).sort((a, b) => b.score - a.score || a.p.id - b.p.id)[0] || null;
+  return { stars: cands.slice(0, 3), rookie };
+}
+function monthStarLine(c) {
+  if (c.kind === "G") return `${c.w}-${c.gp - c.w} · ${c.sa ? (c.sv / c.sa).toFixed(3).replace(/^0/, "") : "—"}${c.so ? ` · ${c.so} SO` : ""}`;
+  return `${c.g} G · ${c.a} A · ${c.g + c.a} P`;
+}
+function finishMonth(G, m) {
+  const from = G._monthStart == null ? 0 : G._monthStart;
+  const { stars, rookie } = monthlyStars(G, from, G.day);
+  if (!stars.length) return G;
+  const slim = (c) => ({ id: c.p.id, name: fullName(c.p), pos: c.p.pos, t: c.p.teamId, line: monthStarLine(c) });
+  G.monthStars = G.monthStars || [];
+  if (G.monthStars.some((x) => x.m === m)) return G;
+  G.monthStars.push({ m, stars: stars.map(slim), rookie: rookie ? slim(rookie) : null });
+  stars.forEach((c, i) => {
+    c.p.monthStars = (c.p.monthStars || 0) + 1;
+    if (i === 0) c.p.potm = (c.p.potm || 0) + 1;
+  });
+  const first = stars[0];
+  const mine = stars.some((c) => c.p.teamId === G.userTeam) || (rookie && rookie.p.teamId === G.userTeam);
+  news(G, `${MONTHS[m]}'s first star: ${fullName(first.p)} (${G.teams[first.p.teamId].abbr}) — ${monthStarLine(first)}.`,
+    mine ? "good" : "info");
+  return G;
+}
+/* Called once a day. Closes the month the calendar has just left. */
+function tickMonth(G) {
+  if (G.phase !== "regular") return G;
+  const m = monthOf(G);
+  if (G._month == null) { G._month = m; snapshotGoalies(G); return G; }
+  if (m !== G._month) { finishMonth(G, G._month); G._month = m; snapshotGoalies(G); }
+  return G;
+}
+/* The regular season ended mid-month: award the last one. */
+function closeFinalMonth(G) {
+  if (G._month != null) finishMonth(G, G._month);
+  G._month = null; G._gSnap = null; G._monthStart = null;
+  return G;
+}
+
+/* ------------------------------- the rumour mill ---------------------------
+ * From baseball-gm. For the three weeks before the deadline the wire carries
+ * talk: which non-contender is shopping a rental, which contender is kicking
+ * tyres, who has asked out. It is built from `deadlineBoard` — the same
+ * buyer/seller split and rental list `aiDeadlineMoves` actually trades from —
+ * so a rumour is a real read of the market, not noise.
+ *
+ * Every choice is `hashUnit` off the year and the day, so it draws nothing
+ * from `rnd(G)` and the season replays identically with or without it.
+ * ------------------------------------------------------------------------- */
+const RUMOUR_WINDOW = 21;
+/* Which unit a club most needs: its top six forwards, top four defence or
+   best goalie, each measured against the league's average of the same. */
+function weakestUnit(G, teamId) {
+  const top = (tid, pos, n) => {
+    const r = rosterOf(G, tid).filter((p) => (pos === "F" ? p.pos !== "G" && p.pos !== "D" : p.pos === pos))
+      .map((p) => p.ovr).sort((a, b) => b - a).slice(0, n);
+    return r.length ? r.reduce((x, y) => x + y, 0) / r.length : 0;
+  };
+  const units = [["F", 6], ["D", 4], ["G", 1]];
+  let worst = "F", gap = Infinity;
+  units.forEach(([u, n]) => {
+    const lg = G.teams.reduce((x, t) => x + top(t.id, u, n), 0) / G.teams.length;
+    const d = top(teamId, u, n) - lg;
+    if (d < gap) { gap = d; worst = u; }
+  });
+  return worst;
+}
+function tickRumours(G) {
+  if (G.phase !== "regular") return G;
+  const d = daysToDeadline(G);
+  if (d <= 0 || d > RUMOUR_WINDOW) return G;
+  const h = (k) => hashUnit(G.year * 1009 + G.day * 37 + k);
+  if (h(1) > 0.4) return G;
+  const b = deadlineBoard(G);
+  const abbr = (id) => G.teams[id].abbr;
+  const pickFrom = (arr, k) => arr[Math.floor(h(k) * arr.length)];
+  const roll = h(2);
+  let msg = null, subj = null;
+  if (roll < 0.4 && b.rentals.length) {
+    // A seller shopping a rental — weighted toward the best of them.
+    const r = b.rentals[Math.floor(h(3) * h(4) * b.rentals.length)];
+    subj = r.p.id;
+    msg = `Rumour: ${abbr(r.from)} are taking calls on ${fullName(r.p)} (${r.p.pos}, ${r.p.ovr}). Expiring deal; the ask is a ${r.round === 1 ? "first" : "second"}.`;
+  } else if (roll < 0.75 && b.rentals.length && b.buyers.length) {
+    const buyer = pickFrom(b.buyers.slice(0, 8), 5);
+    const r = pickFrom(b.rentals.slice(0, 6), 6);
+    if (buyer !== r.from) {
+      subj = r.p.id;
+      msg = `Rumour: ${abbr(buyer)} scouts were in the building to watch ${fullName(r.p)} of ${abbr(r.from)}.`;
+    }
+  } else {
+    // Somebody who has asked out — the loudest rumour in any season. Otherwise
+    // a contender's real weak spot: whichever of its top six forwards, top four
+    // defence or starting goalie sits furthest below the league's.
+    const un = unhappyMarket(G);
+    if (un.length && h(9) < 0.5) {
+      const u = pickFrom(un, 7);
+      subj = u.p.id;
+      msg = `Rumour: ${fullName(u.p)} wants out of ${G.teams[u.team] ? G.teams[u.team].city : "town"}, and clubs know it.`;
+    } else if (b.buyers.length) {
+      const buyer = pickFrom(b.buyers.slice(0, 10), 8);
+      const need = weakestUnit(G, buyer);
+      const what = { F: "a top-six forward", D: "a top-four defenceman", G: "a starting goaltender" }[need];
+      subj = `need${buyer}`;
+      msg = `Rumour: ${G.teams[buyer].city} are working the phones for ${what} before the deadline.`;
+    }
+  }
+  if (!msg) return G;
+  G._rumourRecent = G._rumourRecent || [];
+  if (G._rumourRecent.includes(subj)) return G;
+  G._rumourRecent.push(subj);
+  if (G._rumourRecent.length > 6) G._rumourRecent.shift();
+  news(G, msg, "rumour");
+  return G;
+}
+
 /* --------------------------------- one day -------------------------------- */
 
 function simDay(G) {
   if (G.phase !== "regular") return G;
   const day = G.schedule[G.day];
   if (!day) { endRegularSeason(G); return G; }
+  tickMonth(G);
   if (!G.lastPlayed) G.lastPlayed = new Array(G.teams.length).fill(-9);
   const playedToday = new Set();
   day.forEach((fx) => {
@@ -3924,6 +4111,7 @@ function simDay(G) {
     checkPromises(G); demandOffers(G); rollHoldouts(G); aiAnswerDemands(G);
   }
   checkMilestones(G);
+  tickRumours(G);
   // The media, if there's anything worth asking. Reads state; draws nothing.
   if (!G.presser) { const q = pickPresser(G); if (q) G.presser = q; }
   // Clubs ring about listed players every few days rather than instantly.
@@ -4259,6 +4447,7 @@ function simPlayoffRound(G) {
 
 function endRegularSeason(G) {
   G.phase = "playoffs";
+  closeFinalMonth(G);
   updateRecords(G);
   computeAwards(G);
   // The affiliates settle their own championship before the Cup gets going.
@@ -5117,6 +5306,62 @@ function finishSeason(G) {
   // it walks into is one it can actually roster.
   G.teams.forEach((t) => deferPicksIfFull(G, t.id));
   buildDraftClass(G);
+  rollShocks(G);
+  return G;
+}
+
+/* ------------------------------- league shocks -----------------------------
+ * From soccer-gm's black-swan events, cut down to the three that make sense in
+ * a capped league and map onto systems that already exist here. Behind the
+ * `shocks` depth rule, and with it off this draws NOTHING — so every
+ * calibrated seed replays exactly as before. Each is individually rare (20–25%
+ * a summer); most summers bring nothing, a few bring one.
+ *
+ * - A career ended by injury. The player simply retires, through the same
+ *   fields the retirement loop above sets, so nothing downstream needs to know.
+ * - A room that falls apart: a large `roomHit`, which decays weekly like any
+ *   other, so it drags a club's first months and then fades.
+ * - A generational prospect: one man near the top of the board gets a ceiling
+ *   the rest of the class can't touch. His RATING is untouched — draftees
+ *   arrive raw by design — so he's a bet, not a finished player.
+ * ------------------------------------------------------------------------- */
+function rollShocks(G) {
+  if (!depthOn(G, "shocks")) return G;
+  G.shocks = G.shocks || [];
+  const log = (kind, text, teamId) => {
+    G.shocks.unshift({ year: G.year, kind, text });
+    if (G.shocks.length > 30) G.shocks.length = 30;
+    news(G, text, teamId === G.userTeam ? "bad" : "info");
+  };
+  if (rnd(G) < 0.2) {
+    const cands = playersOf(G).filter((p) => !p.retired && p.teamId != null && !p.farm
+      && (p.stats && p.stats.gp >= 20));
+    if (cands.length) {
+      // Weighted toward the better and younger — the story is what was lost.
+      cands.sort((a, b) => (b.ovr - b.age * 0.6) - (a.ovr - a.age * 0.6) || a.id - b.id);
+      const p = cands[Math.floor(rnd(G) * Math.min(80, cands.length))];
+      const t = G.teams[p.teamId];
+      p.teamId = null; p.retired = true; p.retiredYear = G.year; p.careerEnding = true;
+      const i = G.freeAgents.indexOf(p.id); if (i >= 0) G.freeAgents.splice(i, 1);
+      if (t) t.lines = null;
+      log("injury", `${fullName(p)} (${p.pos}, ${p.age}) has been forced to retire after a serious injury. A cruel end with ${t ? t.city : "his club"}.`, t ? t.id : null);
+    }
+  }
+  if (rnd(G) < 0.2) {
+    const t = G.teams[Math.floor(rnd(G) * G.teams.length)];
+    addRoomHit(G, t.id, 22 + Math.floor(rnd(G) * 12));
+    log("room", `The dressing room in ${t.city} has fractured over the summer. The new season starts with a room that isn't talking.`, t.id);
+  }
+  if (rnd(G) < 0.25 && (G.draftClass || []).length) {
+    const board = G.draftClass.map((id) => G.players[id]).filter(Boolean)
+      .sort((a, b) => b.pot - a.pot || a.id - b.id).slice(0, 10);
+    const p = board[Math.floor(rnd(G) * board.length)];
+    if (p) {
+      p.pot = Math.max(p.pot, 88 + Math.floor(rnd(G) * 7));
+      p.generational = true;
+      log("prospect", `Scouts can't stop talking about ${fullName(p)}, an eighteen-year-old ${p.pos} with a ceiling nobody in this class can touch.`, null);
+    }
+  }
   return G;
 }
 
@@ -7858,6 +8103,7 @@ function startNextSeason(G) {
   G.playoffs = null;
   G.awards = null;
   G.allStar = null;
+  G.monthStars = []; G._rumourRecent = []; G._month = null; G._gSnap = null; G._monthStart = null;
   /* The tournament itself is cleared, but `G.worldCups` is not — every medal
      ever won stays, the way the drafts do. */
   G.worldCup = null;
@@ -8615,7 +8861,8 @@ function TrophyCase({ G, p }) {
   const awards = Object.entries(byAward).sort((a, b) => b[1].length - a[1].length);
   // A medal is won in a different sweater, so it sits apart from the club stuff.
   const medals = depthOn(G, "worldCup") ? (p.medals || []) : [];
-  if (!rings.length && !stars.length && !awards.length && !medals.length) return null;
+  const monthly = p.monthStars || 0;
+  if (!rings.length && !stars.length && !awards.length && !medals.length && !monthly) return null;
   const MEDAL = { gold: ["text-amber-200", "bg-amber-500/15 border-amber-500/40", "Gold"],
                   silver: ["text-slate-200", "bg-slate-400/15 border-slate-400/40", "Silver"],
                   bronze: ["text-orange-200", "bg-orange-700/20 border-orange-600/40", "Bronze"] };
@@ -8662,6 +8909,14 @@ function TrophyCase({ G, p }) {
             <span className="text-slate-200">All-Star</span>
             {stars.length > 1 ? <span className="text-sky-300 font-semibold">×{stars.length}</span> : null}
             <span className="text-slate-500 text-xs">{stars.slice().sort().join(", ")}</span>
+          </div>
+        ) : null}
+
+        {monthly ? (
+          <div className="flex items-baseline gap-2 text-sm">
+            <span className="text-slate-200">Star of the month</span>
+            <span className="text-sky-300 font-semibold">×{monthly}</span>
+            {p.potm ? <span className="text-slate-500 text-xs">first star {p.potm}×</span> : null}
           </div>
         ) : null}
 
@@ -9854,6 +10109,39 @@ function PresserCard({ G, setG }) {
   );
 }
 
+/* The month's three stars, this season. Newest month first. */
+function MonthStars({ G, openPlayer }) {
+  const months = (G.monthStars || []).slice().reverse();
+  if (!months.length) return null;
+  const who = (x) => {
+    const p = G.players[x.id];
+    const t = G.teams[x.t];
+    return (
+      <span>
+        {p ? <button className="hover:underline text-slate-100" onClick={() => openPlayer(p)}>{x.name}</button> : x.name}
+        <span className="text-slate-500 text-xs"> {t ? t.abbr : ""} · {x.line}</span>
+      </span>
+    );
+  };
+  return (
+    <Section title="Stars of the month" className="p-3">
+      <div className="space-y-2 pt-1">
+        {months.map((mo) => (
+          <div key={mo.m} className="text-sm">
+            <div className="text-xs uppercase tracking-wide text-slate-500">{MONTHS[mo.m]}</div>
+            {mo.stars.map((x, i) => (
+              <div key={x.id} className={x.t === G.userTeam ? "text-sky-200" : ""}>
+                <span className="text-amber-300 mr-1">{"★".repeat(3 - i)}</span>{who(x)}
+              </div>
+            ))}
+            {mo.rookie ? <div className="text-xs text-slate-400">Rookie: {who(mo.rookie)}</div> : null}
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
 function HomeTab({ G, setG, go, openPlayer }) {
   const t = G.teams[G.userTeam];
   const today = G.schedule[G.day] || [];
@@ -9939,11 +10227,13 @@ function HomeTab({ G, setG, go, openPlayer }) {
         <Section title="Wire" className="p-3">
           <div className="space-y-1 pt-1">
             {G.news.slice(0, 7).map((n, i) => (
-              <div key={i} className={`text-sm ${n.kind === "bad" ? "text-rose-300" : n.kind === "good" ? "text-emerald-300" : "text-slate-300"}`}>{n.text}</div>
+              <div key={i} className={`text-sm ${n.kind === "bad" ? "text-rose-300" : n.kind === "good" ? "text-emerald-300" : n.kind === "rumour" ? "text-amber-200/90 italic" : "text-slate-300"}`}>{n.text}</div>
             ))}
           </div>
         </Section>
       ) : null}
+
+      <MonthStars G={G} openPlayer={openPlayer} />
 
       <div className="grid md:grid-cols-2 gap-3">
         <Section title="Recent results" className="p-3">
@@ -13950,6 +14240,22 @@ function DeadlineTab({ G, go, openPlayer, openTeam }) {
           : "You're out of it. The men below are worth more to a contender in March than they are to you in October."}
       </div>
 
+      {(() => {
+        const talk = G.news.filter((n) => n.kind === "rumour" && n.year === G.year).slice(0, 8);
+        if (!talk.length) return null;
+        return (
+          <Section title="The rumour mill" right={<span className="text-xs text-slate-500">what the market is saying</span>}>
+            <div className="p-3 space-y-1">
+              {talk.map((n, i) => (
+                <div key={i} className="text-sm text-amber-200/90 italic">
+                  <span className="text-slate-500 not-italic text-xs mr-2">day {n.day + 1}</span>{n.text.replace(/^Rumour: /, "")}
+                </div>
+              ))}
+            </div>
+          </Section>
+        );
+      })()}
+
       {/* Other clubs' rooms. Your own unhappiness is a problem; everybody
           else's is an opportunity, and a club holding a man who has asked out
           is negotiating from a worse position than one that isn't. */}
@@ -14252,6 +14558,10 @@ function App() {
               <>
                 <button className={btnGhost} onClick={() => advance(1)} disabled={busy} title="d">Day</button>
                 <button className={btnGhost} onClick={() => advance(7)} disabled={busy} title="w">Week</button>
+                {daysToDeadline(G) > 1 ? (
+                  <button className={btnGhost} onClick={() => advance(daysToDeadline(G))} disabled={busy}
+                    title="Stop on deadline day, while trades are still open">To deadline</button>
+                ) : null}
                 <button className={btnPri} onClick={() => advance(G.schedule.length)} disabled={busy}>Sim season</button>
               </>
             ) : null}
@@ -14355,8 +14665,42 @@ function App() {
   );
 }
 
+/* ------------------------------ error boundary ------------------------------
+ * Soccer and baseball have had this since their last hardening pass. Without
+ * it, any render-time throw unmounts the whole tree and leaves a blank page —
+ * the save is safe in storage but there's no way to reach it and no clue what
+ * broke. Catch it, say so, and offer the two things that actually recover.
+ * ------------------------------------------------------------------------- */
+/* Built lazily: the headless harness shims only the hooks, not React.Component. */
+const makeErrorBoundary = () => class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err, info) { console.error("[pocketgm-hockey] render crash", err, info); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    const msg = String((this.state.err && this.state.err.stack) || this.state.err);
+    return (
+      <div className="max-w-2xl mx-auto p-6 text-slate-200">
+        <h1 className="text-xl font-bold mb-2">Something broke while drawing this screen.</h1>
+        <p className="text-sm text-slate-400 mb-4">
+          Your save is untouched — it lives in browser storage, not in this page. Reload to get
+          back in. If it keeps happening, export the save first and note what you were doing.
+        </p>
+        <div className="flex gap-2 mb-4">
+          <button className="px-3 py-2 rounded bg-sky-700 hover:bg-sky-600 text-sm font-semibold"
+            onClick={() => window.location.reload()}>Reload</button>
+          <button className="px-3 py-2 rounded bg-slate-700 hover:bg-slate-600 text-sm font-semibold"
+            onClick={() => { try { navigator.clipboard.writeText(msg); } catch (e) {} }}>Copy error</button>
+        </div>
+        <pre className="text-xs whitespace-pre-wrap bg-[#0f1729] p-3 rounded overflow-auto max-h-64">{msg}</pre>
+      </div>
+    );
+  }
+};
+
 if (typeof document !== "undefined" && document.getElementById && document.getElementById("root")) {
-  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  const ErrorBoundary = makeErrorBoundary();
+  ReactDOM.createRoot(document.getElementById("root")).render(<ErrorBoundary><App /></ErrorBoundary>);
 }
 </script>
 

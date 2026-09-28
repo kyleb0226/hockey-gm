@@ -178,3 +178,11 @@ Format: `YYYY-MM-DD · SIZE · what shipped` — or `SKIPPED · reason`.
   by static review and `node tools/simtest.js` (1538/1538); no browser was available in this
   container to click-test it, so that pass is still owed. Harness assertion count unaffected by
   this change (no new engine surface to check).
+- 2026-09-28 · M · (Manual session, not the autopilot.) Cross-game parity pass. Stars of the month
+  (`tickMonth`/`finishMonth`, three stars across skaters and goalies plus a rookie, zero RNG), a
+  deadline rumour mill (`tickRumours`, built on `deadlineBoard`, `hashUnit` only), opt-in league
+  shocks (`shocks` depth rule, `rollShocks`: career-ending injury / fractured room / generational
+  prospect — odds kept at 20–25% because higher tipped the twenty-season audit's population cap),
+  an `ErrorBoundary` at the mount, and a "To deadline" header button. New `monthly` and `shocks`
+  checks. Browser-verified in Chromium (Home stars card, Deadline rumour card, button) with no
+  console errors.

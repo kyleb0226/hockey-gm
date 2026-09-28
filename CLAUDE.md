@@ -8,6 +8,49 @@ defence pairs and your goaltending, work the hard cap, sim the season, and chase
 picks one item off `ROADMAP.md`, builds it, and commits to `main` — but only if
 `tools/simtest.js` still passes. See "The daily autopilot" at the bottom.
 
+## The Pocket GM family (shared section — keep identical in all three games)
+Three sibling games built the same way, deployed together by `~/pocket-gm-hub` (Vercel; `/baseball/`,
+`/soccer/`, `/hockey/`). When a feature lands in one, check whether it belongs in the other two — written
+for that sport, not translated knob-for-knob.
+
+| | Baseball | Soccer | Hockey |
+| --- | --- | --- | --- |
+| Repo / local | `baseball-gm` · `~/baseball-gm` | `soccer-gm` · `~/soccer-gm` | `hockey-gm` · `~/hockey-gm` |
+| Dev port | 8124 | 8126 | 8142 |
+| Saves | `pocketgm_slot_*` (LZ-compressed) | `pgsoccer_slot_*` + IndexedDB `pgsoccer_db` | `pgmh:*` + IndexedDB `pgmh` |
+| News wire | `logNews(G,type,msg,teamId)` | `logNews(G,type,msg,teamId)` | `news(G,text,kind)` |
+| RNG | `_rng` (seeded for the league build only) | `_rng` | `rnd(G)`, seeded — **never `Math.random`** |
+| Harness | `node tools/simtest.js` | `node tools/simtest.js` | `node tools/simtest.js` (+ daily autopilot) |
+
+**Shared conventions**
+- One static `index.html`; the app is a `<script type="text/babel-src" id="app-src">` block transpiled at load
+  with Babel's **classic** JSX runtime. React/Babel/Tailwind are **vendored** in `vendor/` — no CDN, works offline.
+- One `G` state object; shape changes go in `migrate(G)` — never bump the save key.
+- Commissioner knobs go through `rules(G)` / `setRule` / `ruleValue`; structural ones are staged in
+  `G.pendingRules` and promoted by `applyPendingRules` at the rollover. Difficulty via `diff(G)`.
+- Flavour is **derived, not stored** where possible (`personalityOf(p)` from the id), so old saves get it free.
+- Every page has the same `<head>`: manifest, icons, `apple-mobile-web-app-*` tags and `env(safe-area-inset-*)`
+  body padding (standalone iOS draws under the notch otherwise). `sw.js` uses **relative** paths so it works at
+  a domain root, a GitHub Pages subpath or a hub subpath.
+- The mount is wrapped in an `ErrorBoundary` (reload / copy error) so a render crash can't blank the page.
+- **The harnesses never render.** Any UI change needs a browser pass — load `index.html?v=N` with a fresh `N`
+  (the service worker can hand back a stale bundle). Add a `CHECKS` case (and `EXPORTS` entry) for every feature.
+
+**Feature parity** (✓ = has it; name = where it lives)
+| Feature | Baseball | Soccer | Hockey |
+| --- | --- | --- | --- |
+| Rules / difficulty / command palette (⌘K) | ✓ | ✓ | ✓ |
+| Personalities + press conferences | ✓ | ✓ | ✓ (`pressers` rule) |
+| Player / Pitcher / Stars of the Month | `tickMonthly` | `tickSoccerMonth` | `tickMonth` (three stars) |
+| Trade / transfer rumour mill | `tickTradeRumors` | `tickTransferRumours` | `tickRumours` |
+| Offseason shocks (black swans) | in `startNewSeason` | `rollSeasonEvents` | `rollShocks` (`shocks` rule) |
+| Individual streaks | hit streaks | scoring runs (`p.gStreak`) | point streaks |
+| Player compare | Players tab | Players tab (`CompareCard`) | `CompareModal` |
+| Sim to the deadline | Hub "Sim to Deadline" | Hub "Skip 7 weeks" | header "To deadline" |
+| One-press full-year / multi-season sim | — (offseason lives in `OffseasonHub`) | ✓ (auto-manage) | `simFullYear` (`autoManage`) |
+| HoF with voting ballot | ✓ | inducted on retirement | inducted after `HOF_WAIT` |
+| Draft | ✓ (+ college, HS, IFA) | — (youth academy) | ✓ |
+
 ## On a phone
 It's a PWA: `manifest.json`, icons, `sw.js` and the iOS meta tags are all in place, so Add to
 Home Screen gives a standalone app. Two things to know:
@@ -420,6 +463,35 @@ winning run — the live `t.streak` was erased by the next loss, so fourteen str
 nothing behind by April. Both go in the record book (`pointStreak`, `winStreak`), which needed them
 outside `RECORD_DEFS` because neither lives on a stat line. Zero RNG; pure accounting off results.
 
+**Stars of the month** (from baseball's Player of the Month). `tickMonth` (top of `simDay`) closes
+each of `MONTHS` — six equal slices of the calendar — and `finishMonth` names **three stars across
+skaters and goalies** plus the month's best rookie. Skater lines are read from `G.results` scorers
+(already stored for every game), so the only saved state is a five-number line per NHL goalie
+(`G._gSnap`) and the winners (`G.monthStars`, reset at the rollover; `p.monthStars`/`p.potm` counts
+show in the trophy case). Goalies score on saves above average + wins + shutouts, weighted so they
+take roughly a quarter of the stars. `closeFinalMonth` runs in `endRegularSeason`. **Draws nothing.**
+
+**The rumour mill** (from baseball). `tickRumours` fills the wire for `RUMOUR_WINDOW` days before
+the deadline: sellers taking calls on a rental, a contender's scouts in the building, somebody who
+has asked out, or a contender's real weak spot (`weakestUnit` — top-six F / top-four D / starting G
+against the league). Built on `deadlineBoard`, so a rumour is a read of the market `aiDeadlineMoves`
+actually trades from. Every choice is `hashUnit(year, day)` — **draws nothing**. Shown in italics on
+the Home wire and as "The rumour mill" on the Deadline tab.
+
+**League shocks** (from soccer's black-swan events). The `shocks` depth rule (off by default, on in
+Deep). `rollShocks` runs at the end of `finishSeason`, after `buildDraftClass`: a career ended by
+injury (retired through the same fields the retirement loop sets), a fractured room (a big
+`addRoomHit` that decays like any other), or a generational prospect (a ceiling of 88+, rating
+untouched). Off, it draws nothing; `G.shocks` keeps the last thirty. **Keep the odds low (20–25%
+each).** At 30–40% the twenty-season `audit` (which runs on Deep) ended with 1,656 players against its
+1,650 cap — not from the retirees themselves (nine in twenty years) but from the league's history
+diverging: different champions, different ring-holders kept in the retired archive. Measured with a
+no-op that draws the same numbers: RNG divergence alone gives ~1,604.
+
+**Error boundary** (from both siblings) wraps the mount; it's built by `makeErrorBoundary()` inside
+the `document` guard because the harness's React shim has no `Component`. **To deadline** in the
+header sims to deadline day with trades still open (`advance(daysToDeadline(G))`).
+
 ## The world tournament
 Behind the `worldCup` rule. Every fourth winter the midwinter break belongs to the countries
 instead — there is no All-Star game that year, which is what the league actually does.
@@ -499,7 +571,7 @@ third-rounder in the low thirties, `DRAFT_OVR_CAP` is a hard ceiling (an eightee
 finished hockey player however the dice land), and what separates the top of the board from the
 bottom is now the CEILING: gaps of ~40 early against ~14 late.
 
-**So the gap has to pull harder.** `DEV_GAP_PULL` (0.135, was 0.09) — at the old rate a fifty-
+**So the gap has to pull harder.** `DEV_GAP_PULL` (0.135 at the time, was 0.09; 0.22 now — see *The development curve*) — at the old rate a fifty-
 overall kid with a ninety ceiling was still a fringe player at 23. `DEV_FARM` rose 1.5 → 1.95, but
 it **must stay below what a genuine NHL role gives** (`solid` measures ~2.2) or the trade-off the
 whole development model rests on inverts and everyone is better off hidden in the minors.
@@ -720,7 +792,7 @@ matters more now than it did.
   information.
 
 ## The draft
-Seven rounds (`DRAFT_ROUNDS`), 224 prospects, and **you never see a prospect's true rating**.
+`DRAFT_ROUNDS` rounds (3 now — it was seven, see *The population*), and **you never see a prospect's true rating**.
 Each carries `p.scout = {fog, bias, bias2}`; `scoutedOvr`/`scoutedPot` apply the bias scaled by
 the fog, so the read is deterministic per player and only `scoutProspect` moves it. The top of the
 board starts better known than the bottom. `SCOUT_POINTS` visits per offseason, each cutting a
@@ -748,7 +820,7 @@ undrafted prospects leaked into `G.players` every year.
   upcoming pick or a player somebody just took — so you never leave the draft. Only picks and
   prospects can go the other way, which is the honest scope of a draft-day deal.
 
-**Attrition is not optional.** Seven rounds puts 224 players a year into a league that loses ~50
+**Attrition is not optional.** (Written when the draft ran seven rounds.) Seven rounds put 224 players a year into a league that loses ~50
 to retirement, so without culling the save reached 4.9 MB in eight seasons. Two mechanisms in
 `finishSeason`: stalled prospects (23+, still poor, nothing on their record) are released, and the
 free-agent pool is hard-capped at `FA_POOL_MAX` — players who can't get a contract leave the
@@ -1321,7 +1393,9 @@ determinism, plus goaltending workload, shot zones, retained salary, waivers, ne
 Newer checks worth knowing: `playoffLine` and `clinching` (the marks must agree with the bracket
 that actually gets built — a guarantee that turns out wrong is worse than no guarantee),
 `careerShares` (stored shares match the live calculation, and the total is never stored),
-`retroAwards` (rebuilt years are real and re-loading hands out nothing twice), `pickTrading` (slot
+`retroAwards` (rebuilt years are real and re-loading hands out nothing twice), `monthly` (three stars every
+month, rumours before the deadline only, and neither touches `G.seed`), `shocks` (off draws nothing;
+on leaves the save coherent), `pickTrading` (slot
 moves value, and the average first is still worth 9), `draftRoom`, `farmGames`, `careerStart` and
 `playoffSummaries`.
 
