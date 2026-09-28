@@ -114,6 +114,7 @@ const EXPORTS = [
   "extendEarlyYears", "EXTEND_EARLY_MAX", "EXTEND_EARLY_PREMIUM", "EXTEND_TERM_MAX",
   "draftOrderRows", "draftOnePick", "draftProjection", "starList", "toggleStar", "autoPickFor",
   "resultFor", "PICK_ROUNDS",
+  "seasonMonth", "SEASON_MONTHS", "goalieMonthSplit", "goalieRestSplit",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -770,6 +771,44 @@ const CHECKS = {
     // Shootout goals are never season goals.
     const soScorers = A.playersOf(G).filter((p) => (p.season.sos || 0) > 0);
     ok(soScorers.length > 0, `shootout scorers are tracked separately (${soScorers.length})`);
+  },
+
+  // The goalie page's workload chart is two slices of G.gameLog — nothing new
+  // to track, so this pins that the slicing itself is honest.
+  goalieWorkload(A) {
+    section("Goalie workload");
+    ok(A.seasonMonth(0) === "Oct", "day zero is opening night in October");
+    let lastIdx = -1, monotone = true;
+    for (let d = 0; d < 200; d += 7) {
+      const idx = A.SEASON_MONTHS.indexOf(A.seasonMonth(d));
+      if (idx < lastIdx) monotone = false;
+      lastIdx = idx;
+    }
+    ok(monotone, "the month index never runs backwards as the day increases");
+
+    const G = A.newGame(0, { seed: 151, rules: { seasonLen: 82 } });
+    simSeason(A, G);
+    const starter = A.rosterOf(G, G.userTeam).filter((p) => p.pos === "G")
+      .sort((a, b) => b.season.gp - a.season.gp)[0];
+    ok(!!starter, "the user's club has a goalie to check");
+    const log = G.gameLog[starter.id] || [];
+    ok(log.length === starter.season.gp, `his game log matches his season (${log.length} vs ${starter.season.gp})`);
+
+    const months = A.goalieMonthSplit(log);
+    const monthGp = months.reduce((s, m) => s + m.gp, 0);
+    ok(monthGp === log.length, `every logged start lands in exactly one month (${monthGp} of ${log.length})`);
+    ok(months.length >= 3, `an 82-game season spreads across several months (${months.length})`);
+    const badToi = months.find((m) => m.toi <= 0);
+    ok(!badToi, "every month carries real ice time, not a zero stub");
+
+    const rest = A.goalieRestSplit(log);
+    const starts = log.filter((r) => r.sa > 0);
+    const restGp = Object.values(rest).reduce((s, b) => s + b.gp, 0);
+    ok(restGp === starts.length, `every real start lands in exactly one rest bucket (${restGp} of ${starts.length})`);
+    ok(rest[0].gp + rest[1].gp + rest[2].gp + rest["3+"].gp === restGp, "the four buckets are exhaustive");
+    // A goalie who starts most nights should show up in the back-to-back
+    // bucket at some point across a full season.
+    ok(rest[0].gp > 0, `the starter drew at least one back-to-back (${rest[0].gp})`);
   },
 
   // The per-zone shot breakdown has to add back up to the totals, from both

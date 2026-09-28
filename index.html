@@ -6401,6 +6401,45 @@ function goalieReport(G, p) {
   };
 }
 
+/* A goalie's page wants to see workload two ways — over TIME and over REST —
+   and both are already sitting in G.gameLog. Nothing new to track, just two
+   ways to slice what's there.
+
+   There's no stored calendar date anywhere in the save, only a day index into
+   the schedule, but `buildSchedule` already assumes a real NHL calendar under
+   the hood (the All-Star break is cut at 55% of the days because that's
+   "midwinter") — so a day index maps onto an honest month label for display,
+   derived on read and never stored. */
+const SEASON_MONTHS = ["Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr", "May", "Jun"];
+function seasonMonth(day) {
+  return SEASON_MONTHS[clamp(Math.floor(day / 30.44), 0, SEASON_MONTHS.length - 1)];
+}
+function goalieMonthSplit(log) {
+  const out = {};
+  (log || []).forEach((r) => {
+    const m = seasonMonth(r.d);
+    const o = (out[m] = out[m] || { m, gp: 0, toi: 0 });
+    o.gp++; o.toi += r.toi || 0;
+  });
+  return SEASON_MONTHS.filter((m) => out[m]).map((m) => out[m]);
+}
+/* Days of rest before each start, bucketed the same way `restFor` reads a
+   club's rest — 0 is a genuine back-to-back. A goalie's FIRST logged start has
+   no known prior game this season, so — like `restFor`'s own -9 sentinel — it
+   counts as fully rested rather than dragging the back-to-back bucket down
+   with a start that wasn't actually one. */
+function goalieRestSplit(log) {
+  const starts = (log || []).filter((r) => r.sa > 0).slice().sort((a, b) => a.d - b.d);
+  const buckets = { 0: { gp: 0, sv: 0, sa: 0 }, 1: { gp: 0, sv: 0, sa: 0 },
+    2: { gp: 0, sv: 0, sa: 0 }, "3+": { gp: 0, sv: 0, sa: 0 } };
+  starts.forEach((r, i) => {
+    const rest = i === 0 ? 3 : Math.max(0, r.d - starts[i - 1].d - 1);
+    const b = buckets[rest >= 3 ? "3+" : rest];
+    b.gp++; b.sv += r.sv; b.sa += r.sa;
+  });
+  return buckets;
+}
+
 function setBlock(G, pid, on) {
   G.block = G.block || [];
   const i = G.block.indexOf(pid);
@@ -8599,6 +8638,57 @@ function FormBars({ log, mode }) {
   );
 }
 
+/* Two views cut from the same G.gameLog: starts by month (has he been
+   overworked lately?) and save percentage by how much rest he got beforehand
+   (is the rest he's getting actually the rest he needs?). Only ever rendered
+   with the user's own goalies — gameLog is a this-club-only log, same as
+   Form above it. */
+function GoalieWorkload({ log }) {
+  const months = goalieMonthSplit(log);
+  const rest = goalieRestSplit(log);
+  const maxGp = Math.max(1, ...months.map((m) => m.gp));
+  const REST_ROWS = [["0", "B2B"], ["1", "1 day"], ["2", "2 days"], ["3+", "3+ days"]];
+  const pctOf = (k) => (rest[k].sa ? rest[k].sv / rest[k].sa : null);
+  const seen = REST_ROWS.map(([k]) => pctOf(k)).filter((v) => v != null);
+  const max = Math.max(...seen, 1);
+  const min = Math.min(...seen.filter((v) => v > 0), 0.8);
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="flex items-end gap-1.5 h-12">
+          {months.map((m) => (
+            <div key={m.m} className="flex-1 flex flex-col items-center gap-1">
+              <div className="w-full rounded-t bg-sky-600"
+                style={{ height: `${clamp((m.gp / maxGp) * 100, 10, 100)}%` }}
+                title={`${m.m}: ${m.gp} game${m.gp === 1 ? "" : "s"}, ${(m.toi / m.gp).toFixed(0)} min/g`} />
+              <div className="text-[10px] text-slate-500">{m.m}</div>
+            </div>
+          ))}
+        </div>
+        <div className="text-xs text-slate-500 mt-1">starts by month</div>
+      </div>
+      <div className="space-y-1.5">
+        {REST_ROWS.map(([k, label]) => {
+          const v = pctOf(k);
+          const w = v == null ? 0 : clamp(((v - min) / Math.max(0.001, max - min)) * 100, 6, 100);
+          return (
+            <div key={k} className="flex items-center gap-2">
+              <div className="w-14 text-[11px] uppercase text-slate-400">{label}</div>
+              <div className="flex-1 h-2 bg-[#0d1728] rounded overflow-hidden border border-[#1e2b45]">
+                <div className="h-full bg-sky-500" style={{ width: `${w}%` }} />
+              </div>
+              <div className="w-20 text-right tnum text-xs text-slate-300">
+                {v != null ? `${(v * 100).toFixed(1)}% (${rest[k].gp})` : `— (${rest[k].gp})`}
+              </div>
+            </div>
+          );
+        })}
+        <div className="text-xs text-slate-500">save percentage by days' rest before the start</div>
+      </div>
+    </div>
+  );
+}
+
 /* --------------------------------- honours ---------------------------------
  * Rings first, because that's how a career is actually measured, then the
  * individual awards grouped rather than listed one line per year — three MVPs
@@ -9369,6 +9459,11 @@ function PlayerModal({ G, setG, pid, onClose, onGo, onCompare }) {
           {(G.gameLog || {})[p.id] && G.gameLog[p.id].length ? (
             <Section title="Form" className="p-3">
               <div className="pt-1"><FormBars log={G.gameLog[p.id]} mode={isG ? "G" : "S"} /></div>
+            </Section>
+          ) : null}
+          {isG && (G.gameLog || {})[p.id] && G.gameLog[p.id].length ? (
+            <Section title="Workload" className="p-3">
+              <div className="pt-1"><GoalieWorkload log={G.gameLog[p.id]} /></div>
             </Section>
           ) : null}
           {(G.gameLog || {})[p.id] && G.gameLog[p.id].length ? (
