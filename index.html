@@ -4848,6 +4848,10 @@ function finishSeason(G) {
   // Before `p.season` is blanked further down — that line IS the bonus test.
   settleBonuses(G);
   const champ = G.playoffs && G.playoffs.champion;
+  // Computed here, before the bracket is nulled further down the rollover, so
+  // it can go on the history row AND feed the board reaction below — one read
+  // of the bracket, not two.
+  const got = seasonAchievement(G);
   G.history.push({
     year: G.year,
     champion: champ,
@@ -4856,6 +4860,9 @@ function finishSeason(G) {
     // Captured here because `p.season` is blanked further down the rollover.
     leaders: seasonLeaders(G),
     userRecord: { w: G.teams[G.userTeam].w, l: G.teams[G.userTeam].l, otl: G.teams[G.userTeam].otl, pts: G.teams[G.userTeam].pts },
+    // How far YOUR club got that year (0 missed it, 4 won the Cup) — the one
+    // thing `seasonSummaryData` can't reconstruct once the bracket is gone.
+    rounds: got,
   });
   // Board reaction: making the playoffs is the baseline expectation.
   const me = G.teams[G.userTeam];
@@ -4863,7 +4870,6 @@ function finishSeason(G) {
   // Judged against what the board actually asked for at the start of the year,
   // not against a flat "did you make the playoffs".
   const want = (G.mandate && G.mandate.need) || 1;
-  const got = seasonAchievement(G);
   /* The board used to be unreasonable. `(got - want) * 9` is linear and blind:
      a club told to win the Cup that instead made the playoffs lost 27
      confidence — a good season, punished as hard as a collapse — and from a
@@ -13204,7 +13210,132 @@ function WorldCupHistory({ G, openPlayer }) {
   );
 }
 
+/* ----------------------------- season summary ------------------------------
+ * One page per completed year — the table, the leaders, the awards, and how
+ * far YOUR club got. `seasonSummaryData` is the only thing that reads `h`
+ * (nothing here touches live `G` state), so the same read backs both the
+ * printable page and the plain-text copy — one definition of what a season
+ * summary contains, not two that can drift apart.
+ * ------------------------------------------------------------------------- */
+function achievementLabel(rounds) {
+  if (rounds == null) return null;
+  return ["Missed the playoffs", "Lost in the first round", "Lost in the second round",
+    "Lost in the Conference Final", "Won the Cup"][clamp(rounds, 0, 4)];
+}
+function seasonSummaryData(G, h) {
+  const champ = h.champion != null && G.teams[h.champion] ? G.teams[h.champion] : null;
+  const table = (h.standings || []).map((s) => ({ ...s, team: G.teams[s.id] }))
+    .sort((a, b) => b.pts - a.pts || (b.w - a.w));
+  const leaders = RECORD_DEFS.map((def) => {
+    const l = h.leaders && h.leaders[def.key];
+    return l ? { key: def.key, label: def.label, name: l.name, v: l.v } : null;
+  }).filter(Boolean);
+  // A winner's id can outlive him on the page but not in the save — `pruneSave`
+  // forgets the player eventually, and an old season just says so.
+  const awards = Object.keys(AWARD_LABEL).map((k) => {
+    const id = h.awards && h.awards[k];
+    if (id == null) return null;
+    const p = G.players[id];
+    return { key: k, label: AWARD_LABEL[k], name: p ? fullName(p) : "— no longer on record —" };
+  }).filter(Boolean);
+  return { year: h.year, champ, table, leaders, awards,
+    userRecord: h.userRecord, rounds: h.rounds != null ? h.rounds : null };
+}
+function seasonSummaryText(G, h) {
+  const d = seasonSummaryData(G, h);
+  const you = G.teams[G.userTeam];
+  const label = achievementLabel(d.rounds);
+  const lines = [`${d.year} SEASON`, ""];
+  if (d.champ) lines.push(`Champion: ${d.champ.city} ${d.champ.name}`);
+  lines.push(`${you.city} ${you.name}: ${d.userRecord.w}-${d.userRecord.l}-${d.userRecord.otl}`
+    + ` (${d.userRecord.pts} pts)${label ? ` — ${label}` : ""}`, "", "STANDINGS");
+  d.table.forEach((row, i) => lines.push(
+    `${i + 1}. ${row.team.city} ${row.team.name} — ${row.w}-${row.l}-${row.otl} (${row.pts})`));
+  lines.push("", "LEAGUE LEADERS");
+  d.leaders.forEach((l) => lines.push(`${l.label}: ${l.name} (${l.v})`));
+  lines.push("", "AWARDS");
+  d.awards.forEach((a) => lines.push(`${a.label}: ${a.name}`));
+  return lines.join("\n");
+}
+// Clipboard API needs a secure context the app doesn't always have (a LAN
+// address, say), so a hidden-textarea fallback keeps "copy" working anywhere.
+function copyText(text, notify) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => notify("Copied to clipboard."),
+      () => notify("Couldn't copy — select the text and copy it by hand."));
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand("copy"); notify("Copied to clipboard."); }
+  catch (e) { notify("Couldn't copy — select the text and copy it by hand."); }
+  ta.remove();
+}
+function SeasonSummaryModal({ G, h, onClose, notify }) {
+  const d = seasonSummaryData(G, h);
+  const you = G.teams[G.userTeam];
+  const label = achievementLabel(d.rounds);
+  return (
+    <Modal wide title={`${d.year} season summary`} onClose={onClose}
+      actions={<>
+        <button className={btnGhost} onClick={() => copyText(seasonSummaryText(G, h), notify)}>Copy as text</button>
+        <button className={btnGhost} onClick={() => window.print()}>Print</button>
+      </>}>
+      {/* Printing the modal as-is would print the dark backdrop around it too —
+          this hides everything else on the page for the duration of the print. */}
+      <style>{"@media print { body > div > *:not(#season-summary-print-root) { visibility: hidden; } "
+        + "#season-summary-print-root, #season-summary-print-root * { visibility: visible; } "
+        + "#season-summary-print-root { position: fixed; inset: 0; } }"}</style>
+      <div id="season-summary-print-root" className="space-y-3 text-sm">
+        <div>
+          {d.champ ? <div className="font-medium">{d.champ.city} {d.champ.name} won the Cup.</div> : null}
+          <div className="text-slate-300">
+            {you.city} {you.name}: {d.userRecord.w}-{d.userRecord.l}-{d.userRecord.otl} ({d.userRecord.pts} pts)
+            {label ? <span className="text-slate-400"> — {label}</span> : null}
+          </div>
+        </div>
+        <Section title="Standings">
+          <div className="max-h-64 overflow-y-auto">
+            {d.table.map((row, i) => (
+              <div key={row.id} className={`flex items-center gap-2 px-3 py-1 text-xs border-b border-[#16223a] last:border-0
+                ${row.id === G.userTeam ? "bg-sky-950/40" : ""}`}>
+                <span className="w-6 text-slate-500 tnum">{i + 1}</span>
+                <span className="flex-1">{row.team.city} {row.team.name}</span>
+                <span className="tnum text-slate-400">{row.w}-{row.l}-{row.otl}</span>
+                <span className="tnum w-10 text-right">{row.pts}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+        <Section title="League leaders">
+          <div className="p-2 space-y-1 text-xs">
+            {d.leaders.length ? d.leaders.map((l) => (
+              <div key={l.key} className="flex justify-between gap-2">
+                <span className="text-slate-400">{l.label}</span>
+                <span>{l.name} <span className="text-slate-500 tnum">({l.v})</span></span>
+              </div>
+            )) : <div className="text-slate-500">No leaders recorded.</div>}
+          </div>
+        </Section>
+        <Section title="Awards">
+          <div className="p-2 space-y-1 text-xs">
+            {d.awards.length ? d.awards.map((a) => (
+              <div key={a.key} className="flex justify-between gap-2">
+                <span className="text-slate-400">{a.label}</span>
+                <span>{a.name}</span>
+              </div>
+            )) : <div className="text-slate-500">No awards recorded.</div>}
+          </div>
+        </Section>
+      </div>
+    </Modal>
+  );
+}
+
 function HistoryTab({ G, setG, notify, openPlayer, openTeam }) {
+  const [summaryYear, setSummaryYear] = useState(null);
+  const summaryRow = summaryYear != null ? G.history.find((h) => h.year === summaryYear) : null;
   return (
     <div className="space-y-3">
       <CareerAndOwnership G={G} setG={setG} notify={notify} openTeam={openTeam} />
@@ -13224,8 +13355,13 @@ function HistoryTab({ G, setG, notify, openPlayer, openTeam }) {
               cell: (h) => (h.awards && h.awards.mvp != null && G.players[h.awards.mvp])
                 ? <button className="hover:text-sky-300" onClick={() => openPlayer(h.awards.mvp)}>{fullName(G.players[h.awards.mvp])}</button>
                 : "—" },
+            { key: "summary", label: "", get: () => 0, cell: (h) => (
+              <button className="text-xs text-sky-400 hover:underline"
+                onClick={(e) => { e.stopPropagation(); setSummaryYear(h.year); }}>Summary</button>
+            ) },
           ]} empty="No completed seasons yet." />
       </Section>
+      {summaryRow ? <SeasonSummaryModal G={G} h={summaryRow} notify={notify} onClose={() => setSummaryYear(null)} /> : null}
       <WorldCupHistory G={G} openPlayer={openPlayer} />
       <DraftClassReport G={G} openPlayer={openPlayer} />
       <Section title="Clubs">

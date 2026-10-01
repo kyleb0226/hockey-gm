@@ -115,6 +115,7 @@ const EXPORTS = [
   "draftOrderRows", "draftOnePick", "draftProjection", "starList", "toggleStar", "autoPickFor",
   "resultFor", "PICK_ROUNDS",
   "seasonMonth", "SEASON_MONTHS", "goalieMonthSplit", "goalieRestSplit",
+  "achievementLabel", "seasonSummaryData", "seasonSummaryText",
 ];
 
 /* ------------------------------- load the app ---------------------------- */
@@ -5423,6 +5424,60 @@ const CHECKS = {
     simSeason(A, R); simPlayoffs(A, R);
     ok(R.teams.every((t) => t.gp === 82), "and it plays another full season");
     ok(!R.teams.some((t) => A.capHit(R, t.id) > A.rules(R).capAmount), "still under the cap at the end of it");
+  },
+
+  /* One page per completed year — the table, the leaders, the awards, and how
+     far the user's own club got. Pure reads off `G.history`, so a season long
+     since rolled over still has a complete page. */
+  seasonSummary(A) {
+    section("Season summary");
+    const G = A.newGame(0, { seed: 8181, rules: { seasonLen: 41 } });
+    for (let i = 0; i < 3; i++) {
+      simSeason(A, G); simPlayoffs(A, G); A.autoDraft(G, false); A.startNextSeason(G);
+    }
+    ok(G.history.every((h) => h.rounds != null && h.rounds >= 0 && h.rounds <= 4),
+      "every season recorded how far the user's club got (0-4)");
+    ok(G.history.every((h) => h.rounds !== 4 || h.champion === G.userTeam),
+      "reaching 4 only happens by winning the Cup");
+    ok(G.history.some((h) => h.champion === G.userTeam) === G.history.some((h) => h.rounds === 4),
+      "and winning the Cup is exactly what sets it to 4");
+
+    G.history.forEach((h) => {
+      const d = A.seasonSummaryData(G, h);
+      ok(d.table.length === G.teams.length, `the table has every club (${d.table.length})`);
+      ok(d.table.every((row, i) => i === 0 || row.pts <= d.table[i - 1].pts),
+        "sorted by points, best first");
+      ok(d.userRecord === h.userRecord, "the user's own record passes through unchanged");
+      const label = A.achievementLabel(d.rounds);
+      ok(typeof label === "string" && label.length, `and a human label for it (${label})`);
+    });
+
+    const y0 = G.history[0];
+    const d0 = A.seasonSummaryData(G, y0);
+    ok(d0.leaders.length === Object.keys(y0.leaders || {}).length,
+      "every recorded leader made the page");
+    ok(d0.leaders.every((l) => l.v > 0 && l.name), "with a real total and a name");
+    const awardKeys = y0.awards ? Object.keys(y0.awards).filter((k) => k !== "year" && k !== "votes" && y0.awards[k] != null) : [];
+    ok(d0.awards.length === awardKeys.length, "every handed-out award made the page too");
+
+    // A pruned winner says so on the page rather than crashing it.
+    if (y0.awards && y0.awards.mvp != null) {
+      const g2 = A.migrate(JSON.parse(JSON.stringify(G)));
+      delete g2.players[y0.awards.mvp];
+      const d2 = A.seasonSummaryData(g2, g2.history[0]);
+      const mvpRow = d2.awards.find((a) => a.key === "mvp");
+      ok(mvpRow && mvpRow.name.includes("no longer"), "a pruned award winner doesn't crash the page");
+    }
+
+    const text = A.seasonSummaryText(G, y0);
+    ok(text.includes(String(y0.year)), "the text export names the year");
+    ok(text.includes("STANDINGS") && text.includes("LEAGUE LEADERS") && text.includes("AWARDS"),
+      "and has all three sections");
+    ok(text.split("\n").length > 10, "it's a real page, not one line");
+
+    ok(A.achievementLabel(null) == null, "no recorded result is no label");
+    ok(A.achievementLabel(0) === "Missed the playoffs" && A.achievementLabel(4) === "Won the Cup",
+      "the two ends of the scale read right");
   },
 
   determinism(A) {
