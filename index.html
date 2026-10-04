@@ -6190,6 +6190,88 @@ function brokerTrade(G, aId, aPlayers, aPicks, bId, bPlayers, bPicks, broker, op
   return { ...done, broker: { teamId: cId, amt, fee: round1(fee), paid: round1(paidVal) } };
 }
 
+/* -------------------------------- the third seat ---------------------------
+ * `brokerTrade` only ever adds a cap-space dump for a fee — it's still a deal
+ * between two clubs, with a third paid to make it fit. A real three-way trade
+ * is different: three clubs each sending pieces to whichever of the other two
+ * actually wants them, which is where the interesting hockey deals live — the
+ * asset that only fixes club C's cap for a pick from club A, so club B can get
+ * the player it actually wants out of club A in return.
+ *
+ * `moves` is a flat list of directed transfers, `{from, to, players, picks}`,
+ * spanning exactly three teams. Evaluation reuses `tradeValue`/`pickValue`
+ * exactly as the two-club trade does — every club must come away with at
+ * least as much as it sent, with the user's usual `askPrice` premium applied
+ * to every AI club in the deal, since he's still the one asking. No retained
+ * salary here: that's what `brokerTrade` is for, and stacking both at once is
+ * more machinery than a three-way trade needs to prove the idea.
+ * ------------------------------------------------------------------------- */
+function evalTrade3(G, moves, opts) {
+  opts = opts || {};
+  if (!tradesOpen(G)) return { ok: false, why: G.phase === "playoffs" ? "the roster is frozen for the playoffs" : "the trade deadline has passed" };
+  moves = (moves || []).filter((m) => (m.players && m.players.length) || (m.picks && m.picks.length));
+  if (!moves.length) return { ok: false, why: "nothing in it" };
+  if (moves.some((m) => m.from === m.to)) return { ok: false, why: "a club can't trade with itself" };
+  const teams = [...new Set(moves.flatMap((m) => [m.from, m.to]))];
+  if (teams.length !== 3) return { ok: false, why: "a three-way trade needs exactly three clubs" };
+
+  for (const m of moves) {
+    for (const pid of m.players || []) {
+      const p = G.players[pid];
+      if (!p || p.teamId !== m.from) return { ok: false, why: "a player isn't on that roster" };
+      if (hasNtc(p)) return { ok: false, why: `${fullName(p)} has a no-trade clause` };
+    }
+  }
+
+  const sent = {}, received = {}, outIds = {}, inIds = {};
+  teams.forEach((t) => { sent[t] = 0; received[t] = 0; outIds[t] = []; inIds[t] = []; });
+  moves.forEach((m) => {
+    const pVal = (m.players || []).reduce((s, pid) => s + tradeValue(G, G.players[pid]), 0);
+    const kVal = (m.picks || []).reduce((s, pk) => s + pickValue(G, pk), 0);
+    sent[m.from] += pVal + kVal;
+    received[m.to] += pVal + kVal;
+    outIds[m.from] = outIds[m.from].concat(m.players || []);
+    inIds[m.to] = inIds[m.to].concat(m.players || []);
+  });
+
+  const R = rules(G);
+  for (const t of teams) {
+    const salOut = outIds[t].reduce((s, pid) => s + effectiveCap(G, G.players[pid]), 0);
+    const salIn = inIds[t].reduce((s, pid) => s + effectiveCap(G, G.players[pid]), 0);
+    if (R.hardCap && capHit(G, t) - salOut + salIn > R.capAmount)
+      return { ok: false, why: `${G.teams[t].abbr} would be over the cap` };
+    const size = rosterOf(G, t, true).length - outIds[t].length + inIds[t].length;
+    if (size > ROSTER_MAX + FARM_MAX) return { ok: false, why: `${G.teams[t].abbr} roster limit` };
+  }
+
+  const margin = diff(G).askPrice;
+  let accepted = true, loser = null;
+  teams.forEach((t) => {
+    const need = t === G.userTeam ? sent[t] : sent[t] * margin;
+    const fine = received[t] >= need * 0.97;
+    if (t !== G.userTeam && !fine) { accepted = false; loser = loser == null ? t : loser; }
+  });
+
+  return { ok: accepted, teams, sent, received,
+    why: accepted ? "accepted" : `${G.teams[loser].abbr} want more back` };
+}
+function doTrade3(G, moves, opts) {
+  const ev = evalTrade3(G, moves, opts);
+  if (!ev.ok) return ev;
+  const prevLines = G.teams[G.userTeam].lastLines;
+  moves.forEach((m) => {
+    (m.players || []).forEach((pid) => { G.players[pid].teamId = m.to; G.players[pid].farm = false; });
+    (m.picks || []).forEach((pk) => {
+      const r = G.picks.find((x) => x.year === pk.year && x.round === pk.round && x.orig === pk.orig);
+      if (r) r.owner = m.to;
+    });
+  });
+  ev.teams.forEach((t) => { G.teams[t].lines = null; });
+  const note = ev.teams.includes(G.userTeam) ? lineupChangeNote(G, G.userTeam, prevLines) : "";
+  news(G, `Three-way trade: ${ev.teams.map((t) => G.teams[t].name).join(" / ")}.${note}`, "info");
+  return ev;
+}
+
 /* -------------------------------- the market -------------------------------
  * Two things a GM does that the game only let the AI do: listen to offers, and
  * trade on draft day.
@@ -11508,8 +11590,133 @@ function GameTab({ G, openPlayer }) {
 
 /* --------------------------------- trades --------------------------------- */
 
+/* A genuine three-way trade: three rosters, each piece sent to whichever of
+   the other two clubs wants it. Kept as its own panel rather than wired into
+   the two-club grid above — the destination choice a three-way deal needs
+   doesn't exist in a trade with only one place anything can go. */
+function ThreeWayTrade({ G, setG, notify, openPlayer, teamB, teamC, onCancel }) {
+  const teams = [G.userTeam, teamB, teamC];
+  const pkId = (pk) => `${pk.year}-${pk.round}-${pk.orig}`;
+  const otherTwo = (t) => teams.filter((x) => x !== t);
+  const [outPlayers, setOutPlayers] = useState({ [G.userTeam]: [], [teamB]: [], [teamC]: [] });
+  const [outPicks, setOutPicks] = useState({ [G.userTeam]: [], [teamB]: [], [teamC]: [] });
+  const [dest, setDest] = useState({});
+
+  const toggle = (t, id, isPick) => {
+    const bucket = isPick ? outPicks : outPlayers;
+    const setBucket = isPick ? setOutPicks : setOutPlayers;
+    if (bucket[t].includes(id)) {
+      setBucket({ ...bucket, [t]: bucket[t].filter((x) => x !== id) });
+      setDest((d) => { const d2 = { ...d }; delete d2[id]; return d2; });
+    } else {
+      setBucket({ ...bucket, [t]: bucket[t].concat(id) });
+      setDest((d) => ({ ...d, [id]: otherTwo(t)[0] }));
+    }
+  };
+
+  const picksByTeam = {};
+  teams.forEach((t) => { picksByTeam[t] = tradablePicks(G, t); });
+
+  const moves = useMemo(() => {
+    const legs = {};
+    const leg = (from, to) => (legs[`${from}-${to}`] = legs[`${from}-${to}`] || { from, to, players: [], picks: [] });
+    teams.forEach((t) => {
+      outPlayers[t].forEach((pid) => { if (dest[pid] != null) leg(t, dest[pid]).players.push(pid); });
+      outPicks[t].forEach((key) => {
+        if (dest[key] == null) return;
+        const pk = picksByTeam[t].find((x) => pkId(x) === key);
+        if (pk) leg(t, dest[key]).picks.push(pk);
+      });
+    });
+    return Object.values(legs);
+  }, [outPlayers, outPicks, dest, G]);
+
+  const ev = useMemo(() => evalTrade3(G, moves), [G, moves]);
+
+  const Col = ({ t }) => {
+    const roster = rosterOf(G, t, true).sort((a, b) => b.ovr - a.ovr);
+    return (
+      <Section title={`${G.teams[t].abbr}${t === G.userTeam ? " (you)" : ""}`} className="max-h-[26rem] overflow-y-auto">
+        <div className="p-2 space-y-0.5">
+          {roster.map((p) => (
+            <div key={p.id} className="flex flex-wrap items-center gap-1.5 px-2 py-1 rounded text-sm hover:bg-[#16223a]">
+              <input type="checkbox" checked={outPlayers[t].includes(p.id)} onChange={() => toggle(t, p.id, false)} />
+              <PosBadge pos={p.pos} />
+              <button className="text-left truncate hover:text-sky-300" onClick={() => openPlayer(p.id)}>
+                {shortName(p)}{hasNtc(p) ? <span className="ml-1 text-[10px] text-amber-300">NTC</span> : null}
+              </button>
+              <span className="text-slate-500 tnum text-xs">{p.ovr}</span>
+              {outPlayers[t].includes(p.id) ? (
+                <span className="flex gap-1 ml-auto">
+                  {otherTwo(t).map((d) => (
+                    <button key={d} onClick={() => setDest((x) => ({ ...x, [p.id]: d }))}
+                      className={`text-[10px] px-1.5 py-0.5 rounded ${dest[p.id] === d ? "bg-sky-600 text-white" : "bg-[#16233c] text-slate-400"}`}>
+                      → {G.teams[d].abbr}
+                    </button>
+                  ))}
+                </span>
+              ) : null}
+            </div>
+          ))}
+          {picksByTeam[t].length ? (
+            <div className="text-[11px] uppercase tracking-wide text-slate-500 px-2 pt-2">Draft picks</div>
+          ) : null}
+          {picksByTeam[t].map((pk) => {
+            const key = pkId(pk);
+            const L = pickLabel(G, pk, t);
+            return (
+              <div key={key} className="flex flex-wrap items-center gap-1.5 px-2 py-1 rounded text-sm hover:bg-[#16223a]">
+                <input type="checkbox" checked={outPicks[t].includes(key)} onChange={() => toggle(t, key, true)} />
+                <span className="truncate">{L.text}</span>
+                {outPicks[t].includes(key) ? (
+                  <span className="flex gap-1 ml-auto">
+                    {otherTwo(t).map((d) => (
+                      <button key={d} onClick={() => setDest((x) => ({ ...x, [key]: d }))}
+                        className={`text-[10px] px-1.5 py-0.5 rounded ${dest[key] === d ? "bg-sky-600 text-white" : "bg-[#16233c] text-slate-400"}`}>
+                        → {G.teams[d].abbr}
+                      </button>
+                    ))}
+                  </span>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="grid md:grid-cols-3 gap-3">
+        {teams.map((t) => <Col key={t} t={t} />)}
+      </div>
+      <div className={`${card} p-3 flex flex-wrap items-center gap-3`}>
+        <div className="text-sm">
+          <span className="text-slate-400">Their read: </span>
+          {moves.length
+            ? <span className={ev.ok ? "text-emerald-400" : "text-amber-400"}>{ev.why}</span>
+            : <span className="text-slate-500">pick some pieces, then send each one somewhere</span>}
+        </div>
+        <div className="flex-1" />
+        <button className={btnGhost} onClick={onCancel}>Back to two clubs</button>
+        <button className={btnPri} disabled={!ev.ok} onClick={() => {
+          const g2 = migrate(JSON.parse(JSON.stringify(G)));
+          const r = doTrade3(g2, moves);
+          if (r.ok) {
+            setG(g2); setOutPlayers({ [G.userTeam]: [], [teamB]: [], [teamC]: [] });
+            setOutPicks({ [G.userTeam]: [], [teamB]: [], [teamC]: [] }); setDest({});
+            notify("Three-way trade completed.");
+          } else notify(r.why);
+        }}>Propose</button>
+      </div>
+    </div>
+  );
+}
+
 function TradeTab({ G, setG, notify, openPlayer }) {
   const [other, setOther] = useState(G.userTeam === 0 ? 1 : 0);
+  const [third, setThird] = useState(null);
   const [mine, setMine] = useState([]);
   const [theirs, setTheirs] = useState([]);
   const [myPicks, setMyPicks] = useState([]);
@@ -11626,15 +11833,40 @@ function TradeTab({ G, setG, notify, openPlayer }) {
       ) : null}
       <div className="flex gap-2 flex-wrap items-center">
         <select className={inputCls} value={other}
-          onChange={(e) => { setOther(+e.target.value); setTheirs([]); setTheirPicks([]); }}>
+          onChange={(e) => {
+            const v = +e.target.value;
+            setOther(v); setTheirs([]); setTheirPicks([]);
+            if (third === v) setThird(null);
+          }}>
           {G.teams.filter((t) => t.id !== G.userTeam).map((t) => (
             <option key={t.id} value={t.id}>{t.city} {t.name} — ${capSpace(G, t.id)}M space</option>
           ))}
         </select>
         {daysToDeadline(G) != null && daysToDeadline(G) > 0
           ? <span className="text-xs text-amber-300">{daysToDeadline(G)} days to the deadline</span> : null}
+        <div className="flex-1" />
+        {third == null ? (
+          <button className={btnGhost}
+            onClick={() => setThird(G.teams.find((t) => t.id !== G.userTeam && t.id !== other).id)}>
+            + bring in a third club
+          </button>
+        ) : (
+          <>
+            <span className="text-slate-400 text-sm">and</span>
+            <select className={inputCls} value={third} onChange={(e) => setThird(+e.target.value)}>
+              {G.teams.filter((t) => t.id !== G.userTeam && t.id !== other).map((t) => (
+                <option key={t.id} value={t.id}>{t.city} {t.name}</option>
+              ))}
+            </select>
+          </>
+        )}
       </div>
 
+      {third != null ? (
+        <ThreeWayTrade G={G} setG={setG} notify={notify} openPlayer={openPlayer}
+          teamB={other} teamC={third} onCancel={() => setThird(null)} />
+      ) : (
+      <>
       {(G.offers || []).length ? (
         <Section title={`Offers for your listed players (${G.offers.length})`}>
           <div className="max-h-72 overflow-y-auto">
@@ -11811,6 +12043,8 @@ function TradeTab({ G, setG, notify, openPlayer }) {
           } else notify(r.why);
         }}>Propose</button>
       </div>
+      </>
+      )}
     </div>
   );
 }

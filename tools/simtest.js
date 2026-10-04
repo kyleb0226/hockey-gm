@@ -91,6 +91,7 @@ const EXPORTS = [
   "MARKETS", "relocationOptions", "relocate", "sweaterOf", "sweaterMap", "NAMES", "fullName",
   "COACH_FIRST", "COACH_LAST",
   "brokerFee", "brokerCandidates", "brokerTrade", "BROKER_FEE_RATE",
+  "evalTrade3", "doTrade3",
   "PULL_TIMINGS", "pullTiming",
   "PRESSERS", "pickPresser", "answerPresser", "fanMood", "moveFans", "PRESSER_COOLDOWN",
   "POINT_STREAK_NEWS", "WIN_STREAK_NEWS",
@@ -4062,6 +4063,86 @@ const CHECKS = {
     ok(A.capHit(G, help.teamId) > 0, "which is to say he is really paying it");
     const owner = G.picks.find((x) => x.year === pay.year && x.round === pay.round && x.orig === pay.orig);
     ok(owner.owner === help.teamId, "and he's been paid his pick");
+  },
+
+  /* A real three-way: players and picks going in all three directions, not a
+     two-club trade with a cap dump bolted on. */
+  threeWay(A) {
+    section("Three clubs, not two");
+    const G = A.newGame(0, { seed: 913, rules: { seasonLen: 41 } });
+    const user = G.userTeam;
+    const teamB = (user + 1) % 32;
+    const teamC = (user + 2) % 32;
+    // tradeValue, not ovr — a low-rated prospect can be worth more than a
+    // mediocre veteran once his ceiling counts, so sort on the real number.
+    const sorted = (tid) => A.rosterOf(G, tid, true).filter((p) => !A.hasNtc(p))
+      .sort((a, b) => A.tradeValue(G, b) - A.tradeValue(G, a));
+    const rU = sorted(user), rB = sorted(teamB), rC = sorted(teamC);
+    const x = rU[0], y = rB[Math.floor(rB.length / 2)], z = rC[rC.length - 1];
+    ok(A.tradeValue(G, x) >= A.tradeValue(G, y) && A.tradeValue(G, y) >= A.tradeValue(G, z),
+      "picked a cycle that only gets cheaper (the user asks for nothing back)");
+
+    const fair = [
+      { from: user, to: teamB, players: [x.id], picks: [] },
+      { from: teamB, to: teamC, players: [y.id], picks: [] },
+      { from: teamC, to: user, players: [z.id], picks: [] },
+    ];
+    const twoClub = [
+      { from: user, to: teamB, players: [x.id], picks: [] },
+      { from: teamB, to: user, players: [y.id], picks: [] },
+    ];
+    ok(!A.evalTrade3(G, []).ok, "an empty deal is refused");
+    ok(!A.evalTrade3(G, twoClub).ok, "two legs touching only two clubs is refused");
+    ok(/three clubs/.test(A.evalTrade3(G, twoClub).why), "...and says why");
+    ok(!A.evalTrade3(G, [{ from: user, to: user, players: [], picks: [] }]).ok, "a club can't trade with itself");
+
+    const ev = A.evalTrade3(G, fair);
+    ok(ev.ok, `each club comes away ahead, so it goes through (${ev.why})`);
+
+    section("It can still say no");
+    const unfair = [
+      { from: user, to: teamB, players: [z.id], picks: [] },
+      { from: teamB, to: teamC, players: [x.id], picks: [] },
+      { from: teamC, to: user, players: [y.id], picks: [] },
+    ];
+    ok(!A.evalTrade3(G, unfair).ok, "a club asked to give up more than it gets says no");
+    const bogus = [{ from: user, to: teamB, players: [z.id], picks: [] }, fair[1], fair[2]];
+    ok(!A.evalTrade3(G, bogus).ok, "a player not on that roster is refused");
+    const ntc = A.playersOf(G).find((p) => p.teamId === teamB && A.hasNtc(p));
+    if (ntc) {
+      const blocked = [{ from: teamB, to: teamC, players: [ntc.id], picks: [] },
+        { from: teamC, to: user, players: [z.id], picks: [] }, { from: user, to: teamB, players: [x.id], picks: [] }];
+      ok(!A.evalTrade3(G, blocked).ok, "a no-trade clause stops it in a three-way too");
+    }
+
+    section("Doing it");
+    const r = A.doTrade3(G, fair);
+    ok(r.ok, `the real thing goes through (${r.why || "done"})`);
+    ok(G.players[x.id].teamId === teamB, "the user's piece lands on B");
+    ok(G.players[y.id].teamId === teamC, "B's piece lands on C");
+    ok(G.players[z.id].teamId === user, "and C's piece comes back to the user");
+    // The AI sides stay invalidated until next used; the user's own gets
+    // rebuilt immediately so `lineupChangeNote` can report what moved.
+    ok(G.teams[teamB].lines === null && G.teams[teamC].lines === null,
+      "the two AI lineups are invalidated");
+    ok(G.teams[user].lines != null, "and the user's own is rebuilt right away, to report the reshuffle");
+    ok(G.news[0].text.includes("Three-way"), "and it says so in the news");
+
+    section("Picks move too");
+    const G2 = A.newGame(0, { seed: 913, rules: { seasonLen: 41 } });
+    const pk1 = A.tradablePicks(G2, G2.userTeam)[0];
+    const pk2 = A.tradablePicks(G2, G2.userTeam)[1];
+    const give = [
+      { from: G2.userTeam, to: teamB, players: [], picks: pk1 ? [pk1] : [] },
+      { from: G2.userTeam, to: teamC, players: [], picks: pk2 ? [pk2] : [] },
+    ];
+    if (pk1 && pk2) {
+      const r2 = A.doTrade3(G2, give);
+      ok(r2.ok, "a club can send picks to both of the other two in one deal");
+      const own1 = G2.picks.find((p) => p.year === pk1.year && p.round === pk1.round && p.orig === pk1.orig);
+      const own2 = G2.picks.find((p) => p.year === pk2.year && p.round === pk2.round && p.orig === pk2.orig);
+      ok(own1.owner === teamB && own2.owner === teamC, "each pick lands with the club it was sent to");
+    }
   },
 
   /* The two contract shapes that cost a club something other than money. */
