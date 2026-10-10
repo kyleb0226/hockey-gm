@@ -1,3 +1,5 @@
+> **⚠️ Obsolete — moved.** This game now lives in [`pocket-gm-hub/hockey/`](https://github.com/kyleb0226/pocket-gm-hub/tree/main/hockey), with this repo's full history, as part of the single Pocket GM app. Don't edit here.
+
 # Pocket GM — Hockey
 
 Single-file React hockey-manager game (sibling of `~/soccer-gm` and `~/baseball-gm`). You run a
